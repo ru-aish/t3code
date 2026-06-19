@@ -911,13 +911,9 @@ export interface DesktopBridge {
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
-  getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
-  setSavedEnvironmentRegistry: (
-    records: readonly PersistedSavedEnvironmentRecord[],
-  ) => Promise<void>;
-  getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
-  setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
-  removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
+  getConnectionCatalog?: () => Promise<string | null>;
+  setConnectionCatalog?: (catalog: string) => Promise<boolean>;
+  clearConnectionCatalog?: () => Promise<void>;
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
@@ -1061,13 +1057,6 @@ export interface LocalApi {
   persistence: {
     getClientSettings: () => Promise<ClientSettings | null>;
     setClientSettings: (settings: ClientSettings) => Promise<void>;
-    getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
-    setSavedEnvironmentRegistry: (
-      records: readonly PersistedSavedEnvironmentRecord[],
-    ) => Promise<void>;
-    getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
-    setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
-    removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
   };
   server: {
     getConfig: () => Promise<ServerConfig>;
