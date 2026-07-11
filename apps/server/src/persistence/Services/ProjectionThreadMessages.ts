@@ -8,14 +8,16 @@
  */
 import {
   ChatAttachment,
-  OrchestrationMessageRole,
   MessageId,
+  OrchestrationMessageRole,
   ThreadId,
   TurnId,
   IsoDateTime,
 } from "@t3tools/contracts";
-import { Schema, ServiceMap } from "effect";
-import type { Effect } from "effect";
+import * as Schema from "effect/Schema";
+import * as Context from "effect/Context";
+import type * as Option from "effect/Option";
+import type * as Effect from "effect/Effect";
 
 import type { ProjectionRepositoryError } from "../Errors.ts";
 
@@ -37,6 +39,11 @@ export const ListProjectionThreadMessagesInput = Schema.Struct({
 });
 export type ListProjectionThreadMessagesInput = typeof ListProjectionThreadMessagesInput.Type;
 
+export const GetProjectionThreadMessageInput = Schema.Struct({
+  messageId: MessageId,
+});
+export type GetProjectionThreadMessageInput = typeof GetProjectionThreadMessageInput.Type;
+
 export const DeleteProjectionThreadMessagesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -54,6 +61,13 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly upsert: (
     message: ProjectionThreadMessage,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Read a projected thread message by id.
+   */
+  readonly getByMessageId: (
+    input: GetProjectionThreadMessageInput,
+  ) => Effect.Effect<Option.Option<ProjectionThreadMessage>, ProjectionRepositoryError>;
 
   /**
    * List projected thread messages for a thread.
@@ -75,7 +89,7 @@ export interface ProjectionThreadMessageRepositoryShape {
 /**
  * ProjectionThreadMessageRepository - Service tag for message projection persistence.
  */
-export class ProjectionThreadMessageRepository extends ServiceMap.Service<
+export class ProjectionThreadMessageRepository extends Context.Service<
   ProjectionThreadMessageRepository,
   ProjectionThreadMessageRepositoryShape
 >()("t3/persistence/Services/ProjectionThreadMessages/ProjectionThreadMessageRepository") {}

@@ -1,13 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
+import {
+  projectScriptCwd,
+  projectScriptRuntimeEnv,
+  setupProjectScript,
+} from "@t3tools/shared/projectScripts";
 
 import {
   commandForProjectScript,
   nextProjectScriptId,
   primaryProjectScript,
-  projectScriptCwd,
-  projectScriptRuntimeEnv,
   projectScriptIdFromCommand,
-  setupProjectScript,
 } from "./projectScripts";
 
 describe("projectScripts helpers", () => {

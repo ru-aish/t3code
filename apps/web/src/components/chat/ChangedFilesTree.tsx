@@ -1,11 +1,84 @@
 import { type TurnId } from "@t3tools/contracts";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { type TurnDiffFileChange } from "../../types";
-import { buildTurnDiffTree, type TurnDiffTreeNode } from "../../lib/turnDiffTree";
+import {
+  buildTurnDiffTree,
+  summarizeTurnDiffStats,
+  type TurnDiffTreeNode,
+} from "../../lib/turnDiffTree";
 import { ChevronRightIcon, FolderIcon, FolderClosedIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
-import { VscodeEntryIcon } from "./VscodeEntryIcon";
+import { PierreEntryIcon } from "./PierreEntryIcon";
+import { Button } from "../ui/button";
+
+const EMPTY_DIRECTORY_OVERRIDES: Record<string, boolean> = {};
+
+export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
+  turnId: TurnId;
+  files: ReadonlyArray<TurnDiffFileChange>;
+  allDirectoriesExpanded: boolean;
+  resolvedTheme: "light" | "dark";
+  onToggleAllDirectories: () => void;
+  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+}) {
+  const {
+    turnId,
+    files,
+    allDirectoriesExpanded,
+    resolvedTheme,
+    onToggleAllDirectories,
+    onOpenTurnDiff,
+  } = props;
+  const summaryStat = useMemo(() => summarizeTurnDiffStats(files), [files]);
+
+  return (
+    <div className="relative mt-4 rounded-2xl bg-card/40 shadow-xs/5 not-dark:bg-clip-padding after:pointer-events-none after:absolute after:inset-0 after:z-20 after:rounded-2xl after:border after:border-input">
+      <div className="sticky top-0 z-10 mb-3 flex items-center justify-between gap-2 rounded-t-2xl bg-card/72 p-3 backdrop-blur-md">
+        <p className="flex items-center gap-1 font-medium text-foreground text-xs leading-4">
+          <span>{files.length} changed files</span>
+          {hasNonZeroStat(summaryStat) && (
+            <DiffStatLabel
+              additions={summaryStat.additions}
+              className="text-xs leading-4"
+              deletions={summaryStat.deletions}
+              layout="inline"
+            />
+          )}
+        </p>
+        <div className="flex items-center gap-1.5">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            data-scroll-anchor-ignore
+            onClick={onToggleAllDirectories}
+          >
+            {allDirectoriesExpanded ? "Collapse all" : "Expand all"}
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => onOpenTurnDiff(turnId, files[0]?.path)}
+          >
+            View diff
+          </Button>
+        </div>
+      </div>
+      <div className="px-2 pb-2">
+        <ChangedFilesTree
+          key={`changed-files-tree:${turnId}`}
+          turnId={turnId}
+          files={files}
+          allDirectoriesExpanded={allDirectoriesExpanded}
+          resolvedTheme={resolvedTheme}
+          onOpenTurnDiff={onOpenTurnDiff}
+        />
+      </div>
+    </div>
+  );
+});
 
 export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   turnId: TurnId;
@@ -20,40 +93,48 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
     () => collectDirectoryPaths(treeNodes).join("\u0000"),
     [treeNodes],
   );
-  const allDirectoryExpansionState = useMemo(
-    () =>
-      buildDirectoryExpansionState(
-        directoryPathsKey ? directoryPathsKey.split("\u0000") : [],
-        allDirectoriesExpanded,
-      ),
-    [allDirectoriesExpanded, directoryPathsKey],
-  );
-  const [expandedDirectories, setExpandedDirectories] = useState<Record<string, boolean>>(() =>
-    buildDirectoryExpansionState(directoryPathsKey ? directoryPathsKey.split("\u0000") : [], true),
-  );
-  useEffect(() => {
-    setExpandedDirectories(allDirectoryExpansionState);
-  }, [allDirectoryExpansionState]);
+  const hasDirectoryNodes = directoryPathsKey.length > 0;
+  const expansionStateKey = `${allDirectoriesExpanded ? "expanded" : "collapsed"}\u0000${directoryPathsKey}`;
+  const [directoryExpansionState, setDirectoryExpansionState] = useState<{
+    key: string;
+    overrides: Record<string, boolean>;
+  }>(() => ({
+    key: expansionStateKey,
+    overrides: {},
+  }));
+  const expandedDirectories =
+    directoryExpansionState.key === expansionStateKey
+      ? directoryExpansionState.overrides
+      : EMPTY_DIRECTORY_OVERRIDES;
 
-  const toggleDirectory = useCallback((pathValue: string, fallbackExpanded: boolean) => {
-    setExpandedDirectories((current) => ({
-      ...current,
-      [pathValue]: !(current[pathValue] ?? fallbackExpanded),
-    }));
-  }, []);
+  const toggleDirectory = useCallback(
+    (pathValue: string) => {
+      setDirectoryExpansionState((current) => {
+        const nextOverrides = current.key === expansionStateKey ? current.overrides : {};
+        return {
+          key: expansionStateKey,
+          overrides: {
+            ...nextOverrides,
+            [pathValue]: !(nextOverrides[pathValue] ?? allDirectoriesExpanded),
+          },
+        };
+      });
+    },
+    [allDirectoriesExpanded, expansionStateKey],
+  );
 
   const renderTreeNode = (node: TurnDiffTreeNode, depth: number) => {
     const leftPadding = 8 + depth * 14;
     if (node.kind === "directory") {
-      const isExpanded = expandedDirectories[node.path] ?? depth === 0;
+      const isExpanded = expandedDirectories[node.path] ?? allDirectoriesExpanded;
       return (
         <div key={`dir:${node.path}`}>
           <button
             type="button"
             data-scroll-anchor-ignore
-            className="group flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left hover:bg-background/80"
+            className="group flex w-full items-center gap-1.5 rounded-xl py-1 pr-3 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
             style={{ paddingLeft: `${leftPadding}px` }}
-            onClick={() => toggleDirectory(node.path, depth === 0)}
+            onClick={() => toggleDirectory(node.path)}
           >
             <ChevronRightIcon
               aria-hidden="true"
@@ -89,12 +170,14 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
       <button
         key={`file:${node.path}`}
         type="button"
-        className="group flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left hover:bg-background/80"
+        className="group flex w-full items-center gap-1.5 rounded-xl py-1 pr-3 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
         style={{ paddingLeft: `${leftPadding}px` }}
         onClick={() => onOpenTurnDiff(turnId, node.path)}
       >
-        <span aria-hidden="true" className="size-3.5 shrink-0" />
-        <VscodeEntryIcon
+        {hasDirectoryNodes || depth > 0 ? (
+          <span aria-hidden="true" className="size-3.5 shrink-0" />
+        ) : null}
+        <PierreEntryIcon
           pathValue={node.path}
           kind="file"
           theme={resolvedTheme}
@@ -123,15 +206,4 @@ function collectDirectoryPaths(nodes: ReadonlyArray<TurnDiffTreeNode>): string[]
     paths.push(...collectDirectoryPaths(node.children));
   }
   return paths;
-}
-
-function buildDirectoryExpansionState(
-  directoryPaths: ReadonlyArray<string>,
-  expanded: boolean,
-): Record<string, boolean> {
-  const expandedState: Record<string, boolean> = {};
-  for (const directoryPath of directoryPaths) {
-    expandedState[directoryPath] = expanded;
-  }
-  return expandedState;
 }

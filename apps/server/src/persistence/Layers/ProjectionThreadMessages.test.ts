@@ -1,6 +1,7 @@
 import { MessageId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 import { ProjectionThreadMessageRepository } from "../Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadMessageRepositoryLive } from "./ProjectionThreadMessages.ts";
@@ -14,8 +15,8 @@ layer("ProjectionThreadMessageRepository", (it) => {
   it.effect("preserves existing attachments when upsert omits attachments", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionThreadMessageRepository;
-      const threadId = ThreadId.makeUnsafe("thread-preserve-attachments");
-      const messageId = MessageId.makeUnsafe("message-preserve-attachments");
+      const threadId = ThreadId.make("thread-preserve-attachments");
+      const messageId = MessageId.make("message-preserve-attachments");
       const createdAt = "2026-02-28T19:00:00.000Z";
       const updatedAt = "2026-02-28T19:00:01.000Z";
       const persistedAttachments = [
@@ -55,14 +56,21 @@ layer("ProjectionThreadMessageRepository", (it) => {
       assert.equal(rows.length, 1);
       assert.equal(rows[0]?.text, "updated");
       assert.deepEqual(rows[0]?.attachments, persistedAttachments);
+
+      const rowById = yield* repository.getByMessageId({ messageId });
+      assert.equal(rowById._tag, "Some");
+      if (rowById._tag === "Some") {
+        assert.equal(rowById.value.text, "updated");
+        assert.deepEqual(rowById.value.attachments, persistedAttachments);
+      }
     }),
   );
 
   it.effect("allows explicit attachment clearing with an empty array", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionThreadMessageRepository;
-      const threadId = ThreadId.makeUnsafe("thread-clear-attachments");
-      const messageId = MessageId.makeUnsafe("message-clear-attachments");
+      const threadId = ThreadId.make("thread-clear-attachments");
+      const messageId = MessageId.make("message-clear-attachments");
       const createdAt = "2026-02-28T19:10:00.000Z";
 
       yield* repository.upsert({

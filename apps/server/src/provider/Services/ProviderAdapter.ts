@@ -10,7 +10,7 @@
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
-  ProviderKind,
+  ProviderDriverKind,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -20,10 +20,10 @@ import type {
   ProviderTurnStartResult,
   TurnId,
 } from "@t3tools/contracts";
-import type { Effect } from "effect";
-import type { Stream } from "effect";
+import type * as Effect from "effect/Effect";
+import type * as Stream from "effect/Stream";
 
-export type ProviderSessionModelSwitchMode = "in-session" | "restart-session" | "unsupported";
+export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
@@ -46,7 +46,7 @@ export interface ProviderAdapterShape<TError> {
   /**
    * Provider kind implemented by this adapter.
    */
-  readonly provider: ProviderKind;
+  readonly provider: ProviderDriverKind;
   readonly capabilities: ProviderAdapterCapabilities;
 
   /**
@@ -113,6 +113,11 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
+   * Compact provider conversation context.
+   */
+  readonly compactThread: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
    * Stop all sessions owned by this adapter.
