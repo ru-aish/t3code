@@ -16,6 +16,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import type {
   CodexSettings,
   ServerProvider,
+  ServerProviderAccountUsage,
   ServerProviderState,
   ModelCapabilities,
   ProviderOptionDescriptor,
@@ -44,6 +45,8 @@ const CODEX_PRESENTATION = {
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
+  readonly rateLimits?: CodexSchema.V2GetAccountRateLimitsResponse;
+  readonly tokenUsage?: CodexSchema.V2GetAccountTokenUsageResponse;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
@@ -102,6 +105,106 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
 function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"]) {
   if (!account || account.type !== "chatgpt") return undefined;
   return account.email;
+}
+
+function normalizeCodexUsageWindow(
+  window: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow | null | undefined,
+) {
+  if (!window) return undefined;
+  return {
+    usedPercent: Math.max(0, Math.min(100, window.usedPercent)),
+    ...(window.resetsAt !== null && window.resetsAt !== undefined && window.resetsAt >= 0
+      ? { resetsAt: window.resetsAt }
+      : {}),
+    ...(window.windowDurationMins !== null &&
+    window.windowDurationMins !== undefined &&
+    window.windowDurationMins > 0
+      ? { windowDurationMins: window.windowDurationMins }
+      : {}),
+  };
+}
+
+function normalizeCodexUsageLimit(
+  limit: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot,
+): ServerProviderAccountUsage["limits"][number] | undefined {
+  const id = limit.limitId?.trim() || undefined;
+  const name = limit.limitName?.trim() || undefined;
+  const primary = normalizeCodexUsageWindow(limit.primary);
+  const secondary = normalizeCodexUsageWindow(limit.secondary);
+  const credits = limit.credits
+    ? {
+        ...(limit.credits.balance?.trim() ? { balance: limit.credits.balance.trim() } : {}),
+        hasCredits: limit.credits.hasCredits,
+        unlimited: limit.credits.unlimited,
+      }
+    : undefined;
+  const reachedType = limit.rateLimitReachedType ?? undefined;
+
+  if (!id && !name && !primary && !secondary && !credits && !reachedType) {
+    return undefined;
+  }
+
+  return {
+    ...(id ? { id } : {}),
+    ...(name ? { name } : {}),
+    ...(primary ? { primary } : {}),
+    ...(secondary ? { secondary } : {}),
+    ...(credits ? { credits } : {}),
+    ...(reachedType ? { reachedType } : {}),
+  };
+}
+
+export function normalizeCodexAccountUsage(input: {
+  readonly rateLimits?: CodexSchema.V2GetAccountRateLimitsResponse;
+  readonly tokenUsage?: CodexSchema.V2GetAccountTokenUsageResponse;
+}): ServerProviderAccountUsage | undefined {
+  const rawLimits = input.rateLimits?.rateLimitsByLimitId
+    ? Object.values(input.rateLimits.rateLimitsByLimitId)
+    : input.rateLimits
+      ? [input.rateLimits.rateLimits]
+      : [];
+  const limits = rawLimits.flatMap((limit) => {
+    const normalized = normalizeCodexUsageLimit(limit);
+    return normalized ? [normalized] : [];
+  });
+  const dailyUsageBuckets = (input.tokenUsage?.dailyUsageBuckets ?? []).map((bucket) => ({
+    startDate: bucket.startDate,
+    tokens: Math.max(0, bucket.tokens),
+  }));
+  const summary = input.tokenUsage?.summary;
+  const lifetimeTokens = summary?.lifetimeTokens ?? undefined;
+  const currentStreakDays = summary?.currentStreakDays ?? undefined;
+  const longestStreakDays = summary?.longestStreakDays ?? undefined;
+  const longestRunningTurnSec = summary?.longestRunningTurnSec ?? undefined;
+  const peakDailyTokens = summary?.peakDailyTokens ?? undefined;
+
+  if (
+    limits.length === 0 &&
+    dailyUsageBuckets.length === 0 &&
+    lifetimeTokens === undefined &&
+    currentStreakDays === undefined &&
+    longestStreakDays === undefined &&
+    longestRunningTurnSec === undefined &&
+    peakDailyTokens === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    limits,
+    dailyUsageBuckets,
+    ...(lifetimeTokens !== undefined ? { lifetimeTokens: Math.max(0, lifetimeTokens) } : {}),
+    ...(currentStreakDays !== undefined
+      ? { currentStreakDays: Math.max(0, currentStreakDays) }
+      : {}),
+    ...(longestStreakDays !== undefined
+      ? { longestStreakDays: Math.max(0, longestStreakDays) }
+      : {}),
+    ...(longestRunningTurnSec !== undefined
+      ? { longestRunningTurnSec: Math.max(0, longestRunningTurnSec) }
+      : {}),
+    ...(peakDailyTokens !== undefined ? { peakDailyTokens: Math.max(0, peakDailyTokens) } : {}),
+  };
 }
 
 export function mapCodexModelCapabilities(
@@ -355,18 +458,36 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
-  const [skillsResponse, models] = yield* Effect.all(
+  const accountUsageRequest =
+    accountResponse.account?.type === "chatgpt"
+      ? Effect.all(
+          {
+            rateLimits: client
+              .request("account/rateLimits/read", undefined)
+              .pipe(Effect.option, Effect.map(Option.getOrUndefined)),
+            tokenUsage: client
+              .request("account/usage/read", undefined)
+              .pipe(Effect.option, Effect.map(Option.getOrUndefined)),
+          },
+          { concurrency: "unbounded" },
+        )
+      : Effect.succeed({ rateLimits: undefined, tokenUsage: undefined });
+
+  const [skillsResponse, models, accountUsage] = yield* Effect.all(
     [
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
       requestAllCodexModels(client),
+      accountUsageRequest,
     ],
     { concurrency: "unbounded" },
   );
 
   return {
     account: accountResponse,
+    ...(accountUsage.rateLimits ? { rateLimits: accountUsage.rateLimits } : {}),
+    ...(accountUsage.tokenUsage ? { tokenUsage: accountUsage.tokenUsage } : {}),
     version,
     models: appendCustomCodexModels(models, input.customModels ?? []),
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
@@ -550,6 +671,13 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   const snapshot = probeResult.success.value;
   const accountStatus = accountProbeStatus(snapshot.account);
+  const accountUsage =
+    snapshot.account.account?.type === "chatgpt"
+      ? normalizeCodexAccountUsage({
+          ...(snapshot.rateLimits ? { rateLimits: snapshot.rateLimits } : {}),
+          ...(snapshot.tokenUsage ? { tokenUsage: snapshot.tokenUsage } : {}),
+        })
+      : undefined;
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
@@ -562,6 +690,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       version: snapshot.version ?? null,
       status: accountStatus.status,
       auth: accountStatus.auth,
+      ...(accountUsage ? { accountUsage } : {}),
       ...(accountStatus.message ? { message: accountStatus.message } : {}),
     },
   });

@@ -43,6 +43,7 @@ import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { AntigravityAccountSection } from "./AntigravityAccountSection";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
+import { ProviderAccountUsageSection, ProviderAccountUsageSummary } from "./ProviderAccountUsage";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -403,6 +404,7 @@ export function ProviderInstanceCard({
     (liveProvider?.status as ProviderStatusKey | undefined) ?? (enabled ? "warning" : "disabled");
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
   const rawSummary = getProviderSummary(liveProvider);
+  const accountUsage = liveProvider?.accountUsage;
   const authEmail = liveProvider?.auth.email;
   const hasAuthenticatedEmail =
     liveProvider?.auth.status === "authenticated" && Boolean(authEmail?.trim());
@@ -706,6 +708,7 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {accountUsage ? <ProviderAccountUsageSummary usage={accountUsage} /> : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Button
@@ -764,6 +767,8 @@ export function ProviderInstanceCard({
                 onChange={updateEnvironment}
               />
             </div>
+
+            {accountUsage ? <ProviderAccountUsageSection usage={accountUsage} /> : null}
 
             {driverKind === "antigravity" ? (
               <AntigravityAccountSection enabled={isExpanded && enabled} />

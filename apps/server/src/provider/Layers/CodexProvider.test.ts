@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 
-import { mapCodexModelCapabilities } from "./CodexProvider.ts";
+import { mapCodexModelCapabilities, normalizeCodexAccountUsage } from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
@@ -101,4 +101,49 @@ it("uses standard routing when the catalog has no default service tier", () => {
       currentValue: "default",
     },
   ]);
+});
+
+it("normalizes Codex account limits and token usage from the authenticated app-server", () => {
+  const usage = normalizeCodexAccountUsage({
+    rateLimits: {
+      rateLimits: {
+        limitId: "codex",
+        primary: { usedPercent: 10, resetsAt: 1_783_769_853, windowDurationMins: 300 },
+        secondary: { usedPercent: 1, resetsAt: 1_784_356_653, windowDurationMins: 10_080 },
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: "codex",
+          primary: { usedPercent: 10, resetsAt: 1_783_769_853, windowDurationMins: 300 },
+          secondary: { usedPercent: 1, resetsAt: 1_784_356_653, windowDurationMins: 10_080 },
+        },
+      },
+    },
+    tokenUsage: {
+      dailyUsageBuckets: [{ startDate: "2026-07-11", tokens: 8_761_134 }],
+      summary: {
+        currentStreakDays: 4,
+        lifetimeTokens: 333_869_937,
+        longestRunningTurnSec: 4_176,
+        longestStreakDays: 9,
+        peakDailyTokens: 65_722_326,
+      },
+    },
+  });
+
+  assert.deepStrictEqual(usage, {
+    limits: [
+      {
+        id: "codex",
+        primary: { usedPercent: 10, resetsAt: 1_783_769_853, windowDurationMins: 300 },
+        secondary: { usedPercent: 1, resetsAt: 1_784_356_653, windowDurationMins: 10_080 },
+      },
+    ],
+    dailyUsageBuckets: [{ startDate: "2026-07-11", tokens: 8_761_134 }],
+    lifetimeTokens: 333_869_937,
+    currentStreakDays: 4,
+    longestStreakDays: 9,
+    longestRunningTurnSec: 4_176,
+    peakDailyTokens: 65_722_326,
+  });
 });
