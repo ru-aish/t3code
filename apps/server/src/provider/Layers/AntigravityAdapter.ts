@@ -25,11 +25,13 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { clearInterval, setInterval, setTimeout } from "node:timers";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeTimers from "node:timers";
+
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -511,10 +513,10 @@ function runAgentApiDefault(
   binaryPath: string,
   args: ReadonlyArray<string>,
   options: { readonly cwd: string; readonly env: NodeJS.ProcessEnv },
-  onChild?: (child: ReturnType<typeof execFile>) => void,
+  onChild?: (child: ReturnType<typeof NodeChildProcess.execFile>) => void,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile(binaryPath, [...args], {
+    const child = NodeChildProcess.execFile(binaryPath, [...args], {
       cwd: options.cwd,
       env: options.env,
       timeout: AGENTAPI_TIMEOUT_MS,
@@ -551,10 +553,10 @@ async function ensureAntigravityCliSettings(input: {
 }): Promise<void> {
   const { settings, cwd, modelLabel } = input;
   const settingsPath = resolveAntigravitySettingsPath(settings);
-  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await NodeFSP.mkdir(NodePath.dirname(settingsPath), { recursive: true });
   let parsed: Record<string, unknown> = {};
   try {
-    parsed = JSON.parse(await fs.readFile(settingsPath, "utf8")) as Record<string, unknown>;
+    parsed = JSON.parse(await NodeFSP.readFile(settingsPath, "utf8")) as Record<string, unknown>;
   } catch {
     parsed = {};
   }
@@ -569,7 +571,7 @@ async function ensureAntigravityCliSettings(input: {
     changed = true;
   }
   if (changed) {
-    await fs.writeFile(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+    await NodeFSP.writeFile(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
   }
 }
 
@@ -617,6 +619,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
 ): Effect.fn.Return<AntigravityAdapterShape, never, ServerConfig | Crypto.Crypto> {
   const serverConfig = yield* Effect.service(ServerConfig);
   const crypto = yield* Crypto.Crypto;
+  const platform = yield* HostProcessPlatform;
   const randomUUIDv4 = crypto.randomUUIDv4.pipe(
     Effect.mapError(
       (cause) =>
@@ -679,6 +682,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
       context.daemonEndpoint = resolveAntigravityDaemonEndpoint(
         settings,
         baseEnv,
+        platform,
         context.session.cwd ?? serverConfig.cwd,
       );
     }
@@ -770,7 +774,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
 
   const startGatePoller = (context: SessionContext): void => {
     if (!context.conversationId || context.gatePoller) return;
-    context.gatePoller = setInterval(() => {
+    context.gatePoller = NodeTimers.setInterval(() => {
       void pollGates(context);
     }, GATE_POLL_MS);
     void pollGates(context);
@@ -805,7 +809,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
       completed: true,
     };
     const cwd = context.session.cwd ?? serverConfig.cwd;
-    const env = makeAntigravityEnvironment(settings, baseEnv, cwd);
+    const env = makeAntigravityEnvironment(settings, baseEnv, platform, cwd);
     const seedPrompt = [
       "<T3_CONTEXT_CHECKPOINT>",
       "Continue this conversation from the compacted handoff summary below. Do not repeat the summary unless the user asks.",
@@ -833,7 +837,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
     context.toolCallStepIndexes.clear();
     context.pendingCompaction = undefined;
     if (context.poller) {
-      clearInterval(context.poller);
+      NodeTimers.clearInterval(context.poller);
       context.poller = undefined;
     }
     startTranscriptPoller(context);
@@ -859,7 +863,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
   // Reopen a turn so resumed output is framed and the session reflects that
   // the agent is running again instead of staying stuck in the stopped state.
   const reopenTurn = (context: SessionContext): void => {
-    const turnId = TurnId.make(`antigravity-turn-${randomUUID()}`);
+    const turnId = TurnId.make(`antigravity-turn-${NodeCrypto.randomUUID()}`);
     const updatedAt = context.session.updatedAt;
     context.activeTurnId = turnId;
     context.session = {
@@ -891,7 +895,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
     const poll = async () => {
       if (context.stopped) return;
       try {
-        const stat = await fs.stat(transcriptPath);
+        const stat = await NodeFSP.stat(transcriptPath);
         if (stat.size < context.pollOffset) {
           context.pollOffset = 0;
           context.pollCarry = "";
@@ -899,7 +903,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
           context.toolCallStepIndexes.clear();
         }
         if (stat.size === context.pollOffset) return;
-        const handle = await fs.open(transcriptPath, "r");
+        const handle = await NodeFSP.open(transcriptPath, "r");
         try {
           const length = stat.size - context.pollOffset;
           const buffer = Buffer.alloc(length);
@@ -1004,7 +1008,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
         });
       }
     };
-    context.poller = setInterval(() => {
+    context.poller = NodeTimers.setInterval(() => {
       void poll();
     }, TRANSCRIPT_POLL_MS);
     void poll();
@@ -1084,7 +1088,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
 
       const cwd = context.session.cwd ?? serverConfig.cwd;
       const modelLabel = resolveAntigravityModelLabel(input.modelSelection);
-      const env = makeAntigravityEnvironment(settings, baseEnv, cwd);
+      const env = makeAntigravityEnvironment(settings, baseEnv, platform, cwd);
       yield* Effect.tryPromise({
         try: () =>
           ensureAntigravityCliSettings({
@@ -1152,7 +1156,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
                     return;
                   }
                   child.kill("SIGTERM");
-                  setTimeout(() => {
+                  NodeTimers.setTimeout(() => {
                     if (child.exitCode === null && !child.killed) {
                       child.kill("SIGKILL");
                     }
@@ -1413,8 +1417,8 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
     context.stopped = true;
     context.agentApiCancel?.();
     context.agentApiCancel = undefined;
-    if (context.poller) clearInterval(context.poller);
-    if (context.gatePoller) clearInterval(context.gatePoller);
+    if (context.poller) NodeTimers.clearInterval(context.poller);
+    if (context.gatePoller) NodeTimers.clearInterval(context.gatePoller);
     context.session = { ...context.session, status: "closed", updatedAt };
     yield* Ref.update(sessionsRef, (sessions) => {
       const next = new Map(sessions);

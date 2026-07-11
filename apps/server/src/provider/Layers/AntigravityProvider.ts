@@ -7,6 +7,7 @@ import {
   ProviderDriverKind,
   type ServerProviderModel,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { createModelCapabilities, getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -23,10 +24,10 @@ import {
   spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
-import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, readlinkSync } from "node:fs";
-import * as nodePath from "node:path";
-import { fileURLToPath } from "node:url";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
 const PROVIDER = ProviderDriverKind.make("antigravity");
 const ANTIGRAVITY_PRESENTATION = {
@@ -245,7 +246,7 @@ function readAntigravityConfiguredModelLabels(
 
   try {
     const parsed = JSON.parse(
-      readFileSync(resolveAntigravitySettingsPath(settings), "utf8"),
+      NodeFS.readFileSync(resolveAntigravitySettingsPath(settings), "utf8"),
     ) as unknown;
     const model =
       parsed && typeof parsed === "object"
@@ -257,11 +258,11 @@ function readAntigravityConfiguredModelLabels(
   }
 
   try {
-    const logDir = nodePath.join(nodePath.dirname(resolveAntigravitySettingsPath(settings)), "log");
-    for (const entry of readdirSync(logDir)
+    const logDir = NodePath.join(NodePath.dirname(resolveAntigravitySettingsPath(settings)), "log");
+    for (const entry of NodeFS.readdirSync(logDir)
       .filter((name) => name.endsWith(".log"))
       .slice(-20)) {
-      const contents = readFileSync(nodePath.join(logDir, entry), "utf8");
+      const contents = NodeFS.readFileSync(NodePath.join(logDir, entry), "utf8");
       for (const match of contents.matchAll(/label="([^"]+)"/g)) {
         if (match[1]) labels.push(match[1]);
       }
@@ -379,7 +380,7 @@ export function parseLinuxTcpListenPortsForInodes(
 
 function readProcCmdline(pid: string): ReadonlyArray<string> {
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+    return NodeFS.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
   } catch {
     return [];
   }
@@ -388,8 +389,8 @@ function readProcCmdline(pid: string): ReadonlyArray<string> {
 function readSocketInodesForPid(pid: string): ReadonlySet<string> {
   const inodes = new Set<string>();
   try {
-    for (const fd of readdirSync(`/proc/${pid}/fd`)) {
-      const target = readlinkSync(`/proc/${pid}/fd/${fd}`);
+    for (const fd of NodeFS.readdirSync(`/proc/${pid}/fd`)) {
+      const target = NodeFS.readlinkSync(`/proc/${pid}/fd/${fd}`);
       const match = /^socket:\[(\d+)\]$/.exec(target);
       if (match?.[1]) {
         inodes.add(match[1]);
@@ -411,7 +412,7 @@ function readListenPortsForPid(pid: string): ReadonlyArray<number> {
   for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     try {
       for (const port of parseLinuxTcpListenPortsForInodes(
-        readFileSync(table, "utf8"),
+        NodeFS.readFileSync(table, "utf8"),
         socketInodes,
       )) {
         ports.add(port);
@@ -429,16 +430,22 @@ function isUsableAntigravityDaemonCandidate(input: {
   readonly candidate: AntigravityDaemonCandidate;
 }): boolean {
   try {
-    const output = execFileSync(input.binaryPath, ["get-conversation-metadata", "__t3_probe__"], {
-      env: {
-        ...input.environment,
-        ANTIGRAVITY_LS_ADDRESS: input.candidate.address,
-        ...(input.candidate.csrfToken ? { ANTIGRAVITY_CSRF_TOKEN: input.candidate.csrfToken } : {}),
+    const output = NodeChildProcess.execFileSync(
+      input.binaryPath,
+      ["get-conversation-metadata", "__t3_probe__"],
+      {
+        env: {
+          ...input.environment,
+          ANTIGRAVITY_LS_ADDRESS: input.candidate.address,
+          ...(input.candidate.csrfToken
+            ? { ANTIGRAVITY_CSRF_TOKEN: input.candidate.csrfToken }
+            : {}),
+        },
+        timeout: 2_000,
+        windowsHide: true,
+        encoding: "utf8",
       },
-      timeout: 2_000,
-      windowsHide: true,
-      encoding: "utf8",
-    });
+    );
     return output.includes("trajectory not found: __t3_probe__");
   } catch (cause) {
     const output =
@@ -455,7 +462,8 @@ function isUsableAntigravityDaemonCandidate(input: {
 
 export function detectAntigravityDaemonEnvironment(
   binaryPath: string,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
 ): Partial<Pick<NodeJS.ProcessEnv, "ANTIGRAVITY_LS_ADDRESS" | "ANTIGRAVITY_CSRF_TOKEN">> {
   if (environment.ANTIGRAVITY_LS_ADDRESS) {
     return {
@@ -466,12 +474,12 @@ export function detectAntigravityDaemonEnvironment(
     };
   }
 
-  if (process.platform !== "linux") {
+  if (platform !== "linux") {
     return {};
   }
 
   const candidates: Array<AntigravityDaemonCandidate> = [];
-  for (const pid of readdirSync("/proc").filter((entry) => /^\d+$/.test(entry))) {
+  for (const pid of NodeFS.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry))) {
     const processInfo = parseAntigravityLanguageServerCmdline(readProcCmdline(pid));
     if (!processInfo) {
       continue;
@@ -521,25 +529,27 @@ function projectResourceFolder(resource: unknown): string | undefined {
 
 function fileUriToPath(uri: string): string | undefined {
   try {
-    return fileURLToPath(uri);
+    return NodeURL.fileURLToPath(uri);
   } catch {
     return undefined;
   }
 }
 
-export function detectAntigravityProjectIdForCwd(cwd: string): string | undefined {
-  const projectsPath = expandHomePath(DEFAULT_ANTIGRAVITY_PROJECTS_PATH);
-  const normalizedCwd = nodePath.resolve(cwd);
+export function detectAntigravityProjectIdForCwd(
+  cwd: string,
+  projectsPath = expandHomePath(DEFAULT_ANTIGRAVITY_PROJECTS_PATH),
+): string | undefined {
+  const normalizedCwd = NodePath.resolve(cwd);
   const matches: Array<{ readonly projectId: string; readonly folder: string }> = [];
 
   try {
-    for (const entry of readdirSync(projectsPath)) {
+    for (const entry of NodeFS.readdirSync(projectsPath)) {
       if (!entry.endsWith(".json")) {
         continue;
       }
 
       const parsed = JSON.parse(
-        readFileSync(nodePath.join(projectsPath, entry), "utf8"),
+        NodeFS.readFileSync(NodePath.join(projectsPath, entry), "utf8"),
       ) as unknown;
       if (!parsed || typeof parsed !== "object") {
         continue;
@@ -566,10 +576,10 @@ export function detectAntigravityProjectIdForCwd(cwd: string): string | undefine
           continue;
         }
 
-        const normalizedFolder = nodePath.resolve(folder);
+        const normalizedFolder = NodePath.resolve(folder);
         if (
           normalizedCwd === normalizedFolder ||
-          normalizedCwd.startsWith(`${normalizedFolder}${nodePath.sep}`)
+          normalizedCwd.startsWith(`${normalizedFolder}${NodePath.sep}`)
         ) {
           matches.push({ projectId, folder: normalizedFolder });
         }
@@ -584,12 +594,14 @@ export function detectAntigravityProjectIdForCwd(cwd: string): string | undefine
 
 export function makeAntigravityEnvironment(
   settings: AntigravitySettings,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
   cwd?: string,
 ): NodeJS.ProcessEnv {
   const detected = detectAntigravityDaemonEnvironment(
     resolveAntigravityAgentApiPath(settings),
     environment,
+    platform,
   );
   const projectId =
     environment.ANTIGRAVITY_PROJECT_ID ?? (cwd ? detectAntigravityProjectIdForCwd(cwd) : undefined);
@@ -618,10 +630,11 @@ export interface AntigravityDaemonEndpoint {
 
 export function resolveAntigravityDaemonEndpoint(
   settings: AntigravitySettings,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
   cwd?: string,
 ): AntigravityDaemonEndpoint | undefined {
-  const env = makeAntigravityEnvironment(settings, environment, cwd);
+  const env = makeAntigravityEnvironment(settings, environment, platform, cwd);
   return env.ANTIGRAVITY_LS_ADDRESS
     ? { address: env.ANTIGRAVITY_LS_ADDRESS, csrfToken: env.ANTIGRAVITY_CSRF_TOKEN }
     : undefined;
@@ -656,11 +669,12 @@ export const checkAntigravityProviderStatus = Effect.fn("checkAntigravityProvide
     environment: NodeJS.ProcessEnv = process.env,
   ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const platform = yield* HostProcessPlatform;
     const binaryPath = resolveAntigravityAgentApiPath(settings);
-    const env = makeAntigravityEnvironment(settings, environment);
+    const env = makeAntigravityEnvironment(settings, environment, platform);
     const command = ChildProcess.make(binaryPath, ["get-conversation-metadata", "__t3_probe__"], {
       env,
-      shell: process.platform === "win32",
+      shell: platform === "win32",
     });
 
     const result = yield* spawnAndCollect(binaryPath, command).pipe(

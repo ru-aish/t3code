@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
 import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
@@ -222,9 +223,8 @@ const copyPathRecursive = Effect.fn("AntigravityAccountStore.copyPathRecursive")
 
 const removePathRecursive = Effect.fn("AntigravityAccountStore.removePathRecursive")(function* (
   targetPath: string,
-): Effect.fn.Return<void, AntigravityAccountError, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<void, AntigravityAccountError, FileSystem.FileSystem> {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
   const exists = yield* pathExists(targetPath);
   if (!exists) {
     return;
@@ -383,7 +383,8 @@ const fetchAuthStatus = Effect.fn("AntigravityAccountStore.fetchAuthStatus")(fun
   settings: AntigravitySettings,
 ): Effect.fn.Return<{ readonly authenticated: boolean; readonly email?: string }, never, never> {
   const binaryPath = resolveAntigravityAgentApiPath(settings);
-  const detected = detectAntigravityDaemonEnvironment(binaryPath, process.env);
+  const platform = yield* HostProcessPlatform;
+  const detected = detectAntigravityDaemonEnvironment(binaryPath, process.env, platform);
   const address = detected.ANTIGRAVITY_LS_ADDRESS;
   if (!address) {
     return { authenticated: false };

@@ -36,7 +36,8 @@ export function useAntigravityAccounts(enabled: boolean): AntigravityAccountsSta
       setRegistry(result.registry);
       setDetection(result.detection);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "Failed to load Antigravity accounts.";
+      const message =
+        cause instanceof Error ? cause.message : "Failed to load Antigravity accounts.";
       setError(message);
     } finally {
       setIsLoading(false);
@@ -54,9 +55,10 @@ export function useAntigravityAccounts(enabled: boolean): AntigravityAccountsSta
   }, [enabled, refresh]);
 
   const saveAccount = useCallback(async (label?: string) => {
-    const next = await ensureLocalApi().antigravity.saveAccount({
-      ...(label?.trim() ? { label: label.trim() } : {}),
-    });
+    const normalizedLabel = label?.trim();
+    const next = await ensureLocalApi().antigravity.saveAccount(
+      normalizedLabel ? { label: normalizedLabel } : {},
+    );
     setRegistry(next);
     const refreshed = await ensureLocalApi().antigravity.listAccounts();
     setDetection(refreshed.detection);

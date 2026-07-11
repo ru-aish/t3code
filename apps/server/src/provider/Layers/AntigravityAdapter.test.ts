@@ -9,13 +9,14 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { createServer, type IncomingMessage, type Server } from "node:http";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import type { AddressInfo } from "node:net";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeHttp from "node:http";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeTimers from "node:timers";
 
-import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../../config.ts";
+import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import {
   makeAntigravityAdapter,
   mapAntigravityTranscriptRecordToRuntimeEvents,
@@ -23,6 +24,7 @@ import {
 } from "./AntigravityAdapter.ts";
 
 const decodeAntigravitySettings = Schema.decodeSync(AntigravitySettings);
+const encodeUnknownJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const makeTestServerConfig = (baseDir: string) =>
   Effect.gen(function* () {
@@ -53,7 +55,7 @@ const makeTestServerConfig = (baseDir: string) =>
       logWebSocketEvents: false,
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
-    } satisfies ServerConfigShape;
+    } satisfies ServerConfig["Service"];
   });
 
 function diagnosticEventType(event: unknown): string {
@@ -315,81 +317,85 @@ describe("AntigravityAdapter transcript helpers", () => {
 });
 
 describe("AntigravityAdapter resumed-output turn reopen", () => {
-  it("does not duplicate list-dir planner and concrete transcript records", async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "antig-list-dedupe-"));
-    try {
-      const brainPath = join(baseDir, "brain");
+  it.effect("does not duplicate list-dir planner and concrete transcript records", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* Effect.acquireRelease(
+        Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "antig-list-dedupe-"))),
+        (directory) =>
+          Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })).pipe(
+            Effect.ignore,
+          ),
+      );
+      const brainPath = NodePath.join(baseDir, "brain");
       const conversationId = "conv-list-dedupe";
-      const transcriptPath = join(
+      const transcriptPath = NodePath.join(
         brainPath,
         conversationId,
         ".system_generated",
         "logs",
         "transcript.jsonl",
       );
-      await mkdir(dirname(transcriptPath), { recursive: true });
-      await writeFile(transcriptPath, "");
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(NodePath.dirname(transcriptPath), { recursive: true }),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(transcriptPath, ""));
 
       const settings = decodeAntigravitySettings({
         brainPath,
-        settingsPath: join(baseDir, "settings.json"),
+        settingsPath: NodePath.join(baseDir, "settings.json"),
       });
-
-      const config = await Effect.runPromise(
-        makeTestServerConfig(baseDir).pipe(Effect.provide(NodeServices.layer)),
-      );
-      const adapter = await Effect.runPromise(
-        makeAntigravityAdapter(settings, {
-          instanceId: ProviderInstanceId.make("antigravity"),
-          environment: {},
-        }).pipe(Effect.provideService(ServerConfig, config), Effect.provide(NodeServices.layer)),
-      );
+      const config = yield* makeTestServerConfig(baseDir);
+      const adapter = yield* makeAntigravityAdapter(settings, {
+        instanceId: ProviderInstanceId.make("antigravity"),
+        environment: {},
+      }).pipe(Effect.provideService(ServerConfig, config));
 
       const events: ProviderRuntimeEvent[] = [];
-      const collector = Effect.runFork(
-        Stream.runForEach(adapter.streamEvents, (event) =>
-          Effect.sync(() => {
-            events.push(event);
-          }),
-        ),
-      );
+      const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      ).pipe(Effect.forkChild);
       const threadId = ThreadId.make("thread-list-dedupe");
-      try {
-        await Effect.runPromise(
-          adapter.startSession({
-            threadId,
-            runtimeMode: "full-access",
-            cwd: baseDir,
-            resumeCursor: { conversationId },
-          }),
-        );
 
-        await appendFile(
-          transcriptPath,
-          [
-            JSON.stringify({
-              step_index: 3,
-              source: "MODEL",
-              type: "PLANNER_RESPONSE",
-              status: "DONE",
-              tool_calls: [{ name: "List_dir", args: { path: baseDir } }],
-            }),
-            JSON.stringify({
-              step_index: 3,
-              source: "MODEL",
-              type: "LIST_DIRECTORY",
-              status: "DONE",
-              content: '{"name":"package.json"}',
-            }),
-            "",
-          ].join("\n"),
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          cwd: baseDir,
+          resumeCursor: { conversationId },
+        });
+        yield* Effect.promise(() =>
+          NodeFSP.appendFile(
+            transcriptPath,
+            [
+              encodeUnknownJson({
+                step_index: 3,
+                source: "MODEL",
+                type: "PLANNER_RESPONSE",
+                status: "DONE",
+                tool_calls: [{ name: "List_dir", args: { path: baseDir } }],
+              }),
+              encodeUnknownJson({
+                step_index: 3,
+                source: "MODEL",
+                type: "LIST_DIRECTORY",
+                status: "DONE",
+                content: '{"name":"package.json"}',
+              }),
+              "",
+            ].join("\n"),
+          ),
         );
-
-        await waitFor(
-          () => events.filter((event) => event.type === "item.completed").length === 1,
-          events,
+        yield* Effect.promise(() =>
+          waitFor(
+            () => events.filter((event) => event.type === "item.completed").length === 1,
+            events,
+          ),
         );
-        await new Promise((resolve) => setTimeout(resolve, 700));
+        yield* Effect.promise(
+          () => new Promise<void>((resolve) => NodeTimers.setTimeout(resolve, 700)),
+        );
 
         const toolEvents = events.filter((event) => event.type === "item.completed");
         expect(toolEvents).toHaveLength(1);
@@ -397,79 +403,87 @@ describe("AntigravityAdapter resumed-output turn reopen", () => {
           itemType: "dynamic_tool_call",
           title: "Listed directory",
         });
-      } finally {
-        await Effect.runPromise(adapter.stopSession(threadId)).catch(() => undefined);
-        await Effect.runPromise(Fiber.interrupt(collector)).catch(() => undefined);
-      }
-    } finally {
-      await rm(baseDir, { recursive: true, force: true });
-    }
-  });
+      }).pipe(
+        Effect.ensuring(
+          Effect.all(
+            [adapter.stopSession(threadId).pipe(Effect.ignore), Fiber.interrupt(collector)],
+            { discard: true },
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
-  it("reopens a turn when transcript output resumes after a completed turn", async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "antig-reopen-"));
-    try {
-      const brainPath = join(baseDir, "brain");
+  it.effect("reopens a turn when transcript output resumes after a completed turn", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* Effect.acquireRelease(
+        Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "antig-reopen-"))),
+        (directory) =>
+          Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })).pipe(
+            Effect.ignore,
+          ),
+      );
+      const brainPath = NodePath.join(baseDir, "brain");
       const conversationId = "conv-resume";
-      const transcriptPath = join(
+      const transcriptPath = NodePath.join(
         brainPath,
         conversationId,
         ".system_generated",
         "logs",
         "transcript.jsonl",
       );
-      await mkdir(dirname(transcriptPath), { recursive: true });
-      await writeFile(transcriptPath, "");
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(NodePath.dirname(transcriptPath), { recursive: true }),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(transcriptPath, ""));
 
       const settings = decodeAntigravitySettings({
         brainPath,
-        settingsPath: join(baseDir, "settings.json"),
+        settingsPath: NodePath.join(baseDir, "settings.json"),
       });
-
-      const config = await Effect.runPromise(
-        makeTestServerConfig(baseDir).pipe(Effect.provide(NodeServices.layer)),
-      );
-      const adapter = await Effect.runPromise(
-        makeAntigravityAdapter(settings, {
-          instanceId: ProviderInstanceId.make("antigravity"),
-          environment: {},
-        }).pipe(Effect.provideService(ServerConfig, config), Effect.provide(NodeServices.layer)),
-      );
+      const config = yield* makeTestServerConfig(baseDir);
+      const adapter = yield* makeAntigravityAdapter(settings, {
+        instanceId: ProviderInstanceId.make("antigravity"),
+        environment: {},
+      }).pipe(Effect.provideService(ServerConfig, config));
 
       const events: ProviderRuntimeEvent[] = [];
-      const collector = Effect.runFork(
-        Stream.runForEach(adapter.streamEvents, (event) =>
-          Effect.sync(() => {
-            events.push(event);
-          }),
-        ),
-      );
+      const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      ).pipe(Effect.forkChild);
       const threadId = ThreadId.make("thread-resume");
-      try {
-        await Effect.runPromise(
-          adapter.startSession({
-            threadId,
-            runtimeMode: "full-access",
-            cwd: baseDir,
-            resumeCursor: { conversationId },
-          }),
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          cwd: baseDir,
+          resumeCursor: { conversationId },
+        });
+
+        yield* Effect.promise(() =>
+          NodeFSP.appendFile(
+            transcriptPath,
+            `${encodeUnknownJson({ step_index: 1, source: "MODEL", type: "FINAL_RESPONSE", status: "DONE", content: "Started in background." })}\n`,
+          ),
+        );
+        yield* Effect.promise(() =>
+          waitFor(() => events.some((event) => event.type === "turn.completed"), events),
         );
 
-        // A terminal response completes the turn (the "stop phase").
-        await appendFile(
-          transcriptPath,
-          `${JSON.stringify({ step_index: 1, source: "MODEL", type: "FINAL_RESPONSE", status: "DONE", content: "Started in background." })}\n`,
+        yield* Effect.promise(() =>
+          NodeFSP.appendFile(
+            transcriptPath,
+            `${encodeUnknownJson({ step_index: 2, source: "MODEL", type: "RUN_COMMAND", status: "DONE", content: "HELLO_AFTER_WAIT" })}\n`,
+          ),
         );
-        await waitFor(() => events.some((event) => event.type === "turn.completed"), events);
-
-        // Output that resumes afterwards must reopen the turn.
-        await appendFile(
-          transcriptPath,
-          `${JSON.stringify({ step_index: 2, source: "MODEL", type: "RUN_COMMAND", status: "DONE", content: "HELLO_AFTER_WAIT" })}\n`,
-        );
-        await waitFor(
-          () => events.filter((event) => event.type === "turn.started").length >= 2,
-          events,
+        yield* Effect.promise(() =>
+          waitFor(
+            () => events.filter((event) => event.type === "turn.started").length >= 2,
+            events,
+          ),
         );
 
         const turnStarts = events.filter((event) => event.type === "turn.started");
@@ -488,17 +502,18 @@ describe("AntigravityAdapter resumed-output turn reopen", () => {
         );
         expect(reopenIdx).toBeGreaterThan(firstCompletedIdx);
         expect(commandIdx).toBeGreaterThan(reopenIdx);
-        // Resumed output is attributed to the reopened turn.
         expect(events[reopenIdx]?.turnId).toBeDefined();
         expect(events[commandIdx]?.turnId).toBe(events[reopenIdx]?.turnId);
-      } finally {
-        await Effect.runPromise(adapter.stopSession(threadId)).catch(() => undefined);
-        await Effect.runPromise(Fiber.interrupt(collector)).catch(() => undefined);
-      }
-    } finally {
-      await rm(baseDir, { recursive: true, force: true });
-    }
-  });
+      }).pipe(
+        Effect.ensuring(
+          Effect.all(
+            [adapter.stopSession(threadId).pipe(Effect.ignore), Fiber.interrupt(collector)],
+            { discard: true },
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 interface FakeDaemon {
@@ -507,7 +522,7 @@ interface FakeDaemon {
   close(): Promise<void>;
 }
 
-const readFakeDaemonRequestBody = (req: IncomingMessage): Promise<string> =>
+const readFakeDaemonRequestBody = (req: NodeHttp.IncomingMessage): Promise<string> =>
   new Promise((resolve) => {
     let body = "";
     req.on("data", (chunk) => {
@@ -520,7 +535,7 @@ async function startFakeAntigravityDaemon(): Promise<FakeDaemon> {
   const interactions: Array<unknown> = [];
   const state = { approveWaiting: true };
 
-  const server: Server = createServer((req, res) => {
+  const server: NodeHttp.Server = NodeHttp.createServer((req, res) => {
     void (async () => {
       const url = req.url ?? "";
       const body = await readFakeDaemonRequestBody(req);
@@ -561,7 +576,7 @@ async function startFakeAntigravityDaemon(): Promise<FakeDaemon> {
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as AddressInfo).port;
+  const port = (server.address() as NodeNet.AddressInfo).port;
   return {
     address: `http://127.0.0.1:${port}`,
     interactions,
@@ -573,69 +588,67 @@ async function startFakeAntigravityDaemon(): Promise<FakeDaemon> {
 }
 
 describe("AntigravityAdapter full-access auto-approval", () => {
-  it("auto-approves permission gates without approval runtime events", async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "antig-autoapprove-"));
-    const daemon = await startFakeAntigravityDaemon();
-    try {
-      const brainPath = join(baseDir, "brain");
+  it.effect("auto-approves permission gates without approval runtime events", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* Effect.acquireRelease(
+        Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "antig-autoapprove-"))),
+        (directory) =>
+          Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })).pipe(
+            Effect.ignore,
+          ),
+      );
+      const daemon = yield* Effect.acquireRelease(
+        Effect.promise(() => startFakeAntigravityDaemon()),
+        (server) => Effect.promise(() => server.close()).pipe(Effect.ignore),
+      );
+      const brainPath = NodePath.join(baseDir, "brain");
       const conversationId = "conv-autoapprove";
-      const transcriptPath = join(
+      const transcriptPath = NodePath.join(
         brainPath,
         conversationId,
         ".system_generated",
         "logs",
         "transcript.jsonl",
       );
-      await mkdir(dirname(transcriptPath), { recursive: true });
-      await writeFile(transcriptPath, "");
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(NodePath.dirname(transcriptPath), { recursive: true }),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(transcriptPath, ""));
 
       const settings = decodeAntigravitySettings({
         brainPath,
-        settingsPath: join(baseDir, "settings.json"),
+        settingsPath: NodePath.join(baseDir, "settings.json"),
         languageServerAddress: daemon.address,
       });
-
-      const config = await Effect.runPromise(
-        makeTestServerConfig(baseDir).pipe(Effect.provide(NodeServices.layer)),
-      );
-      const adapter = await Effect.runPromise(
-        makeAntigravityAdapter(settings, {
-          instanceId: ProviderInstanceId.make("antigravity"),
-          // Short-circuit daemon detection so the fake server is used directly.
-          environment: { ANTIGRAVITY_LS_ADDRESS: daemon.address },
-          // Avoid spawning the real agentapi binary; the resume path ignores stdout.
-          runAgentApi: () => Promise.resolve(""),
-        }).pipe(Effect.provideService(ServerConfig, config), Effect.provide(NodeServices.layer)),
-      );
+      const config = yield* makeTestServerConfig(baseDir);
+      const adapter = yield* makeAntigravityAdapter(settings, {
+        instanceId: ProviderInstanceId.make("antigravity"),
+        environment: { ANTIGRAVITY_LS_ADDRESS: daemon.address },
+        runAgentApi: () => Promise.resolve(""),
+      }).pipe(Effect.provideService(ServerConfig, config));
 
       const events: ProviderRuntimeEvent[] = [];
-      const collector = Effect.runFork(
-        Stream.runForEach(adapter.streamEvents, (event) =>
-          Effect.sync(() => {
-            events.push(event);
-          }),
-        ),
-      );
+      const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      ).pipe(Effect.forkChild);
       const threadId = ThreadId.make("thread-autoapprove");
-      try {
-        await Effect.runPromise(
-          adapter.startSession({
-            threadId,
-            runtimeMode: "full-access",
-            cwd: baseDir,
-            resumeCursor: { conversationId },
-          }),
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          cwd: baseDir,
+          resumeCursor: { conversationId },
+        });
+        yield* adapter.sendTurn({ threadId, input: "run the command" });
+        yield* Effect.promise(() =>
+          waitFor(() => daemon.interactions.length === 1, daemon.interactions),
         );
-
-        // An active turn is required before the gate poller inspects the trajectory.
-        await Effect.runPromise(adapter.sendTurn({ threadId, input: "run the command" }));
-
-        await waitFor(() => daemon.interactions.length === 1, daemon.interactions);
 
         expect(events.map((event) => event.type)).not.toContain("request.opened");
         expect(events.map((event) => event.type)).not.toContain("request.resolved");
-
-        // The daemon received exactly one allow decision for the gate.
         expect(daemon.interactions).toHaveLength(1);
         expect(daemon.interactions[0]).toMatchObject({
           cascadeId: conversationId,
@@ -645,13 +658,14 @@ describe("AntigravityAdapter full-access auto-approval", () => {
             permission: { allow: true, scope: "PERMISSION_SCOPE_ONCE" },
           },
         });
-      } finally {
-        await Effect.runPromise(adapter.stopSession(threadId)).catch(() => undefined);
-        await Effect.runPromise(Fiber.interrupt(collector)).catch(() => undefined);
-      }
-    } finally {
-      await daemon.close().catch(() => undefined);
-      await rm(baseDir, { recursive: true, force: true });
-    }
-  });
+      }).pipe(
+        Effect.ensuring(
+          Effect.all(
+            [adapter.stopSession(threadId).pipe(Effect.ignore), Fiber.interrupt(collector)],
+            { discard: true },
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

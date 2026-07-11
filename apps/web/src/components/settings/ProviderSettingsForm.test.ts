@@ -42,6 +42,7 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(deriveProviderSettingsFields(antigravity!).map((field) => field.key)).toEqual([
       "binaryPath",
+      "geminiHomePath",
       "brainPath",
       "settingsPath",
       "languageServerAddress",

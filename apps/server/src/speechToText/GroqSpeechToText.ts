@@ -2,7 +2,7 @@
 // @effect-diagnostics globalFetchInEffect:off
 import { SpeechToTextError, type SpeechToTextTranscribeInput } from "@t3tools/contracts";
 import type { ServerSettings } from "@t3tools/contracts/settings";
-import { Buffer } from "node:buffer";
+import * as NodeBuffer from "node:buffer";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -22,12 +22,12 @@ function makeSpeechToTextError(detail: string, options?: { status?: number; caus
   });
 }
 
-function decodeAudioBase64(input: string): Buffer {
+function decodeAudioBase64(input: string): NodeBuffer.Buffer {
   const normalized = input.replace(/\s/g, "");
   if (!/^[a-zA-Z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
     throw new Error("Audio payload is not valid base64.");
   }
-  return Buffer.from(normalized, "base64");
+  return NodeBuffer.Buffer.from(normalized, "base64");
 }
 
 async function readResponseBodySafely(response: Response): Promise<string> {

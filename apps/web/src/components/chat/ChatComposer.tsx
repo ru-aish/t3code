@@ -78,6 +78,7 @@ import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
+  getComposerPromptInjectionState,
   getComposerProviderState,
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
@@ -105,6 +106,7 @@ import {
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderDisplayName, getProviderInteractionModeToggle } from "../../providerModels";
 import {
+  applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   resolveProviderDriverKindForInstanceSelection,
   sortProviderInstanceEntries,
@@ -550,10 +552,6 @@ export interface ChatComposerProps {
   composerElementContextsRef: React.RefObject<ElementContextDraft[]>;
   composerRef: React.RefObject<ChatComposerHandle | null>;
 
-  // Scroll
-  shouldAutoScrollRef: React.RefObject<boolean>;
-  scheduleStickToBottom: () => void;
-
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
   onInterrupt: () => void;
@@ -639,8 +637,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerImagesRef,
     composerTerminalContextsRef,
     composerElementContextsRef,
-    shouldAutoScrollRef,
-    scheduleStickToBottom,
     onSend,
     onInterrupt,
     onImplementPlanInNewThread,
@@ -710,8 +706,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // configured instance (default built-in + any custom `providerInstances.*`),
   // sorted default-first per driver kind for a stable picker order.
   const providerInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(
-    () => sortProviderInstanceEntries(deriveProviderInstanceEntries(providerStatuses)),
-    [providerStatuses],
+    () =>
+      sortProviderInstanceEntries(
+        applyProviderInstanceSettings(deriveProviderInstanceEntries(providerStatuses), settings),
+      ),
+    [providerStatuses, settings],
   );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const threadProvider =
@@ -835,18 +834,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderEntry],
   );
 
+  const composerPromptInjectionState = useMemo(
+    () => getComposerPromptInjectionState(prompt),
+    [prompt],
+  );
   const composerProviderState = useMemo(
     () =>
       getComposerProviderState({
         provider: selectedProvider,
         model: selectedModel,
         models: selectedProviderModels,
-        prompt,
+        promptInjectionState: composerPromptInjectionState,
         modelOptions: composerModelOptions?.[selectedInstanceId],
       }),
     [
       composerModelOptions,
-      prompt,
+      composerPromptInjectionState,
       selectedInstanceId,
       selectedModel,
       selectedProvider,
@@ -938,7 +941,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
-  const composerFormHeightRef = useRef(0);
   const composerSelectLockRef = useRef(false);
   const composerMenuOpenRef = useRef(false);
   const composerMenuItemsRef = useRef<ComposerCommandItem[]>([]);
@@ -1531,15 +1533,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       };
     };
 
-    composerFormHeightRef.current = composerForm.getBoundingClientRect().height;
     const initialCompactness = measureFooterCompactness();
     setIsComposerPrimaryActionsCompact(initialCompactness.primaryActionsCompact);
     setIsComposerFooterCompact(initialCompactness.footerCompact);
     if (typeof ResizeObserver === "undefined") return;
 
-    const observer = new ResizeObserver((entries) => {
-      const [entry] = entries;
-      if (!entry) return;
+    const observer = new ResizeObserver(() => {
       const nextCompactness = measureFooterCompactness();
       setIsComposerPrimaryActionsCompact((previous) =>
         previous === nextCompactness.primaryActionsCompact
@@ -1549,25 +1548,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setIsComposerFooterCompact((previous) =>
         previous === nextCompactness.footerCompact ? previous : nextCompactness.footerCompact,
       );
-      const nextHeight = entry.contentRect.height;
-      const previousHeight = composerFormHeightRef.current;
-      composerFormHeightRef.current = nextHeight;
-      if (previousHeight > 0 && Math.abs(nextHeight - previousHeight) < 0.5) return;
-      if (!shouldAutoScrollRef.current) return;
-      scheduleStickToBottom();
     });
 
     observer.observe(composerForm);
     return () => {
       observer.disconnect();
     };
-  }, [
-    activeThreadId,
-    composerFooterActionLayoutKey,
-    composerFooterHasWideActions,
-    scheduleStickToBottom,
-    shouldAutoScrollRef,
-  ]);
+  }, [activeThreadId, composerFooterActionLayoutKey, composerFooterHasWideActions]);
 
   // ------------------------------------------------------------------
   // Image persist effect
@@ -2284,8 +2271,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
           className={cn(
-            "rounded-[20px] border bg-card transition-colors duration-200 has-focus-visible:border-ring/45",
-            isDragOverComposer ? "border-primary/70 bg-accent/30" : "border-border",
+            "chat-composer-glass rounded-[20px] border transition-colors duration-200 has-focus-visible:border-ring/45",
+            isDragOverComposer ? "border-primary/70 bg-accent/45" : "border-border",
             environmentUnavailable ? "opacity-75" : null,
             composerProviderState.composerSurfaceClassName,
           )}

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as PathService from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as NodeURL from "node:url";
 
 import {
   buildAntigravityProviderModels,
@@ -9,6 +15,8 @@ import {
   parseLinuxTcpListenPortsForInodes,
   resolveAntigravityModelLabel,
 } from "./AntigravityProvider.ts";
+
+const encodeUnknownJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 describe("AntigravityProvider model helpers", () => {
   it("groups Antigravity model labels into base models with reasoning options", () => {
@@ -87,11 +95,37 @@ describe("AntigravityProvider daemon discovery helpers", () => {
     expect(parseLinuxTcpListenPortsForInodes(tcp, new Set(["12345", "67890"]))).toEqual([35277]);
   });
 
-  it("detects the configured project id for this workspace when Antigravity config exists", () => {
-    const projectId = detectAntigravityProjectIdForCwd("/home/coder/Code/playground/t3code");
+  it.effect("selects the most specific configured project for a workspace", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* PathService.Path;
+      const projectsPath = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "antigravity-projects-",
+      });
+      const workspaceRoot = path.join(projectsPath, "workspace");
+      const nestedProject = path.join(workspaceRoot, "nested");
+      yield* fileSystem.makeDirectory(nestedProject, { recursive: true });
 
-    if (projectId !== undefined) {
-      expect(projectId).toBe("a1de9f3a-657d-489b-9d4c-896670de1997");
-    }
-  });
+      yield* fileSystem.writeFileString(
+        path.join(projectsPath, "workspace.json"),
+        encodeUnknownJson({
+          id: "workspace-project",
+          projectResources: {
+            resources: [{ folderUri: NodeURL.pathToFileURL(workspaceRoot).href }],
+          },
+        }),
+      );
+      yield* fileSystem.writeFileString(
+        path.join(projectsPath, "nested.json"),
+        encodeUnknownJson({
+          id: "nested-project",
+          projectResources: {
+            resources: [{ folderUri: NodeURL.pathToFileURL(nestedProject).href }],
+          },
+        }),
+      );
+
+      expect(detectAntigravityProjectIdForCwd(nestedProject, projectsPath)).toBe("nested-project");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

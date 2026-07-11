@@ -6,12 +6,13 @@ import {
   TextGenerationError,
 } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { execFile } from "node:child_process";
-import * as fs from "node:fs/promises";
-import { performance } from "node:perf_hooks";
-import { setTimeout as sleep } from "node:timers/promises";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePerfHooks from "node:perf_hooks";
+import * as NodeTimersPromises from "node:timers/promises";
 
 import {
   makeAntigravityEnvironment,
@@ -42,7 +43,7 @@ function runAgentApi(
   env: NodeJS.ProcessEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile(resolveAntigravityAgentApiPath(settings), [...args], {
+    const child = NodeChildProcess.execFile(resolveAntigravityAgentApiPath(settings), [...args], {
       cwd,
       env,
       timeout: 30_000,
@@ -96,12 +97,15 @@ async function waitForStructuredOutput(input: {
   const transcriptPath = transcriptPathForConversation(input);
   let offset = 0;
   let lastContent = "";
-  while (performance.now() - input.startedAtMs < ANTIGRAVITY_TEXT_GENERATION_TIMEOUT_MS) {
+  while (
+    NodePerfHooks.performance.now() - input.startedAtMs <
+    ANTIGRAVITY_TEXT_GENERATION_TIMEOUT_MS
+  ) {
     try {
-      const stat = await fs.stat(transcriptPath);
+      const stat = await NodeFSP.stat(transcriptPath);
       if (stat.size < offset) offset = 0;
       if (stat.size > offset) {
-        const handle = await fs.open(transcriptPath, "r");
+        const handle = await NodeFSP.open(transcriptPath, "r");
         try {
           const buffer = Buffer.alloc(stat.size - offset);
           await handle.read(buffer, 0, buffer.length, offset);
@@ -125,7 +129,7 @@ async function waitForStructuredOutput(input: {
     } catch {
       // The daemon creates the transcript asynchronously.
     }
-    await sleep(750);
+    await NodeTimersPromises.setTimeout(750);
   }
   throw new Error(
     lastContent
@@ -138,6 +142,7 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
   settings: AntigravitySettings,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
+  const platform = yield* HostProcessPlatform;
   const runJson = Effect.fn("AntigravityTextGeneration.runJson")(function* <S extends Schema.Top>({
     operation,
     cwd,
@@ -161,9 +166,9 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
       prompt,
       `Return only a JSON object matching this JSON Schema:\n${schemaJson}`,
     ].join("\n\n");
-    const startedAtMs = performance.now();
+    const startedAtMs = NodePerfHooks.performance.now();
     const modelArg = antigravityModelArg(_modelSelection.model);
-    const env = makeAntigravityEnvironment(settings, environment, cwd);
+    const env = makeAntigravityEnvironment(settings, environment, platform, cwd);
     const stdout = yield* Effect.tryPromise({
       try: () =>
         runAgentApi(

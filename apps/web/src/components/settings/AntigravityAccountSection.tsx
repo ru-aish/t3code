@@ -71,7 +71,8 @@ export function AntigravityAccountSection(props: { readonly enabled: boolean }) 
       });
       await ensureLocalApi().server.refreshProviders();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to save Antigravity account.";
+      const message =
+        error instanceof Error ? error.message : "Failed to save Antigravity account.";
       toastManager.add(
         stackedThreadToast({
           type: "error",
@@ -116,7 +117,8 @@ export function AntigravityAccountSection(props: { readonly enabled: boolean }) 
         });
         await ensureLocalApi().server.refreshProviders();
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to switch Antigravity account.";
+        const message =
+          error instanceof Error ? error.message : "Failed to switch Antigravity account.";
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -141,7 +143,8 @@ export function AntigravityAccountSection(props: { readonly enabled: boolean }) 
           title: "Saved Antigravity account removed",
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to remove Antigravity account.";
+        const message =
+          error instanceof Error ? error.message : "Failed to remove Antigravity account.";
         toastManager.add(
           stackedThreadToast({
             type: "error",
