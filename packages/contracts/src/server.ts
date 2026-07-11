@@ -58,6 +58,50 @@ export const ServerProviderAuth = Schema.Struct({
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
+const ServerProviderUsagePercent = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
+
+export const ServerProviderAccountUsageWindow = Schema.Struct({
+  usedPercent: ServerProviderUsagePercent,
+  resetsAt: Schema.optional(NonNegativeInt),
+  windowDurationMins: Schema.optional(PositiveInt),
+});
+export type ServerProviderAccountUsageWindow = typeof ServerProviderAccountUsageWindow.Type;
+
+export const ServerProviderAccountUsageCredits = Schema.Struct({
+  balance: Schema.optional(TrimmedNonEmptyString),
+  hasCredits: Schema.Boolean,
+  unlimited: Schema.Boolean,
+});
+export type ServerProviderAccountUsageCredits = typeof ServerProviderAccountUsageCredits.Type;
+
+export const ServerProviderAccountUsageLimit = Schema.Struct({
+  id: Schema.optional(TrimmedNonEmptyString),
+  name: Schema.optional(TrimmedNonEmptyString),
+  primary: Schema.optional(ServerProviderAccountUsageWindow),
+  secondary: Schema.optional(ServerProviderAccountUsageWindow),
+  credits: Schema.optional(ServerProviderAccountUsageCredits),
+  reachedType: Schema.optional(TrimmedNonEmptyString),
+});
+export type ServerProviderAccountUsageLimit = typeof ServerProviderAccountUsageLimit.Type;
+
+export const ServerProviderAccountUsageDailyBucket = Schema.Struct({
+  startDate: TrimmedNonEmptyString,
+  tokens: NonNegativeInt,
+});
+export type ServerProviderAccountUsageDailyBucket =
+  typeof ServerProviderAccountUsageDailyBucket.Type;
+
+export const ServerProviderAccountUsage = Schema.Struct({
+  limits: Schema.Array(ServerProviderAccountUsageLimit),
+  dailyUsageBuckets: Schema.Array(ServerProviderAccountUsageDailyBucket),
+  lifetimeTokens: Schema.optional(NonNegativeInt),
+  currentStreakDays: Schema.optional(NonNegativeInt),
+  longestStreakDays: Schema.optional(NonNegativeInt),
+  longestRunningTurnSec: Schema.optional(NonNegativeInt),
+  peakDailyTokens: Schema.optional(NonNegativeInt),
+});
+export type ServerProviderAccountUsage = typeof ServerProviderAccountUsage.Type;
+
 export const ServerProviderModel = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
@@ -171,6 +215,7 @@ export const ServerProvider = Schema.Struct({
   version: Schema.NullOr(TrimmedNonEmptyString),
   status: ServerProviderState,
   auth: ServerProviderAuth,
+  accountUsage: Schema.optional(ServerProviderAccountUsage),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   // Optional for back-compat: every legacy producer omits this field and

@@ -27,6 +27,45 @@ describe("ServerProvider", () => {
     expect(parsed.updateState).toBeUndefined();
   });
 
+  it("decodes provider account usage snapshots", () => {
+    const parsed = decodeServerProvider({
+      instanceId: "codex",
+      driver: "codex",
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: {
+        status: "authenticated",
+      },
+      accountUsage: {
+        limits: [
+          {
+            id: "codex",
+            primary: {
+              usedPercent: 10,
+              resetsAt: 1_783_769_853,
+              windowDurationMins: 300,
+            },
+            secondary: {
+              usedPercent: 1,
+              resetsAt: 1_784_356_653,
+              windowDurationMins: 10_080,
+            },
+          },
+        ],
+        dailyUsageBuckets: [{ startDate: "2026-07-11", tokens: 8_761_134 }],
+        lifetimeTokens: 333_869_937,
+      },
+      checkedAt: "2026-07-11T00:00:00.000Z",
+      models: [],
+    });
+
+    expect(parsed.accountUsage?.limits[0]?.primary?.usedPercent).toBe(10);
+    expect(parsed.accountUsage?.limits[0]?.secondary?.windowDurationMins).toBe(10_080);
+    expect(parsed.accountUsage?.lifetimeTokens).toBe(333_869_937);
+  });
+
   it("defaults one-click update support when decoding older advisory snapshots", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex",
