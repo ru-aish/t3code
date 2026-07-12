@@ -2,6 +2,7 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts/settings";
 import { describe, expect, it } from "vite-plus/test";
 import { deriveProviderInstanceEntries } from "./providerInstances";
+import { CHATGPT_AGENT_INSTANCE_ID, CHATGPT_AGENT_MODEL } from "./chatgptAgent";
 import {
   getAppModelOptionsForInstance,
   resolveAppModelSelectionForInstance,
@@ -55,6 +56,17 @@ function settingsWithProviderInstances(): UnifiedSettings {
 }
 
 describe("instance-scoped model selection", () => {
+  it("selects ChatGPT Agent without requiring a provider status snapshot", () => {
+    expect(
+      resolveAppModelSelectionForInstance(
+        CHATGPT_AGENT_INSTANCE_ID,
+        DEFAULT_UNIFIED_SETTINGS,
+        [],
+        "a-provider-model-that-must-not-leak",
+      ),
+    ).toBe(CHATGPT_AGENT_MODEL);
+  });
+
   it("keeps custom models on the provider instance that declared them", () => {
     const providers = [
       provider({

@@ -1578,33 +1578,35 @@ export function ProviderSettingsPanel() {
           ChatGPT keeps ownership of its tools and actions.
         </p>
         <SettingsRow
-          label="Enable ChatGPT Agent"
+          title="Enable ChatGPT Agent"
           description="Show ChatGPT Agent in the chat target picker."
-        >
-          <Switch
-            checked={settings.chatgptAgent.enabled}
-            onCheckedChange={(enabled) =>
-              updateSettings({
-                chatgptAgent: { ...settings.chatgptAgent, enabled },
-              })
-            }
-          />
-        </SettingsRow>
+          control={
+            <Switch
+              checked={settings.chatgptAgent.enabled}
+              onCheckedChange={(enabled) =>
+                updateSettings({
+                  chatgptAgent: { ...settings.chatgptAgent, enabled },
+                })
+              }
+            />
+          }
+        />
         <SettingsRow
-          label="Loopback CDP endpoint"
+          title="Loopback CDP endpoint"
           description="For example http://127.0.0.1:9337. Connection compatibility is checked when a turn starts."
-        >
-          <DraftInput
-            value={settings.chatgptAgent.cdpEndpoint}
-            onCommit={(cdpEndpoint) =>
-              updateSettings({
-                chatgptAgent: { ...settings.chatgptAgent, cdpEndpoint },
-              })
-            }
-            className="w-72"
-            aria-label="ChatGPT Desktop CDP endpoint"
-          />
-        </SettingsRow>
+          control={
+            <DraftInput
+              value={settings.chatgptAgent.cdpEndpoint}
+              onCommit={(cdpEndpoint) =>
+                updateSettings({
+                  chatgptAgent: { ...settings.chatgptAgent, cdpEndpoint },
+                })
+              }
+              className="w-72"
+              aria-label="ChatGPT Desktop CDP endpoint"
+            />
+          }
+        />
       </SettingsSection>
       <SettingsSection
         title="Providers"

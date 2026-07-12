@@ -152,6 +152,7 @@ import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { useEnvironmentSettings } from "../hooks/useSettings";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import { resolveChatGPTAgentModelSelection } from "../chatgptAgent";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import {
@@ -3903,6 +3904,12 @@ function ChatViewContent(props: ChatViewProps) {
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
+    // The desktop target is intentionally absent from `providerStatuses`.
+    // Canonicalize it here so every persisted/start-turn path carries the
+    // agent instance id that the server routes to ChatGPT Desktop.
+    const dispatchModelSelection =
+      resolveChatGPTAgentModelSelection(ctxSelectedModelSelection.instanceId) ??
+      ctxSelectedModelSelection;
     const promptForSend = promptRef.current;
     const {
       trimmedPrompt: trimmed,
@@ -4092,9 +4099,12 @@ function ChatViewContent(props: ChatViewProps) {
     }
     const title = truncate(titleSeed);
     const threadCreateModelSelection = createModelSelection(
-      ctxSelectedModelSelection.instanceId,
-      ctxSelectedModel || activeProject.defaultModelSelection?.model || DEFAULT_MODEL,
-      ctxSelectedModelSelection.options,
+      dispatchModelSelection.instanceId,
+      dispatchModelSelection.model ||
+        ctxSelectedModel ||
+        activeProject.defaultModelSelection?.model ||
+        DEFAULT_MODEL,
+      dispatchModelSelection.options,
     );
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
@@ -4116,7 +4126,7 @@ function ChatViewContent(props: ChatViewProps) {
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
         createdAt: messageCreatedAt,
-        ...(ctxSelectedModel ? { modelSelection: ctxSelectedModelSelection } : {}),
+        ...(ctxSelectedModel ? { modelSelection: dispatchModelSelection } : {}),
         runtimeMode,
         interactionMode,
       });
@@ -4173,7 +4183,7 @@ function ChatViewContent(props: ChatViewProps) {
             text: outgoingMessageText,
             attachments: turnAttachmentsResult.value,
           },
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: dispatchModelSelection,
           titleSeed: title,
           runtimeMode,
           interactionMode,
@@ -4762,13 +4772,10 @@ function ChatViewContent(props: ChatViewProps) {
 
   const onProviderModelSelect = useCallback(
     (instanceId: ProviderInstanceId, model: string) => {
-      if (!activeThread) {
-        scheduleComposerFocus();
-        return;
-      }
       // Look up the configured instance so model normalization and custom
-      // model lookup stay scoped to that exact instance. Unknown instance ids
-      // are rejected by returning early; the server remains authoritative too.
+      // model lookup stay scoped to that exact instance. ChatGPT Agent is a
+      // local target rather than a server-reported provider, and is resolved
+      // by `resolveAppModelSelectionForInstance` below.
       const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
       const resolvedDriverKind = entry?.driver ?? null;
       if (
@@ -4779,7 +4786,7 @@ function ChatViewContent(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
-      const activeThreadInstanceId = activeThread.session?.providerInstanceId;
+      const activeThreadInstanceId = activeThread?.session?.providerInstanceId;
       if (lockedProvider !== null && activeThreadInstanceId) {
         const currentEntry = providerStatuses.find(
           (snapshot) => snapshot.instanceId === activeThreadInstanceId,
@@ -4807,13 +4814,15 @@ function ChatViewContent(props: ChatViewProps) {
         instanceId,
         model: resolvedModel,
       };
-      const modelChangeBlockReason = getStartedThreadModelChangeBlockReason({
-        providers: providerStatuses,
-        hasStartedSession: activeThread.session !== null,
-        currentModelSelection: activeThread.modelSelection,
-        currentProviderInstanceId: activeThread.session?.providerInstanceId ?? null,
-        nextModelSelection,
-      });
+      const modelChangeBlockReason = activeThread
+        ? getStartedThreadModelChangeBlockReason({
+            providers: providerStatuses,
+            hasStartedSession: activeThread.session !== null,
+            currentModelSelection: activeThread.modelSelection,
+            currentProviderInstanceId: activeThread.session?.providerInstanceId ?? null,
+            nextModelSelection,
+          })
+        : null;
       if (modelChangeBlockReason) {
         toastManager.add({
           type: "warning",

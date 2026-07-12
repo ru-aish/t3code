@@ -16,6 +16,7 @@ import {
   type ProviderOptionSelection,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { CHATGPT_AGENT_INSTANCE_ID, CHATGPT_AGENT_MODEL } from "./chatgptAgent";
 
 // The composer draft's `modelSelectionByProvider` and
 // `stickyModelSelectionByProvider` maps are keyed by `ProviderInstanceId`
@@ -1506,6 +1507,53 @@ describe("composerDraftStore setModelSelection", () => {
     expect(
       draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_INSTANCE],
     ).toEqual(modelSelection(CODEX_DRIVER, "gpt-5.3-codex"));
+  });
+
+  it("persists and restores the ChatGPT Agent selection for existing and new drafts", () => {
+    const store = useComposerDraftStore.getState();
+    const selection = createModelSelection(CHATGPT_AGENT_INSTANCE_ID, CHATGPT_AGENT_MODEL);
+
+    store.setModelSelection(threadRef, selection);
+    store.setStickyModelSelection(selection);
+    const newDraftId = DraftId.make("draft-chatgpt-agent");
+    store.applyStickyState(newDraftId);
+
+    expect(useComposerDraftStore.getState().getComposerDraft(newDraftId)).toMatchObject({
+      activeProvider: CHATGPT_AGENT_INSTANCE_ID,
+      modelSelectionByProvider: {
+        [CHATGPT_AGENT_INSTANCE_ID]: selection,
+      },
+    });
+
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const persistedState = persistApi.getOptions().partialize(useComposerDraftStore.getState());
+    const restoredState = persistApi
+      .getOptions()
+      .merge(persistedState, useComposerDraftStore.getInitialState());
+
+    expect(
+      restoredState.draftsByThreadKey[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)],
+    ).toMatchObject({
+      activeProvider: CHATGPT_AGENT_INSTANCE_ID,
+      modelSelectionByProvider: {
+        [CHATGPT_AGENT_INSTANCE_ID]: selection,
+      },
+    });
+    expect(restoredState.stickyActiveProvider).toBe(CHATGPT_AGENT_INSTANCE_ID);
+    expect(restoredState.stickyModelSelectionByProvider[CHATGPT_AGENT_INSTANCE_ID]).toEqual(
+      selection,
+    );
+    expect(restoredState.draftsByThreadKey[newDraftId]).toMatchObject({
+      activeProvider: CHATGPT_AGENT_INSTANCE_ID,
+    });
   });
 });
 

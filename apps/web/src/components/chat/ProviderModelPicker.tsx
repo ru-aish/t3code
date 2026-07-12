@@ -18,6 +18,7 @@ import {
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
 import type { ProviderInstanceEntry } from "../../providerInstances";
+import { isChatGPTAgentInstance } from "../../chatgptAgent";
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   /**
@@ -64,8 +65,17 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const selectedModel =
     selectedInstanceOptions.find((option) => option.slug === props.model) ??
     selectedInstanceOptions[0];
-  const triggerTitle = selectedModel ? getTriggerDisplayModelName(selectedModel) : props.model;
-  const triggerLabel = selectedModel ? getTriggerDisplayModelLabel(selectedModel) : props.model;
+  const isChatGPTAgent = isChatGPTAgentInstance(activeEntry?.instanceId);
+  const triggerTitle = isChatGPTAgent
+    ? "ChatGPT Agent (Desktop)"
+    : selectedModel
+      ? getTriggerDisplayModelName(selectedModel)
+      : props.model;
+  const triggerLabel = isChatGPTAgent
+    ? "ChatGPT Agent (Desktop)"
+    : selectedModel
+      ? getTriggerDisplayModelLabel(selectedModel)
+      : props.model;
   const duplicateDriverCount = props.instanceEntries.filter(
     (entry) => activeEntry !== null && entry.driverKind === activeEntry.driverKind,
   ).length;

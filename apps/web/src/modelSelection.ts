@@ -24,6 +24,7 @@ import {
 import { ModelEsque } from "./components/chat/providerIconUtils";
 import { type ProviderInstanceEntry, deriveProviderInstanceEntries } from "./providerInstances";
 import { sortModelsForProviderInstance } from "./modelOrdering";
+import { resolveChatGPTAgentModelSelection } from "./chatgptAgent";
 
 const MAX_CUSTOM_MODEL_COUNT = 32;
 export const MAX_CUSTOM_MODEL_LENGTH = 256;
@@ -242,6 +243,10 @@ export function resolveAppModelSelectionForInstance(
   providers: ReadonlyArray<ServerProvider>,
   selectedModel: string | null | undefined,
 ): string | null {
+  const chatgptAgentSelection = resolveChatGPTAgentModelSelection(instanceId);
+  if (chatgptAgentSelection) {
+    return chatgptAgentSelection.model;
+  }
   const entry = deriveProviderInstanceEntries(providers).find(
     (candidate) => candidate.instanceId === instanceId,
   );
