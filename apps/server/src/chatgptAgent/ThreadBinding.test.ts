@@ -2,7 +2,6 @@ import { ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
@@ -18,8 +17,6 @@ layer("ChatGPTAgentThreadBindings", (it) => {
     "persists a stable conversation id and one-time workspace envelope marker",
     () =>
       Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`CREATE TABLE chatgpt_agent_thread_bindings (thread_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, workspace_envelope_sent_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`;
         const bindings = yield* ChatGPTAgentThreadBindings;
         const threadId = ThreadId.make("chatgpt-binding-thread");
         yield* bindings.upsert({

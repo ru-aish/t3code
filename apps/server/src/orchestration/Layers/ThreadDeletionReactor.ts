@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
+import { ChatGPTAgentThreadBindings } from "../../chatgptAgent/ThreadBinding.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -40,6 +41,14 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const bindings = yield* ChatGPTAgentThreadBindings;
+
+  const deleteThreadBinding = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    logCleanupCauseUnlessInterrupted({
+      effect: bindings.delete(threadId),
+      message: "thread deletion cleanup skipped ChatGPT Agent binding removal",
+      threadId,
+    });
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -59,6 +68,7 @@ const make = Effect.gen(function* () {
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
+    yield* deleteThreadBinding(threadId);
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId);
   });
