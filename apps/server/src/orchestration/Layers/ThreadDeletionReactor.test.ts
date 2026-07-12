@@ -21,6 +21,7 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import {
   logCleanupCauseUnlessInterrupted,
@@ -71,6 +72,11 @@ const threadDeletionReactorTestLayer = effectIt.layer(
     Layer.provideMerge(
       Layer.mock(TerminalManager.TerminalManager, {
         close: () => Effect.void,
+      }),
+    ),
+    Layer.provideMerge(
+      Layer.mock(ProjectionSnapshotQuery, {
+        getThreadDetailById: () => Effect.succeed(Option.none()),
       }),
     ),
   ),

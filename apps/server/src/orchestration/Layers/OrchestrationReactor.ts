@@ -20,16 +20,14 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
   const chatgptAgentReactor = yield* ChatGPTAgentReactor;
 
-  const start: OrchestrationReactorShape["start"] = Effect.fn("start")(
-    function* () {
-      yield* providerRuntimeIngestion.start();
-      yield* providerCommandReactor.start();
-      yield* checkpointReactor.start();
-      yield* threadDeletionReactor.start();
-      yield* agentAwarenessRelay.start();
-      yield* chatgptAgentReactor.start();
-    },
-  );
+  const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
+    yield* providerRuntimeIngestion.start();
+    yield* providerCommandReactor.start();
+    yield* checkpointReactor.start();
+    yield* threadDeletionReactor.start();
+    yield* agentAwarenessRelay.start();
+    yield* chatgptAgentReactor.start();
+  });
 
   return {
     start,

@@ -35,6 +35,7 @@ import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
+import { isChatGPTAgentThread } from "../../chatgptAgent/ChatGPTAgentRouter.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -749,11 +750,19 @@ const make = Effect.gen(function* () {
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
+      const thread = yield* projectionSnapshotQuery.getThreadDetailById(event.payload.threadId);
+      if (Option.isSome(thread) && isChatGPTAgentThread(thread.value)) {
+        return;
+      }
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
       return;
     }
 
     if (event.type === "thread.checkpoint-revert-requested") {
+      const thread = yield* projectionSnapshotQuery.getThreadDetailById(event.payload.threadId);
+      if (Option.isSome(thread) && isChatGPTAgentThread(thread.value)) {
+        return;
+      }
       yield* handleRevertRequested(event).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
@@ -775,6 +784,10 @@ const make = Effect.gen(function* () {
     // turn.completed runtime events to this reactor (shared subscription), so
     // reacting to the domain event is the reliable path.
     if (event.type === "thread.turn-diff-completed") {
+      const thread = yield* projectionSnapshotQuery.getThreadDetailById(event.payload.threadId);
+      if (Option.isSome(thread) && isChatGPTAgentThread(thread.value)) {
+        return;
+      }
       yield* captureCheckpointFromPlaceholder(event).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
@@ -793,6 +806,10 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
+    const thread = yield* projectionSnapshotQuery.getThreadDetailById(event.threadId);
+    if (Option.isSome(thread) && isChatGPTAgentThread(thread.value)) {
+      return;
+    }
     if (event.type === "turn.started") {
       yield* ensurePreTurnBaselineFromTurnStart(event);
       return;

@@ -38,6 +38,7 @@ import {
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { isChatGPTAgentThread } from "../../chatgptAgent/ChatGPTAgentRouter.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 
@@ -1205,6 +1206,10 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      const routedThread = yield* projectionSnapshotQuery.getThreadDetailById(event.threadId);
+      if (Option.isSome(routedThread) && isChatGPTAgentThread(routedThread.value)) {
+        return;
+      }
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 

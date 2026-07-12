@@ -1,10 +1,4 @@
-import {
-  ArchiveIcon,
-  ArchiveX,
-  LoaderIcon,
-  PlusIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { ArchiveIcon, ArchiveX, LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useAtomValue } from "@effect/atom-react";
@@ -30,11 +24,7 @@ import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
-import {
-  APP_VERSION,
-  HOSTED_APP_CHANNEL,
-  HOSTED_APP_CHANNEL_LABEL,
-} from "../../branding";
+import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -45,15 +35,9 @@ import {
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { isElectron } from "../../env";
-import {
-  buildHostedChannelSelectionUrl,
-  type HostedAppChannel,
-} from "../../hostedPairing";
+import { buildHostedChannelSelectionUrl, type HostedAppChannel } from "../../hostedPairing";
 import { useTheme } from "../../hooks/useTheme";
-import {
-  usePrimarySettings,
-  useUpdatePrimarySettings,
-} from "../../hooks/useSettings";
+import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
@@ -74,19 +58,10 @@ import {
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useProjects } from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
-import {
-  formatRelativeTime,
-  formatRelativeTimeLabel,
-} from "../../timestampFormat";
+import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -160,15 +135,9 @@ const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
   provider: definition.value,
 }));
 
-function ProviderLastChecked({
-  lastCheckedAt,
-}: {
-  lastCheckedAt: string | null;
-}) {
+function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
   useRelativeTimeTick();
-  const lastCheckedRelative = lastCheckedAt
-    ? formatRelativeTime(lastCheckedAt)
-    : null;
+  const lastCheckedRelative = lastCheckedAt ? formatRelativeTime(lastCheckedAt) : null;
 
   if (!lastCheckedRelative) {
     return null;
@@ -178,10 +147,7 @@ function ProviderLastChecked({
     <span className="text-[11px] text-muted-foreground/60">
       {lastCheckedRelative.suffix ? (
         <>
-          Checked{" "}
-          <span className="font-mono tabular-nums">
-            {lastCheckedRelative.value}
-          </span>{" "}
+          Checked <span className="font-mono tabular-nums">{lastCheckedRelative.value}</span>{" "}
           {lastCheckedRelative.suffix}
         </>
       ) : (
@@ -195,9 +161,7 @@ function AboutVersionTitle() {
   return (
     <span className="inline-flex items-center gap-2">
       <span>Version</span>
-      <code className="text-[11px] font-medium text-muted-foreground">
-        {APP_VERSION}
-      </code>
+      <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
     </span>
   );
 }
@@ -206,8 +170,7 @@ function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
 
-  const hasDesktopBridge =
-    typeof window !== "undefined" && Boolean(window.desktopBridge);
+  const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
 
@@ -230,10 +193,7 @@ function AboutVersionSection() {
             stackedThreadToast({
               type: "error",
               title: "Could not change update track",
-              description:
-                error instanceof Error
-                  ? error.message
-                  : "Update track change failed.",
+              description: error instanceof Error ? error.message : "Update track change failed.",
             }),
           );
         })
@@ -248,9 +208,7 @@ function AboutVersionSection() {
     const bridge = window.desktopBridge;
     if (!bridge) return;
 
-    const action = updateState
-      ? resolveDesktopUpdateButtonAction(updateState)
-      : "none";
+    const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
 
     if (action === "download") {
       void bridge.downloadUpdate().catch((error: unknown) => {
@@ -258,8 +216,7 @@ function AboutVersionSection() {
           stackedThreadToast({
             type: "error",
             title: "Could not download update",
-            description:
-              error instanceof Error ? error.message : "Download failed.",
+            description: error instanceof Error ? error.message : "Download failed.",
           }),
         );
       });
@@ -278,8 +235,7 @@ function AboutVersionSection() {
           stackedThreadToast({
             type: "error",
             title: "Could not install update",
-            description:
-              error instanceof Error ? error.message : "Install failed.",
+            description: error instanceof Error ? error.message : "Install failed.",
           }),
         );
       });
@@ -296,8 +252,7 @@ function AboutVersionSection() {
               type: "error",
               title: "Could not check for updates",
               description:
-                result.state.message ??
-                "Automatic updates are not available in this build.",
+                result.state.message ?? "Automatic updates are not available in this build.",
             }),
           );
         }
@@ -307,19 +262,14 @@ function AboutVersionSection() {
           stackedThreadToast({
             type: "error",
             title: "Could not check for updates",
-            description:
-              error instanceof Error ? error.message : "Update check failed.",
+            description: error instanceof Error ? error.message : "Update check failed.",
           }),
         );
       });
   }, [updateState]);
 
-  const action = updateState
-    ? resolveDesktopUpdateButtonAction(updateState)
-    : "none";
-  const buttonTooltip = updateState
-    ? getDesktopUpdateButtonTooltip(updateState)
-    : null;
+  const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
+  const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
   const buttonDisabled =
     action === "none"
       ? !canCheckForUpdate(updateState)
@@ -335,9 +285,7 @@ function AboutVersionSection() {
     "up-to-date": "Up to Date",
   };
   const buttonLabel =
-    actionLabel[action] ??
-    statusLabel[updateState?.status ?? ""] ??
-    "Check for Updates";
+    actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
   const description =
     action === "download" || action === "install"
       ? "Update available."
@@ -362,9 +310,7 @@ function AboutVersionSection() {
                 </Button>
               }
             />
-            {buttonTooltip ? (
-              <TooltipPopup>{buttonTooltip}</TooltipPopup>
-            ) : null}
+            {buttonTooltip ? <TooltipPopup>{buttonTooltip}</TooltipPopup> : null}
           </Tooltip>
         }
       />
@@ -415,10 +361,7 @@ function AboutVersionSection() {
                 );
               }}
             >
-              <SelectTrigger
-                className="w-full sm:w-40"
-                aria-label="Update track"
-              >
+              <SelectTrigger className="w-full sm:w-40" aria-label="Update track">
                 <SelectValue>{HOSTED_APP_CHANNEL_LABEL}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -453,47 +396,37 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
-      ...(settings.sidebarThreadPreviewCount !==
-      DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
+      ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
-      ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap
-        ? ["Word wrap"]
-        : []),
-      ...(settings.diffIgnoreWhitespace !==
-      DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
+      ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
+      ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
         : []),
-      ...(settings.autoOpenPlanSidebar !==
-      DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
+      ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
         ? ["Auto-open task panel"]
         : []),
-      ...(settings.enableAssistantStreaming !==
-      DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
+      ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
         ? ["Assistant output"]
         : []),
       ...(Duration.toMillis(settings.automaticGitFetchInterval) !==
       Duration.toMillis(DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval)
         ? ["Automatic Git fetch interval"]
         : []),
-      ...(settings.defaultThreadEnvMode !==
-      DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
+      ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
         ? ["New thread mode"]
         : []),
       ...(settings.newWorktreesStartFromOrigin !==
       DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
         ? ["New worktrees start from origin"]
         : []),
-      ...(settings.addProjectBaseDirectory !==
-      DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
+      ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
         ? ["Add project base directory"]
         : []),
-      ...(settings.confirmThreadArchive !==
-      DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
+      ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
         ? ["Archive confirmation"]
         : []),
-      ...(settings.confirmThreadDelete !==
-      DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
+      ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
         ? ["Delete confirmation"]
         : []),
       ...(isGitWritingModelDirty ? ["Git writing model"] : []),
@@ -520,10 +453,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     if (changedSettingLabels.length === 0) return;
     const api = readLocalApi();
     const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
-      [
-        "Restore default settings?",
-        `This will reset: ${changedSettingLabels.join(", ")}.`,
-      ].join("\n"),
+      ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
+        "\n",
+      ),
     );
     if (!confirmed) return;
 
@@ -532,21 +464,16 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-      sidebarThreadPreviewCount:
-        DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
+      sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
-      enableAssistantStreaming:
-        DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
-      automaticGitFetchInterval:
-        DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
+      enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
+      automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-      newWorktreesStartFromOrigin:
-        DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
+      newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
-      textGenerationModelSelection:
-        DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+      textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
     });
     onRestored?.();
   }, [changedSettingLabels, onRestored, setTheme, updateSettings]);
@@ -571,18 +498,12 @@ export function GeneralSettingsPanel() {
     otlpMetricsUrl: observability?.otlpMetricsUrl,
   });
 
-  const textGenerationModelSelection = resolveAppModelSelectionState(
-    settings,
-    serverProviders,
-  );
+  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const textGenModel = textGenerationModelSelection.model;
   const textGenModelOptions = textGenerationModelSelection.options;
   const gitModelInstanceEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(serverProviders),
-      settings,
-    ),
+    applyProviderInstanceSettings(deriveProviderInstanceEntries(serverProviders), settings),
   );
   const textGenInstanceEntry = gitModelInstanceEntries.find(
     (entry) => entry.instanceId === textGenInstanceId,
@@ -608,41 +529,26 @@ export function GeneralSettingsPanel() {
           description="Choose how T3 Code looks across the app."
           resetAction={
             theme !== "system" ? (
-              <SettingResetButton
-                label="theme"
-                onClick={() => setTheme("system")}
-              />
+              <SettingResetButton label="theme" onClick={() => setTheme("system")} />
             ) : null
           }
           control={
             <Select
               value={theme}
               onValueChange={(value) => {
-                if (
-                  value === "system" ||
-                  value === "light" ||
-                  value === "dark"
-                ) {
+                if (value === "system" || value === "light" || value === "dark") {
                   setTheme(value);
                 }
               }}
             >
-              <SelectTrigger
-                className="w-full sm:w-40"
-                aria-label="Theme preference"
-              >
+              <SelectTrigger className="w-full sm:w-40" aria-label="Theme preference">
                 <SelectValue>
-                  {THEME_OPTIONS.find((option) => option.value === theme)
-                    ?.label ?? "System"}
+                  {THEME_OPTIONS.find((option) => option.value === theme)?.label ?? "System"}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 {THEME_OPTIONS.map((option) => (
-                  <SelectItem
-                    hideIndicator
-                    key={option.value}
-                    value={option.value}
-                  >
+                  <SelectItem hideIndicator key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
                 ))}
@@ -655,8 +561,7 @@ export function GeneralSettingsPanel() {
           title="Time format"
           description="System default follows your browser or OS clock preference."
           resetAction={
-            settings.timestampFormat !==
-            DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
+            settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
               <SettingResetButton
                 label="time format"
                 onClick={() =>
@@ -671,22 +576,13 @@ export function GeneralSettingsPanel() {
             <Select
               value={settings.timestampFormat}
               onValueChange={(value) => {
-                if (
-                  value === "locale" ||
-                  value === "12-hour" ||
-                  value === "24-hour"
-                ) {
+                if (value === "locale" || value === "12-hour" || value === "24-hour") {
                   updateSettings({ timestampFormat: value });
                 }
               }}
             >
-              <SelectTrigger
-                className="w-full sm:w-40"
-                aria-label="Timestamp format"
-              >
-                <SelectValue>
-                  {TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}
-                </SelectValue>
+              <SelectTrigger className="w-full sm:w-40" aria-label="Timestamp format">
+                <SelectValue>{TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="locale">
@@ -721,9 +617,7 @@ export function GeneralSettingsPanel() {
           control={
             <Switch
               checked={settings.wordWrap}
-              onCheckedChange={(checked) =>
-                updateSettings({ wordWrap: Boolean(checked) })
-              }
+              onCheckedChange={(checked) => updateSettings({ wordWrap: Boolean(checked) })}
               aria-label="Wrap code, tables, diffs, and file previews by default"
             />
           }
@@ -733,14 +627,12 @@ export function GeneralSettingsPanel() {
           title="Hide whitespace changes"
           description="Set whether the diff panel ignores whitespace-only edits by default."
           resetAction={
-            settings.diffIgnoreWhitespace !==
-            DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
+            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
               <SettingResetButton
                 label="diff whitespace changes"
                 onClick={() =>
                   updateSettings({
-                    diffIgnoreWhitespace:
-                      DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
+                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
                   })
                 }
               />
@@ -767,8 +659,7 @@ export function GeneralSettingsPanel() {
                 label="assistant output"
                 onClick={() =>
                   updateSettings({
-                    enableAssistantStreaming:
-                      DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
+                    enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
                   })
                 }
               />
@@ -789,16 +680,14 @@ export function GeneralSettingsPanel() {
           title="Voice input"
           description="Use Groq Whisper to transcribe microphone recordings in the composer."
           resetAction={
-            settings.speechToText.groqModel !==
-            DEFAULT_UNIFIED_SETTINGS.speechToText.groqModel ? (
+            settings.speechToText.groqModel !== DEFAULT_UNIFIED_SETTINGS.speechToText.groqModel ? (
               <SettingResetButton
                 label="voice input model"
                 onClick={() =>
                   updateSettings({
                     speechToText: {
                       ...settings.speechToText,
-                      groqModel:
-                        DEFAULT_UNIFIED_SETTINGS.speechToText.groqModel,
+                      groqModel: DEFAULT_UNIFIED_SETTINGS.speechToText.groqModel,
                     },
                   })
                 }
@@ -823,9 +712,7 @@ export function GeneralSettingsPanel() {
                   });
                 }}
                 placeholder={
-                  settings.speechToText.groqApiKeyRedacted
-                    ? "Stored Groq API key"
-                    : "Groq API key"
+                  settings.speechToText.groqApiKeyRedacted ? "Stored Groq API key" : "Groq API key"
                 }
                 autoComplete="off"
                 spellCheck={false}
@@ -851,10 +738,7 @@ export function GeneralSettingsPanel() {
               <Select
                 value={settings.speechToText.groqModel}
                 onValueChange={(value) => {
-                  if (
-                    value === "whisper-large-v3" ||
-                    value === "whisper-large-v3-turbo"
-                  ) {
+                  if (value === "whisper-large-v3" || value === "whisper-large-v3-turbo") {
                     updateSettings({
                       speechToText: {
                         ...settings.speechToText,
@@ -864,13 +748,9 @@ export function GeneralSettingsPanel() {
                   }
                 }}
               >
-                <SelectTrigger
-                  className="w-full sm:w-48"
-                  aria-label="Voice input model"
-                >
+                <SelectTrigger className="w-full sm:w-48" aria-label="Voice input model">
                   <SelectValue>
-                    {settings.speechToText.groqModel ===
-                    "whisper-large-v3-turbo"
+                    {settings.speechToText.groqModel === "whisper-large-v3-turbo"
                       ? "Whisper Large v3 Turbo"
                       : "Whisper Large v3"}
                   </SelectValue>
@@ -898,8 +778,7 @@ export function GeneralSettingsPanel() {
                 label="provider update checks"
                 onClick={() =>
                   updateSettings({
-                    enableProviderUpdateChecks:
-                      DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+                    enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
                   })
                 }
               />
@@ -920,14 +799,12 @@ export function GeneralSettingsPanel() {
           title="Auto-open task panel"
           description="Open the right-side plan and task panel automatically when steps appear."
           resetAction={
-            settings.autoOpenPlanSidebar !==
-            DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
+            settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
               <SettingResetButton
                 label="auto-open task panel"
                 onClick={() =>
                   updateSettings({
-                    autoOpenPlanSidebar:
-                      DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
+                    autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
                   })
                 }
               />
@@ -948,16 +825,14 @@ export function GeneralSettingsPanel() {
           title="New threads"
           description="Pick the default workspace mode for newly created draft threads."
           resetAction={
-            settings.defaultThreadEnvMode !==
-              DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ||
+            settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ||
             settings.newWorktreesStartFromOrigin !==
               DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin ? (
               <SettingResetButton
                 label="new threads"
                 onClick={() =>
                   updateSettings({
-                    defaultThreadEnvMode:
-                      DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+                    defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
                     newWorktreesStartFromOrigin:
                       DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
                   })
@@ -974,14 +849,9 @@ export function GeneralSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger
-                className="w-full sm:w-44"
-                aria-label="Default thread mode"
-              >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Default thread mode">
                 <SelectValue>
-                  {settings.defaultThreadEnvMode === "worktree"
-                    ? "New worktree"
-                    : "Local"}
+                  {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -1039,8 +909,7 @@ export function GeneralSettingsPanel() {
                 label="add project base directory"
                 onClick={() =>
                   updateSettings({
-                    addProjectBaseDirectory:
-                      DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
                   })
                 }
               />
@@ -1050,9 +919,7 @@ export function GeneralSettingsPanel() {
             <DraftInput
               className="w-full sm:w-72"
               value={settings.addProjectBaseDirectory}
-              onCommit={(next) =>
-                updateSettings({ addProjectBaseDirectory: next })
-              }
+              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
               placeholder="~/"
               spellCheck={false}
               aria-label="Add project base directory"
@@ -1064,14 +931,12 @@ export function GeneralSettingsPanel() {
           title="Archive confirmation"
           description="Require a second click on the inline archive action before a thread is archived."
           resetAction={
-            settings.confirmThreadArchive !==
-            DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
+            settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
               <SettingResetButton
                 label="archive confirmation"
                 onClick={() =>
                   updateSettings({
-                    confirmThreadArchive:
-                      DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
+                    confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
                   })
                 }
               />
@@ -1092,14 +957,12 @@ export function GeneralSettingsPanel() {
           title="Delete confirmation"
           description="Ask before deleting a thread and its chat history."
           resetAction={
-            settings.confirmThreadDelete !==
-            DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
+            settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
               <SettingResetButton
                 label="delete confirmation"
                 onClick={() =>
                   updateSettings({
-                    confirmThreadDelete:
-                      DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
+                    confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
                   })
                 }
               />
@@ -1147,10 +1010,7 @@ export function GeneralSettingsPanel() {
                     textGenerationModelSelection: resolveAppModelSelectionState(
                       {
                         ...settings,
-                        textGenerationModelSelection: createModelSelection(
-                          instanceId,
-                          model,
-                        ),
+                        textGenerationModelSelection: createModelSelection(instanceId, model),
                       },
                       serverProviders,
                     ),
@@ -1207,11 +1067,7 @@ export function GeneralSettingsPanel() {
           title="Diagnostics"
           description={diagnosticsDescription}
           control={
-            <Button
-              render={<Link to="/settings/diagnostics" />}
-              size="xs"
-              variant="outline"
-            >
+            <Button render={<Link to="/settings/diagnostics" />} size="xs" variant="outline">
               View diagnostics
             </Button>
           }
@@ -1226,12 +1082,9 @@ export function ProviderSettingsPanel() {
   const updateSettings = useUpdatePrimarySettings();
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const primaryEnvironment = usePrimaryEnvironment();
-  const refreshServerProviders = useAtomCommand(
-    serverEnvironment.refreshProviders,
-    {
-      reportFailure: false,
-    },
-  );
+  const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider, {
     reportFailure: false,
   });
@@ -1240,9 +1093,7 @@ export function ProviderSettingsPanel() {
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
-  const [openInstanceDetails, setOpenInstanceDetails] = useState<
-    Record<string, boolean>
-  >({});
+  const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
   const refreshingRef = useRef(false);
 
   const providerUpdateCandidates = useMemo(
@@ -1250,13 +1101,7 @@ export function ProviderSettingsPanel() {
     [serverProviders],
   );
   const providerUpdateCandidateByInstanceId = useMemo(
-    () =>
-      new Map(
-        providerUpdateCandidates.map((candidate) => [
-          candidate.instanceId,
-          candidate,
-        ]),
-      ),
+    () => new Map(providerUpdateCandidates.map((candidate) => [candidate.instanceId, candidate])),
     [providerUpdateCandidates],
   );
   const visibleProviderSettings = PROVIDER_SETTINGS.filter(
@@ -1264,20 +1109,15 @@ export function ProviderSettingsPanel() {
       providerSettings.provider !== "cursor" ||
       serverProviders.some(
         (provider) =>
-          provider.instanceId ===
-          defaultInstanceIdForDriver(ProviderDriverKind.make("cursor")),
+          provider.instanceId === defaultInstanceIdForDriver(ProviderDriverKind.make("cursor")),
       ),
   );
-  const textGenerationModelSelection = resolveAppModelSelectionState(
-    settings,
-    serverProviders,
-  );
+  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const lastCheckedAt =
     serverProviders.length > 0
       ? serverProviders.reduce(
-          (latest, provider) =>
-            provider.checkedAt > latest ? provider.checkedAt : latest,
+          (latest, provider) => (provider.checkedAt > latest ? provider.checkedAt : latest),
           serverProviders[0]!.checkedAt,
         )
       : null;
@@ -1369,9 +1209,7 @@ export function ProviderSettingsPanel() {
     ProviderDriverKind,
     Array<[ProviderInstanceId, ProviderInstanceConfig]>
   >();
-  for (const [rawId, instance] of Object.entries(
-    settings.providerInstances ?? {},
-  )) {
+  for (const [rawId, instance] of Object.entries(settings.providerInstances ?? {})) {
     const driver = instance.driver;
     const list = instancesByDriver.get(driver) ?? [];
     list.push([rawId as ProviderInstanceId, instance]);
@@ -1386,18 +1224,12 @@ export function ProviderSettingsPanel() {
 
   const rows: InstanceRow[] = [];
   const visibleDriverKinds = new Set<ProviderDriverKind>(
-    visibleProviderSettings.map(
-      (providerSettings) => providerSettings.provider,
-    ),
+    visibleProviderSettings.map((providerSettings) => providerSettings.provider),
   );
 
   for (const providerSettings of visibleProviderSettings) {
-    type LegacyProviderSettings =
-      (typeof settings.providers)[keyof typeof settings.providers];
-    const legacyProviders = settings.providers as Record<
-      string,
-      LegacyProviderSettings
-    >;
+    type LegacyProviderSettings = (typeof settings.providers)[keyof typeof settings.providers];
+    const legacyProviders = settings.providers as Record<string, LegacyProviderSettings>;
     const defaultLegacyProviders = DEFAULT_UNIFIED_SETTINGS.providers as Record<
       string,
       LegacyProviderSettings
@@ -1406,8 +1238,7 @@ export function ProviderSettingsPanel() {
     const defaultInstanceId = defaultInstanceIdForDriver(driver);
     const explicitInstance = settings.providerInstances?.[defaultInstanceId];
     const legacyConfig = legacyProviders[providerSettings.provider]!;
-    const defaultLegacyConfig =
-      defaultLegacyProviders[providerSettings.provider]!;
+    const defaultLegacyConfig = defaultLegacyProviders[providerSettings.provider]!;
     const effectiveInstance: ProviderInstanceConfig =
       explicitInstance ??
       ({
@@ -1416,8 +1247,7 @@ export function ProviderSettingsPanel() {
         config: legacyConfig,
       } satisfies ProviderInstanceConfig);
     const isDirty =
-      explicitInstance !== undefined ||
-      !Equal.equals(legacyConfig, defaultLegacyConfig);
+      explicitInstance !== undefined || !Equal.equals(legacyConfig, defaultLegacyConfig);
     rows.push({
       instanceId: defaultInstanceId,
       instance: effectiveInstance,
@@ -1425,9 +1255,7 @@ export function ProviderSettingsPanel() {
       isDefault: true,
       isDirty,
     });
-    for (const [id, instance] of instancesByDriver.get(
-      providerSettings.provider,
-    ) ?? []) {
+    for (const [id, instance] of instancesByDriver.get(providerSettings.provider) ?? []) {
       if (id === defaultInstanceId) continue;
       rows.push({
         instanceId: id,
@@ -1472,14 +1300,8 @@ export function ProviderSettingsPanel() {
 
   const deleteProviderInstance = (id: ProviderInstanceId) => {
     updateSettings({
-      providerInstances: withoutProviderInstanceKey(
-        settings.providerInstances,
-        id,
-      ),
-      providerModelPreferences: withoutProviderInstanceKey(
-        settings.providerModelPreferences,
-        id,
-      ),
+      providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
+      providerModelPreferences: withoutProviderInstanceKey(settings.providerModelPreferences, id),
       favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], id),
     });
   };
@@ -1491,16 +1313,9 @@ export function ProviderSettingsPanel() {
       readonly modelOrder: ReadonlyArray<string>;
     },
   ) => {
-    const hiddenModels = [
-      ...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0)),
-    ];
-    const modelOrder = [
-      ...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0)),
-    ];
-    const rest = withoutProviderInstanceKey(
-      settings.providerModelPreferences,
-      instanceId,
-    );
+    const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
+    const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
+    const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
     updateSettings({
       providerModelPreferences:
         hiddenModels.length === 0 && modelOrder.length === 0
@@ -1523,26 +1338,20 @@ export function ProviderSettingsPanel() {
       ...new Set(
         Arr.filterMap(nextFavoriteModels, (slug) => {
           const trimmedSlug = slug.trim();
-          return trimmedSlug.length > 0
-            ? Result.succeed(trimmedSlug)
-            : Result.failVoid;
+          return trimmedSlug.length > 0 ? Result.succeed(trimmedSlug) : Result.failVoid;
         }),
       ),
     ];
     updateSettings({
       favorites: [
-        ...withoutProviderInstanceFavorites(
-          settings.favorites ?? [],
-          instanceId,
-        ),
+        ...withoutProviderInstanceFavorites(settings.favorites ?? [], instanceId),
         ...favoriteModels.map((model) => ({ provider: instanceId, model })),
       ],
     });
   };
 
   const resetDefaultInstance = (driverKind: ProviderDriverKind) => {
-    type LegacyProviderSettings =
-      (typeof settings.providers)[keyof typeof settings.providers];
+    type LegacyProviderSettings = (typeof settings.providers)[keyof typeof settings.providers];
     const defaultLegacyProviders = DEFAULT_UNIFIED_SETTINGS.providers as Record<
       string,
       LegacyProviderSettings | undefined
@@ -1555,18 +1364,12 @@ export function ProviderSettingsPanel() {
         ...settings.providers,
         [driverKind]: defaultLegacyProvider,
       } as typeof settings.providers,
-      providerInstances: withoutProviderInstanceKey(
-        settings.providerInstances,
-        defaultInstanceId,
-      ),
+      providerInstances: withoutProviderInstanceKey(settings.providerInstances, defaultInstanceId),
       providerModelPreferences: withoutProviderInstanceKey(
         settings.providerModelPreferences,
         defaultInstanceId,
       ),
-      favorites: withoutProviderInstanceFavorites(
-        settings.favorites ?? [],
-        defaultInstanceId,
-      ),
+      favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], defaultInstanceId),
     });
   };
 
@@ -1574,8 +1377,8 @@ export function ProviderSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection title="ChatGPT Agent">
         <p className="text-sm text-muted-foreground">
-          Connects to your already-running, logged-in ChatGPT Desktop app.
-          ChatGPT keeps ownership of its tools and actions.
+          Connects to your already-running, logged-in ChatGPT Desktop app. ChatGPT keeps ownership
+          of its tools and actions.
         </p>
         <SettingsRow
           title="Enable ChatGPT Agent"
@@ -1666,34 +1469,21 @@ export function ProviderSettingsPanel() {
             (updatingProviderDrivers.has(updateCandidate.driver) ||
               serverProviders.some(
                 (provider) =>
-                  provider.driver === updateCandidate.driver &&
-                  isProviderUpdateActive(provider),
+                  provider.driver === updateCandidate.driver && isProviderUpdateActive(provider),
               ));
           const showInlineUpdateButton =
             updateCandidate !== undefined &&
-            hasOneClickUpdateProviderCandidate(
-              updateCandidate,
-              serverProviders,
-            );
+            hasOneClickUpdateProviderCandidate(updateCandidate, serverProviders);
           const canRunInlineUpdate =
             updateCandidate !== undefined &&
-            canOneClickUpdateProviderCandidate(
-              updateCandidate,
-              serverProviders,
-            ) &&
+            canOneClickUpdateProviderCandidate(updateCandidate, serverProviders) &&
             !updatingProviderDrivers.has(updateCandidate.driver);
-          const modelPreferences = settings.providerModelPreferences?.[
-            row.instanceId
-          ] ?? {
+          const modelPreferences = settings.providerModelPreferences?.[row.instanceId] ?? {
             hiddenModels: [],
             modelOrder: [],
           };
-          const favoriteModels = Arr.filterMap(
-            settings.favorites ?? [],
-            (favorite) =>
-              favorite.provider === row.instanceId
-                ? Result.succeed(favorite.model)
-                : Result.failVoid,
+          const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
+            favorite.provider === row.instanceId ? Result.succeed(favorite.model) : Result.failVoid,
           );
           const resetLabel = driverOption?.label ?? String(row.driver);
           const headerAction =
@@ -1720,8 +1510,7 @@ export function ProviderSettingsPanel() {
               onUpdate={(next) => {
                 const wasEnabled = row.instance.enabled ?? true;
                 const isDisabling = next.enabled === false && wasEnabled;
-                const shouldClearTextGen =
-                  isDisabling && textGenInstanceId === row.instanceId;
+                const shouldClearTextGen = isDisabling && textGenInstanceId === row.instanceId;
                 if (shouldClearTextGen) {
                   updateProviderInstance(row, next, {
                     textGenerationModelSelection:
@@ -1731,11 +1520,7 @@ export function ProviderSettingsPanel() {
                   updateProviderInstance(row, next);
                 }
               }}
-              onDelete={
-                row.isDefault
-                  ? undefined
-                  : () => deleteProviderInstance(row.instanceId)
-              }
+              onDelete={row.isDefault ? undefined : () => deleteProviderInstance(row.instanceId)}
               headerAction={headerAction}
               hiddenModels={modelPreferences.hiddenModels}
               favoriteModels={favoriteModels}
@@ -1765,19 +1550,14 @@ export function ProviderSettingsPanel() {
                     }
                   : undefined
               }
-              isUpdating={
-                showInlineUpdateButton ? isDriverUpdateRunning : undefined
-              }
+              isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
             />
           );
         })}
       </SettingsSection>
 
       {isAddInstanceDialogOpen ? (
-        <AddProviderInstanceDialog
-          open
-          onOpenChange={setIsAddInstanceDialogOpen}
-        />
+        <AddProviderInstanceDialog open onOpenChange={setIsAddInstanceDialogOpen} />
       ) : null}
     </SettingsPageContainer>
   );
@@ -1829,10 +1609,7 @@ export function ArchivedThreadsPanel() {
     for (const project of archivedProjects) {
       const projectThreads: Array<(typeof threads)[number]> = [];
       for (const thread of threads) {
-        if (
-          thread.projectId === project.id &&
-          thread.environmentId === project.environmentId
-        ) {
+        if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
           projectThreads.push(thread);
         }
       }
@@ -1842,9 +1619,7 @@ export function ArchivedThreadsPanel() {
           threads: projectThreads.toSorted((left, right) => {
             const leftKey = left.archivedAt ?? left.createdAt;
             const rightKey = right.archivedAt ?? right.createdAt;
-            return (
-              rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id)
-            );
+            return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
           }),
         });
       }
@@ -1874,8 +1649,7 @@ export function ArchivedThreadsPanel() {
             stackedThreadToast({
               type: "error",
               title: "Failed to unarchive thread",
-              description:
-                error instanceof Error ? error.message : "An error occurred.",
+              description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );
         }
@@ -1892,8 +1666,7 @@ export function ArchivedThreadsPanel() {
             stackedThreadToast({
               type: "error",
               title: "Failed to delete thread",
-              description:
-                error instanceof Error ? error.message : "An error occurred.",
+              description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );
         }
@@ -1933,12 +1706,7 @@ export function ArchivedThreadsPanel() {
           <SettingsSection
             key={project.id}
             title={project.name}
-            icon={
-              <ProjectFavicon
-                environmentId={project.environmentId}
-                cwd={project.cwd}
-              />
-            }
+            icon={<ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />}
           >
             {projectThreads.map((thread) => (
               <SettingsRow
@@ -1962,9 +1730,7 @@ export function ArchivedThreadsPanel() {
                           type: "error",
                           title: "Archived thread action failed",
                           description:
-                            error instanceof Error
-                              ? error.message
-                              : "An error occurred.",
+                            error instanceof Error ? error.message : "An error occurred.",
                         }),
                       );
                     }
@@ -1973,10 +1739,7 @@ export function ArchivedThreadsPanel() {
                 title={thread.title}
                 description={
                   <>
-                    Archived{" "}
-                    {formatRelativeTimeLabel(
-                      thread.archivedAt ?? thread.createdAt,
-                    )}
+                    Archived {formatRelativeTimeLabel(thread.archivedAt ?? thread.createdAt)}
                     {" \u00b7 Created "}
                     {formatRelativeTimeLabel(thread.createdAt)}
                   </>
@@ -2003,9 +1766,7 @@ export function ArchivedThreadsPanel() {
                               type: "error",
                               title: "Failed to unarchive thread",
                               description:
-                                error instanceof Error
-                                  ? error.message
-                                  : "An error occurred.",
+                                error instanceof Error ? error.message : "An error occurred.",
                             }),
                           );
                         }

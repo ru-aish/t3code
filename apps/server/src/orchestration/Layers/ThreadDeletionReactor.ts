@@ -3,12 +3,15 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import { ChatGPTAgentThreadBindings } from "../../chatgptAgent/ThreadBinding.ts";
+import { isChatGPTAgentThread } from "../../chatgptAgent/ChatGPTAgentRouter.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ThreadDeletionReactor,
   type ThreadDeletionReactorShape,
@@ -42,6 +45,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const bindings = yield* ChatGPTAgentThreadBindings;
+  const snapshots = yield* ProjectionSnapshotQuery;
 
   const deleteThreadBinding = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -68,8 +72,12 @@ const make = Effect.gen(function* () {
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
+    const thread = yield* snapshots.getThreadDetailById(threadId);
+    const binding = yield* bindings.get(threadId);
     yield* deleteThreadBinding(threadId);
-    yield* stopProviderSession(threadId);
+    if (Option.isNone(binding) && (!Option.isSome(thread) || !isChatGPTAgentThread(thread.value))) {
+      yield* stopProviderSession(threadId);
+    }
     yield* closeThreadTerminals(threadId);
   });
 
