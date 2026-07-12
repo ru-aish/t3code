@@ -10,6 +10,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
+import { ChatGPTAgentReactor } from "../../chatgptAgent/ChatGPTAgentReactor.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -17,14 +18,18 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const checkpointReactor = yield* CheckpointReactor;
   const threadDeletionReactor = yield* ThreadDeletionReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
+  const chatgptAgentReactor = yield* ChatGPTAgentReactor;
 
-  const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
-    yield* providerRuntimeIngestion.start();
-    yield* providerCommandReactor.start();
-    yield* checkpointReactor.start();
-    yield* threadDeletionReactor.start();
-    yield* agentAwarenessRelay.start();
-  });
+  const start: OrchestrationReactorShape["start"] = Effect.fn("start")(
+    function* () {
+      yield* providerRuntimeIngestion.start();
+      yield* providerCommandReactor.start();
+      yield* checkpointReactor.start();
+      yield* threadDeletionReactor.start();
+      yield* agentAwarenessRelay.start();
+      yield* chatgptAgentReactor.start();
+    },
+  );
 
   return {
     start,

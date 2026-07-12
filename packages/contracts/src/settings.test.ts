@@ -68,7 +68,9 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
     const ollamaId = ProviderInstanceId.make("ollama_local");
 
     expect(decoded.providerInstances[personalId]?.driver).toBe("codex");
-    expect(decoded.providerInstances[workId]?.config).toEqual({ homePath: "~/.codex_work" });
+    expect(decoded.providerInstances[workId]?.config).toEqual({
+      homePath: "~/.codex_work",
+    });
     // Critical: a config naming a driver this build does not know about
     // (`ollama` is not in `ProviderDriverKind`) must round-trip without loss.
     // The runtime handles "driver not installed" — the schema must not.
@@ -94,8 +96,27 @@ describe("ServerSettings worktree defaults", () => {
 
   it("accepts start-from-origin updates", () => {
     expect(
-      decodeServerSettingsPatch({ newWorktreesStartFromOrigin: true }).newWorktreesStartFromOrigin,
+      decodeServerSettingsPatch({ newWorktreesStartFromOrigin: true })
+        .newWorktreesStartFromOrigin,
     ).toBe(true);
+  });
+});
+
+describe("ChatGPT Agent settings", () => {
+  it("defaults to a disabled loopback desktop bridge", () => {
+    const decoded = decodeServerSettings({});
+    expect(decoded.chatgptAgent).toEqual({
+      enabled: false,
+      cdpEndpoint: "http://127.0.0.1:9337",
+    });
+  });
+
+  it("accepts a narrow endpoint patch without changing provider settings", () => {
+    expect(
+      decodeServerSettingsPatch({
+        chatgptAgent: { enabled: true, cdpEndpoint: "http://127.0.0.1:9444" },
+      }).chatgptAgent,
+    ).toEqual({ enabled: true, cdpEndpoint: "http://127.0.0.1:9444" });
   });
 });
 
@@ -110,9 +131,10 @@ describe("ServerSettingsPatch.providerInstances", () => {
       },
     });
     expect(replacement.providerInstances).toBeDefined();
-    expect(replacement.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
-      "codex",
-    );
+    expect(
+      replacement.providerInstances?.[ProviderInstanceId.make("codex_personal")]
+        ?.driver,
+    ).toBe("codex");
   });
 
   it("preserves a fork-defined driver entry through patch decoding", () => {
@@ -154,16 +176,23 @@ describe("ServerSettingsPatch string normalization", () => {
 
     expect(patch.addProjectBaseDirectory).toBe("~/Development");
     expect(patch.textGenerationModelSelection?.model).toBe("gpt-5.4-mini");
-    expect(patch.observability?.otlpTracesUrl).toBe("http://localhost:4318/v1/traces");
+    expect(patch.observability?.otlpTracesUrl).toBe(
+      "http://localhost:4318/v1/traces",
+    );
     expect(patch.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
     expect(patch.providers?.codex?.homePath).toBe("~/.codex");
-    expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
-      "codex",
-    );
-    expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.displayName).toBe(
-      "Codex Personal",
-    );
-    expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.config).toEqual({
+    expect(
+      patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]
+        ?.driver,
+    ).toBe("codex");
+    expect(
+      patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]
+        ?.displayName,
+    ).toBe("Codex Personal");
+    expect(
+      patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]
+        ?.config,
+    ).toEqual({
       homePath: "  ~/.codex-personal  ",
     });
   });
@@ -183,6 +212,8 @@ describe("ServerSettingsPatch string normalization", () => {
     });
 
     expect(encoded.addProjectBaseDirectory).toBe("~/Development");
-    expect(encoded.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
+    expect(encoded.providers?.codex?.binaryPath).toBe(
+      "/opt/homebrew/bin/codex",
+    );
   });
 });

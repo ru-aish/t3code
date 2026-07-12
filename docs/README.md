@@ -7,5 +7,6 @@
 - [Mobile](./mobile/app.md)
 - [Operations](./operations/ci.md)
 - [Providers](./providers/codex.md)
+- [ChatGPT Agent desktop bridge](./providers/chatgpt-agent.md)
 - [Reference](./reference/encyclopedia.md)
 - [User guides](./user/keybindings.md)
