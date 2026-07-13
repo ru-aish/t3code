@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   CHATGPT_AGENT_INSTANCE_ID,
+  CHATGPT_AGENT_MODEL,
+  normalizeChatGPTAgentModel,
   isChatGPTAgentSelection,
   isChatGPTAgentThread,
   isChatGPTAgentTurnStart,
@@ -31,5 +33,12 @@ describe("ChatGPTAgentRouter", () => {
         requestedModelSelection: chatgptThread.modelSelection,
       }),
     ).toBe(true);
+  });
+
+  it("defaults new selections to latest while accepting persisted desktop selections", () => {
+    expect(CHATGPT_AGENT_MODEL).toBe("latest");
+    expect(normalizeChatGPTAgentModel("desktop")).toBe("latest");
+    expect(normalizeChatGPTAgentModel("5.4")).toBe("5.4");
+    expect(normalizeChatGPTAgentModel("unknown")).toBe("latest");
   });
 });

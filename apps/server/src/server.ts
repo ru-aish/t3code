@@ -52,6 +52,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ChatGPTAgentReactorLive } from "./chatgptAgent/ChatGPTAgentReactor.ts";
 import { ChatGPTDesktopBridgeLive } from "./chatgptAgent/ChatGPTDesktopBridge.ts";
+import { ChatGPTDesktopControllerLive } from "./chatgptAgent/ChatGPTDesktopController.ts";
 import { layer as ChatGPTAgentThreadBindingsLive } from "./chatgptAgent/ThreadBinding.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -300,6 +301,7 @@ const RuntimeCoreDependenciesWithProvidersLive = ReactorLayerLive.pipe(
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ChatGPTAgentThreadBindingsLive),
   Layer.provideMerge(ChatGPTDesktopBridgeLive),
+  Layer.provideMerge(ChatGPTDesktopControllerLive),
   Layer.provideMerge(Keybindings.layer),
   Layer.provideMerge(ProviderRegistryLive),
   // The instance registry is the new routing keystone — text generation,

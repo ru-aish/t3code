@@ -1,4 +1,4 @@
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
@@ -6,6 +6,7 @@ import {
   ChatGPTDesktopBridgeError,
   ChatGPTDesktopBridgeLive,
   ChatGPTDesktopBridgeTest,
+  type RendererTurn,
 } from "./ChatGPTDesktopBridge.ts";
 
 const conversationId = "123e4567-e89b-42d3-a456-426614174000";
@@ -15,7 +16,7 @@ type Listener = (event: Event | MessageEvent) => void;
 class FakeSocket {
   static instances: FakeSocket[] = [];
   readonly listeners = new Map<string, Set<Listener>>();
-  closed = false;
+  readonly sentMethods: string[] = [];
   onSend: (message: string) => void = () => {};
 
   constructor(_url: string) {
@@ -33,11 +34,10 @@ class FakeSocket {
     this.listeners.get(name)?.delete(listener);
   }
 
-  close() {
-    this.closed = true;
-  }
+  close() {}
 
   send(message: string) {
+    this.sentMethods.push((JSON.parse(message) as { method: string }).method);
     this.onSend(message);
   }
 
@@ -49,7 +49,7 @@ class FakeSocket {
 
 const desktopTarget = {
   type: "page",
-  url: "https://chatgpt.com/c/example",
+  url: "http://127.0.0.1:5175/?mcpAppSandboxDevtools=1",
   webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/example",
 };
 
@@ -73,16 +73,6 @@ async function withDesktop(onSocket: (socket: FakeSocket) => void, run: () => Pr
   }
 }
 
-function respond(socket: FakeSocket, value: unknown, malformed = false) {
-  socket.onSend = (message) => {
-    const { id } = JSON.parse(message) as { id: number };
-    if (malformed) socket.emit("message", "not JSON");
-    queueMicrotask(() =>
-      socket.emit("message", JSON.stringify({ id, result: { result: { value } } })),
-    );
-  };
-}
-
 async function assertRejected(promise: Promise<unknown>, pattern: RegExp) {
   try {
     await promise;
@@ -92,187 +82,323 @@ async function assertRejected(promise: Promise<unknown>, pattern: RegExp) {
   }
 }
 
-it("rejects non-loopback HTTP and WebSocket endpoints", () => {
-  assert.throws(() => ChatGPTDesktopBridgeTest.validateEndpoint("https://127.0.0.1:9222"));
-  assert.throws(() => ChatGPTDesktopBridgeTest.validateEndpoint("http://192.168.1.2:9222"));
-  assert.throws(() =>
-    ChatGPTDesktopBridgeTest.validateWebSocketEndpoint("ws://example.com/devtools"),
-  );
-  assert.equal(ChatGPTDesktopBridgeTest.validateEndpoint("http://[::1]:9222").hostname, "[::1]");
-});
+describe("ChatGPTDesktopBridge", () => {
+  it("rejects non-loopback HTTP and WebSocket endpoints and discovers only the local renderer", async () => {
+    assert.throws(() => ChatGPTDesktopBridgeTest.validateEndpoint("https://127.0.0.1:9222"));
+    assert.throws(() => ChatGPTDesktopBridgeTest.validateEndpoint("http://192.168.1.2:9222"));
+    assert.throws(() =>
+      ChatGPTDesktopBridgeTest.validateWebSocketEndpoint("ws://example.com/devtools"),
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify([desktopTarget]))) as unknown as typeof fetch;
+    try {
+      const target = await ChatGPTDesktopBridgeTest.discoverTarget("http://127.0.0.1:9222");
+      assert.equal(target.webSocketDebuggerUrl, desktopTarget.webSocketDebuggerUrl);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 
-it("discovers only a local ChatGPT renderer target", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify([desktopTarget]))) as unknown as typeof fetch;
-  try {
-    const target = await ChatGPTDesktopBridgeTest.discoverTarget("http://127.0.0.1:9222");
-    assert.equal(target.webSocketDebuggerUrl, desktopTarget.webSocketDebuggerUrl);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
+  it("prefers the authenticated local renderer and rejects the quick-chat prewarm target", () => {
+    const target = ChatGPTDesktopBridgeTest.selectDesktopTarget([
+      {
+        type: "page",
+        url: "http://127.0.0.1:5175/?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9337/prewarm",
+      },
+      {
+        type: "page",
+        url: "http://127.0.0.1:5175/?mcpAppSandboxDevtools=1",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9337/main",
+      },
+      {
+        type: "page",
+        url: "https://chatgpt.com/",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9337/external",
+      },
+    ]);
+    assert.equal(target?.webSocketDebuggerUrl, "ws://127.0.0.1:9337/main");
+  });
 
-it("filters user turns before reading assistant response text", () => {
-  const turns = ChatGPTDesktopBridgeTest.assistantTurns([
-    { id: "user", role: "user", text: "just sent" },
-    { id: "assistant", role: "assistant", text: "answer" },
-  ]);
-  assert.deepEqual(turns, [{ id: "assistant", role: "assistant", text: "answer" }]);
-});
+  it("keeps stable role-unit keys and excludes user units from assistant streaming", () => {
+    const turns: ReadonlyArray<RendererTurn> = ChatGPTDesktopBridgeTest.parseRoleUnits([
+      { key: "turn-1:user", text: "prompt" },
+      { key: "turn-1:assistant", text: "answer" },
+      { key: "turn-1:tool", text: "ignored" },
+    ]);
+    assert.deepEqual(
+      turns.map((turn) => turn.id),
+      ["turn-1:user", "turn-1:assistant"],
+    );
+    assert.deepEqual(ChatGPTDesktopBridgeTest.assistantTurns(turns), [turns[1]!]);
+  });
 
-it("waits through a replaced renderer context and verifies the saved conversation", async () => {
-  let attempts = 0;
-  await ChatGPTDesktopBridgeTest.waitForRenderer(async () => {
-    attempts += 1;
-    if (attempts === 1)
-      throw new ChatGPTDesktopBridgeError({
-        kind: "incompatible",
-        detail: "Execution context was destroyed during navigation.",
-      });
-    return {
-      composer: true,
-      conversationId: attempts === 2 ? "wrong" : conversationId,
+  it("retries renderer probing after a navigation replaces the execution context", async () => {
+    let attempts = 0;
+    await ChatGPTDesktopBridgeTest.waitForRenderer(async () => {
+      attempts += 1;
+      if (attempts === 1)
+        throw new ChatGPTDesktopBridgeError({
+          kind: "incompatible",
+          detail: "Execution context was destroyed during navigation.",
+        });
+      return { composer: true, empty: true };
+    }, true);
+    assert.equal(attempts, 2);
+  });
+
+  it("discovers the newest backend conversation by exact user-message text, never local ids", () => {
+    const id = ChatGPTDesktopBridgeTest.discoverStableConversationId(
+      [
+        {
+          key: ["chatgpt-conversation", conversationId],
+          updatedAt: 1,
+          data: {
+            current_node: "a",
+            mapping: {
+              a: { message: { author: { role: "user" }, content: { parts: ["prompt"] } } },
+            },
+          },
+        },
+        {
+          key: ["chatgpt-conversation", "223e4567-e89b-42d3-a456-426614174000"],
+          updatedAt: 2,
+          data: {
+            current_node: "a",
+            mapping: {
+              a: { message: { author: { role: "user" }, content: { parts: ["other"] } } },
+            },
+          },
+        },
+      ],
+      "prompt",
+    );
+    assert.equal(id, conversationId);
+  });
+
+  it("verifies an opened history entry against query data and visible quick-chat units", () => {
+    const query = {
+      key: ["chatgpt-conversation", conversationId],
+      data: {
+        current_node: "b",
+        mapping: {
+          a: {
+            parent: null,
+            message: { author: { role: "user" }, content: { parts: ["prompt"] } },
+          },
+          b: {
+            parent: "a",
+            message: { author: { role: "assistant" }, content: { parts: ["answer"] } },
+          },
+        },
+      },
     };
-  }, conversationId);
-  assert.equal(attempts, 3);
-});
+    assert.isTrue(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, [
+        { id: "a:user", role: "user", text: "prompt" },
+        { id: "b:assistant", role: "assistant", text: "answer" },
+      ]),
+    );
+    assert.isFalse(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, [
+        { id: "a:user", role: "user", text: "wrong chat" },
+      ]),
+    );
+  });
 
-it("streams only a started assistant response and settles after generation completes", async () => {
-  await withDesktop(
-    (socket) => {
-      let readCount = 0;
-      let generating = true;
-      socket.onSend = (message) => {
-        const { id, params } = JSON.parse(message) as {
-          id: number;
-          params: { expression: string };
-        };
-        const expression = params.expression;
-        let value: unknown;
-        if (expression.includes("composer")) value = { composer: true, conversationId };
-        else if (expression.includes("location.pathname.match")) value = conversationId;
-        else if (expression.includes("data-message-author-role")) {
-          readCount += 1;
-          value =
-            readCount === 1
-              ? [{ id: "old", role: "assistant", text: "old response" }]
-              : [
-                  { id: "user", role: "user", text: "just sent" },
-                  { id: "new", role: "assistant", text: "assistant response" },
-                ];
-        } else if (expression.includes("data-testid*")) {
-          value = generating;
-          generating = false;
-        } else value = { ok: true };
-        queueMicrotask(() =>
-          socket.emit("message", JSON.stringify({ id, result: { result: { value } } })),
-        );
-      };
-    },
-    async () => {
-      const chunks: Array<{ conversationId: string; text: string }> = [];
-      for await (const chunk of ChatGPTDesktopBridgeTest.streamSend({
+  it("finds a saved conversation in every infinite-history page", () => {
+    assert.deepEqual(
+      ChatGPTDesktopBridgeTest.findConversationHistoryEntry(
+        [
+          {
+            key: ["chatgpt-conversations"],
+            data: {
+              pages: [
+                { items: [{ id: "other", title: "Other" }] },
+                { items: [{ id: conversationId, title: "Saved chat" }] },
+              ],
+            },
+          },
+        ],
+        conversationId,
+      ),
+      { id: conversationId, title: "Saved chat" },
+    );
+  });
+
+  it("follows the current-node chain so branches and mapping order cannot verify the wrong chat", () => {
+    const query = {
+      key: ["chatgpt-conversation", conversationId],
+      data: {
+        current_node: "assistant",
+        mapping: {
+          stale: {
+            parent: "root",
+            message: { author: { role: "assistant" }, content: { parts: ["stale"] } },
+          },
+          assistant: {
+            parent: "user",
+            message: { author: { role: "assistant" }, content: { parts: ["answer"] } },
+          },
+          root: {
+            parent: null,
+            message: { author: { role: "user" }, content: { parts: ["wrong branch"] } },
+          },
+          user: {
+            parent: null,
+            message: { author: { role: "user" }, content: { parts: ["prompt"] } },
+          },
+        },
+      },
+    };
+    assert.deepEqual(ChatGPTDesktopBridgeTest.conversationMessages(query.data), [
+      { role: "user", text: "prompt" },
+      { role: "assistant", text: "answer" },
+    ]);
+    assert.isFalse(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, [
+        { id: "user:user", role: "user", text: "wrong branch" },
+        { id: "assistant:assistant", role: "assistant", text: "stale" },
+      ]),
+    );
+  });
+
+  it("keeps mutation distinct from the later Send-enabled polling phase", () => {
+    const expression = ChatGPTDesktopBridgeTest.mutateEditor("prompt");
+    assert.match(expression, /InputEvent/);
+    assert.notMatch(expression, /aria-label=\\?"Send/);
+  });
+
+  it("injects image bytes through the renderer's real file input and waits for acknowledgement", () => {
+    const expression = ChatGPTDesktopBridgeTest.expressions.injectImages([
+      { name: "diagram.png", mimeType: "image/png", base64: "AQID" },
+    ]);
+    assert.match(expression, /DataTransfer/);
+    assert.match(expression, /input\.files = transfer\.files/);
+    assert.match(expression, /image\/png/);
+    assert.match(expression, /AQID/);
+    assert.match(ChatGPTDesktopBridgeTest.expressions.attachmentReady, /attachment/);
+  });
+
+  it("generates syntactically valid, visible-menu-scoped renderer expressions", () => {
+    for (const expression of [
+      ChatGPTDesktopBridgeTest.expressions.historyTrigger,
+      ChatGPTDesktopBridgeTest.expressions.historyEntry("Saved chat"),
+      ChatGPTDesktopBridgeTest.expressions.modelMenuState,
+      ChatGPTDesktopBridgeTest.expressions.modelSubmenuTrigger,
+      ChatGPTDesktopBridgeTest.expressions.visibleMenuItem("High"),
+    ])
+      assert.doesNotThrow(() => new Function(`return (${expression});`));
+  });
+
+  it("does not toggle quick chat when its composer is already present", async () => {
+    const clicks: string[] = [];
+    await ChatGPTDesktopBridgeTest.ensureQuickChat({
+      evaluate: async () => ({ composer: true, empty: true }),
+      trustedClickExpression: async (expression: string) => {
+        clicks.push(expression);
+      },
+    } as never);
+    assert.deepEqual(clicks, []);
+  });
+
+  it("reopens the model menu after changing effort and always uses the visible version trigger", async () => {
+    const clicks: string[] = [];
+    await ChatGPTDesktopBridgeTest.configureModel(
+      {
+        evaluate: async () => ({ selected: "Low", version: "GPT-5.4" }),
+        trustedClick: async (selector: string) => {
+          clicks.push(selector);
+        },
+        trustedClickExpression: async (expression: string) => {
+          clicks.push(expression);
+        },
+      } as never,
+      {
         endpoint: "http://127.0.0.1:9222",
         text: "prompt",
-      }))
-        chunks.push(chunk);
-      assert.deepEqual(chunks, [{ conversationId, text: "assistant response" }]);
-    },
-  );
-});
+        reasoningEffort: "high",
+        model: "5.5",
+      },
+    );
+    assert.equal(clicks.length, 5);
+    assert.match(clicks[1]!, /High/);
+    assert.match(clicks[3]!, /aria-haspopup/);
+    assert.match(clicks[4]!, /GPT-5\.5/);
+  });
 
-it("rejects pending commands on socket close or error and ignores malformed messages", async () => {
-  await withDesktop(
-    (socket) => respond(socket, "ok", true),
-    async () => {
-      const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222");
-      assert.equal(await cdp.evaluate("1"), "ok");
-      const socket = FakeSocket.instances[0];
-      if (socket) socket.onSend = () => {};
-      const pending = cdp.evaluate("2");
-      FakeSocket.instances[0]?.emit("close");
-      await assertRejected(pending, /connection closed/u);
-    },
-  );
-  await withDesktop(
-    (socket) => {
-      socket.onSend = () => {};
-    },
-    async () => {
-      const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222");
-      const pending = cdp.evaluate("1");
-      FakeSocket.instances[0]?.emit("error");
-      await assertRejected(pending, /connection failed/u);
-    },
-  );
-});
-
-it("times out commands and aborts active evaluation without late callbacks", async () => {
-  await withDesktop(
-    (socket) => {
-      socket.onSend = () => {};
-    },
-    async () => {
-      const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222", undefined, {
-        commandMs: 1,
-      });
-      await assertRejected(cdp.evaluate("1"), /did not complete/u);
-      const controller = new AbortController();
-      const pending = cdp.evaluate("2", controller.signal);
-      controller.abort();
-      await assertRejected(pending, /interrupted/u);
-      FakeSocket.instances[0]?.emit(
-        "message",
-        JSON.stringify({ id: 2, result: { result: { value: "late" } } }),
-      );
-    },
-  );
-});
-
-it("cancels response polling before a user turn can be treated as an assistant response", async () => {
-  await withDesktop(
-    (socket) => {
-      socket.onSend = (message) => {
-        const { id, params } = JSON.parse(message) as {
-          id: number;
-          params: { expression: string };
+  it("keeps CDP transport failure, timeout, and active-command cancellation coverage", async () => {
+    await withDesktop(
+      (socket) => {
+        socket.onSend = (message) => {
+          const { id } = JSON.parse(message) as { id: number };
+          queueMicrotask(() =>
+            socket.emit("message", JSON.stringify({ id, result: { result: { value: "ok" } } })),
+          );
         };
-        const expression = params.expression;
-        const value = expression.includes("composer")
-          ? { composer: true, conversationId }
-          : expression.includes("location.pathname.match")
-            ? conversationId
-            : expression.includes("data-message-author-role")
-              ? [{ id: "user", role: "user", text: "just sent" }]
-              : expression.includes("data-testid*")
-                ? false
-                : { ok: true };
-        queueMicrotask(() =>
-          socket.emit("message", JSON.stringify({ id, result: { result: { value } } })),
-        );
-      };
-    },
-    async () => {
-      const controller = new AbortController();
-      const stream = ChatGPTDesktopBridgeTest.streamSend({
-        endpoint: "http://127.0.0.1:9222",
-        text: "prompt",
-        signal: controller.signal,
-      });
-      const iterator = stream[Symbol.asyncIterator]();
-      const pending = iterator.next();
-      setTimeout(() => controller.abort(), 10);
-      await assertRejected(pending, /interrupted/u);
-    },
+      },
+      async () => {
+        const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222");
+        assert.equal(await cdp.evaluate("1"), "ok");
+        FakeSocket.instances[0]!.onSend = () => {};
+        const pending = cdp.evaluate("2");
+        FakeSocket.instances[0]?.emit("close");
+        await assertRejected(pending, /connection closed/u);
+      },
+    );
+    await withDesktop(
+      (socket) => {
+        socket.onSend = () => {};
+      },
+      async () => {
+        const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222", undefined, {
+          commandMs: 1,
+        });
+        await assertRejected(cdp.evaluate("1"), /did not complete/u);
+        const controller = new AbortController();
+        const pending = cdp.evaluate("2", controller.signal);
+        controller.abort();
+        await assertRejected(pending, /interrupted/u);
+      },
+    );
+  });
+
+  it("uses CDP mouse dispatch for trusted controls and ignores malformed CDP messages", async () => {
+    await withDesktop(
+      (socket) => {
+        socket.onSend = (message) => {
+          const request = JSON.parse(message) as { id: number; method: string };
+          if (request.method === "Runtime.evaluate") socket.emit("message", "not json");
+          queueMicrotask(() =>
+            socket.emit(
+              "message",
+              JSON.stringify({ id: request.id, result: { result: { value: { x: 4, y: 8 } } } }),
+            ),
+          );
+        };
+      },
+      async () => {
+        const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222");
+        await cdp.trustedClick("button[aria-label=Send]");
+        const methods = FakeSocket.instances[0]!.sentMethods;
+        assert.deepEqual(methods, [
+          "Runtime.evaluate",
+          "Input.dispatchMouseEvent",
+          "Input.dispatchMouseEvent",
+        ]);
+      },
+    );
+  });
+
+  it.effect(
+    "reports an unavailable desktop bridge without falling through to provider runtime",
+    () =>
+      Effect.gen(function* () {
+        const bridge = yield* ChatGPTDesktopBridge;
+        const result = yield* Effect.flip(bridge.health("http://127.0.0.1:1"));
+        assert.equal(result._tag, "ChatGPTDesktopBridgeError");
+        assert.equal(result.kind, "unavailable");
+      }).pipe(Effect.provide(ChatGPTDesktopBridgeLive)),
   );
 });
-
-it.effect("reports an unavailable desktop bridge without falling through to provider runtime", () =>
-  Effect.gen(function* () {
-    const bridge = yield* ChatGPTDesktopBridge;
-    const result = yield* Effect.flip(bridge.health("http://127.0.0.1:1"));
-    assert.equal(result._tag, "ChatGPTDesktopBridgeError");
-    assert.equal(result.kind, "unavailable");
-  }).pipe(Effect.provide(ChatGPTDesktopBridgeLive)),
-);

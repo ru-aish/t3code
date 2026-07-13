@@ -16,8 +16,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as NodeFSP from "node:fs/promises";
 
+import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { resolveThreadWorkspaceCwd } from "../checkpointing/Utils.ts";
+import { ServerConfig } from "../config.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -25,8 +28,10 @@ import {
   CHATGPT_AGENT_INSTANCE_ID,
   isChatGPTAgentThread,
   isChatGPTAgentTurnStart,
+  normalizeChatGPTAgentModel,
 } from "./ChatGPTAgentRouter.ts";
 import { ChatGPTDesktopBridge, ChatGPTDesktopBridgeError } from "./ChatGPTDesktopBridge.ts";
+import { ChatGPTDesktopController } from "./ChatGPTDesktopController.ts";
 import {
   makeChatGPTAgentTurnCoordinator,
   type ChatGPTAgentActiveTurn,
@@ -67,7 +72,9 @@ export const ChatGPTAgentReactorLive = Layer.effect(
     const engine = yield* OrchestrationEngineService;
     const snapshots = yield* ProjectionSnapshotQuery;
     const settings = yield* ServerSettingsService;
+    const serverConfig = yield* ServerConfig;
     const bridge = yield* ChatGPTDesktopBridge;
+    const desktopController = yield* ChatGPTDesktopController;
     const bindings = yield* ChatGPTAgentThreadBindings;
     const crypto = yield* Crypto.Crypto;
     const coordinator = yield* makeChatGPTAgentTurnCoordinator;
@@ -199,7 +206,6 @@ export const ChatGPTAgentReactorLive = Layer.effect(
           "Enable ChatGPT Agent in Settings and connect the local desktop app.",
         );
       }
-
       const user = thread.messages.find(
         (message) => message.id === event.payload.messageId && message.role === "user",
       );
@@ -211,14 +217,48 @@ export const ChatGPTAgentReactorLive = Layer.effect(
           "The requested user message was not found.",
         );
       }
-      if ((user.attachments?.length ?? 0) > 0) {
-        return yield* terminalState(
-          thread,
-          turnId,
-          "error",
-          "ChatGPT Agent currently supports text messages only.",
-        );
+      const imagesOrError = yield* Effect.tryPromise({
+        try: async () =>
+          Promise.all(
+            (user.attachments ?? []).map(async (attachment) => {
+              if (attachment.type !== "image" || !attachment.mimeType.startsWith("image/")) {
+                throw new ChatGPTDesktopBridgeError({
+                  kind: "incompatible",
+                  detail: `ChatGPT Agent only supports image attachments (${attachment.name} is unsupported).`,
+                });
+              }
+              const path = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              });
+              if (!path) {
+                throw new ChatGPTDesktopBridgeError({
+                  kind: "incompatible",
+                  detail: `Could not resolve image attachment ${attachment.name}.`,
+                });
+              }
+              let bytes: Buffer;
+              try {
+                bytes = await NodeFSP.readFile(path);
+              } catch {
+                throw new ChatGPTDesktopBridgeError({
+                  kind: "incompatible",
+                  detail: `Could not read image attachment ${attachment.name}.`,
+                });
+              }
+              return {
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                base64: bytes.toString("base64"),
+              };
+            }),
+          ),
+        catch: toBridgeError,
+      }).pipe(Effect.match({ onFailure: (error) => error, onSuccess: (images) => images }));
+      if (imagesOrError instanceof ChatGPTDesktopBridgeError) {
+        return yield* terminalState(thread, turnId, "error", imagesOrError.detail);
       }
+      const images = imagesOrError;
 
       const snapshot = yield* snapshots.getSnapshot();
       const project = snapshot.projects.find((candidate) => candidate.id === thread.projectId);
@@ -259,12 +299,27 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       }
 
       const text = initialSend ? `${envelope(workspace)}\n\n${user.text}` : user.text;
+      const ensured = yield* desktopController
+        .ensure(config.chatgptAgent.cdpEndpoint)
+        .pipe(Effect.match({ onFailure: (error) => error, onSuccess: () => undefined }));
+      if (ensured) return yield* terminalState(thread, turnId, "error", ensured.detail);
+      const selection = event.payload.modelSelection ?? thread.modelSelection;
+      const reasoningEffort = selection?.options?.find(
+        (option) => option.id === "reasoningEffort",
+      )?.value;
       let conversationId = existing?.conversationId;
       const streamed: true | ChatGPTDesktopBridgeError = yield* Stream.fromAsyncIterable(
         bridge.send({
           endpoint: config.chatgptAgent.cdpEndpoint,
           ...(conversationId ? { conversationId } : {}),
           text,
+          model: normalizeChatGPTAgentModel(selection?.model),
+          ...(reasoningEffort === "instant" ||
+          reasoningEffort === "medium" ||
+          reasoningEffort === "high"
+            ? { reasoningEffort }
+            : {}),
+          ...(images.length > 0 ? { images } : {}),
           signal: task.controller.signal,
         }),
         toBridgeError,

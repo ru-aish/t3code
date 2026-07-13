@@ -7,14 +7,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-const TURN_SELECTOR = '[data-chatgpt-conversation-turn="true"]';
-const TURN_ID_ATTRIBUTE = "data-chatgpt-conversation-turn-id";
 const RESPONSE_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 const SETTLED_POLLS = 3;
-const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/iu;
+const BACKEND_CONVERSATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export class ChatGPTDesktopBridgeError extends Schema.TaggedErrorClass<ChatGPTDesktopBridgeError>()(
   "ChatGPTDesktopBridgeError",
@@ -40,6 +39,15 @@ export interface ChatGPTDesktopBridgeShape {
     readonly endpoint: string;
     readonly conversationId?: string;
     readonly text: string;
+    /** Desktop menu version id; `desktop` is normalized by the router. */
+    readonly model?: "latest" | "5.5" | "5.4" | "5.3" | "o3";
+    readonly reasoningEffort?: "instant" | "medium" | "high";
+    /** Image bytes are kept server-side until injected into the desktop renderer. */
+    readonly images?: ReadonlyArray<{
+      readonly name: string;
+      readonly mimeType: string;
+      readonly base64: string;
+    }>;
     readonly signal?: AbortSignal;
   }) => AsyncIterable<{
     readonly conversationId: string;
@@ -65,10 +73,21 @@ type CdpSocket = {
   ): void;
 };
 
-type RendererTurn = { readonly id: string; readonly text: string; readonly role: string };
+export type RendererTurn = { readonly id: string; readonly text: string; readonly role: string };
+export type RendererRoleUnit = { readonly key: string; readonly text: string };
 type RendererProbe = {
   readonly composer?: boolean;
-  readonly conversationId?: string | null;
+  readonly empty?: boolean;
+};
+type CdpTarget = {
+  readonly type?: string;
+  readonly url?: string;
+  readonly webSocketDebuggerUrl?: string;
+};
+type QueryRecord = {
+  readonly key: ReadonlyArray<unknown>;
+  readonly data: unknown;
+  readonly updatedAt?: number;
 };
 
 const unavailable = (detail: string) =>
@@ -162,7 +181,7 @@ async function discoverTarget(
     );
   }
   if (!response.ok) throw unavailable(`CDP at ${base.origin} returned HTTP ${response.status}.`);
-  let targets: Array<{ type?: string; url?: string; webSocketDebuggerUrl?: string }>;
+  let targets: CdpTarget[];
   try {
     targets = (await response.json()) as typeof targets;
   } catch {
@@ -176,12 +195,7 @@ async function discoverTarget(
       kind: "incompatible",
       detail: "ChatGPT Desktop returned an invalid CDP target list.",
     });
-  const target = targets.find(
-    (candidate) =>
-      candidate.type === "page" &&
-      /chatgpt\.com|chat\.openai\.com/iu.test(candidate.url ?? "") &&
-      candidate.webSocketDebuggerUrl,
-  );
+  const target = selectDesktopTarget(targets);
   if (!target?.webSocketDebuggerUrl)
     throw new ChatGPTDesktopBridgeError({
       kind: "incompatible",
@@ -190,12 +204,35 @@ async function discoverTarget(
   return { webSocketDebuggerUrl: validateWebSocketEndpoint(target.webSocketDebuggerUrl) };
 }
 
+/** Prefer the authenticated local desktop renderer; prewarm pages have no usable quick-chat state. */
+export function selectDesktopTarget(targets: ReadonlyArray<CdpTarget>): CdpTarget | undefined {
+  const usable = (candidate: CdpTarget) =>
+    candidate.type === "page" && Boolean(candidate.webSocketDebuggerUrl);
+  return (
+    targets.find(
+      (candidate) =>
+        usable(candidate) &&
+        /^http:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?\//iu.test(
+          candidate.url ?? "",
+        ) &&
+        !/[?&]initialRoute=%2Fchatgpt%2Fquick-chat-prewarm/iu.test(candidate.url ?? ""),
+    ) ??
+    targets.find(
+      (candidate) =>
+        usable(candidate) &&
+        /https:\/\/(chatgpt\.com|chat\.openai\.com)(?:\/|$)/iu.test(candidate.url ?? ""),
+    )
+  );
+}
+
 async function openCdp(
   endpoint: string,
   signal?: AbortSignal,
   timeouts: { readonly connectMs?: number; readonly commandMs?: number } = {},
 ): Promise<{
   evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>;
+  trustedClick: (selector: string, signal?: AbortSignal) => Promise<void>;
+  trustedClickExpression: (expression: string, signal?: AbortSignal) => Promise<void>;
   close: () => void;
 }> {
   const connectMs = timeouts.connectMs ?? CONNECT_TIMEOUT_MS;
@@ -322,7 +359,7 @@ async function openCdp(
     throw error;
   }
   let nextId = 1;
-  const evaluate = (expression: string, commandSignal?: AbortSignal) =>
+  const command = (method: string, params: Record<string, unknown>, commandSignal?: AbortSignal) =>
     new Promise<unknown>((resolve, reject) => {
       if (closed) return reject(unavailable("The ChatGPT Desktop CDP connection is closed."));
       if (commandSignal?.aborted || signal?.aborted) return reject(interrupted());
@@ -364,46 +401,224 @@ async function openCdp(
         socket.send(
           JSON.stringify({
             id,
-            method: "Runtime.evaluate",
-            params: { expression, returnByValue: true, awaitPromise: true },
+            method,
+            params,
           }),
         );
       } catch {
         finish(() => reject(unavailable("Could not send a CDP command to ChatGPT Desktop.")));
       }
     });
-  return { evaluate, close };
+  const evaluate = (expression: string, commandSignal?: AbortSignal) =>
+    command(
+      "Runtime.evaluate",
+      { expression, returnByValue: true, awaitPromise: true },
+      commandSignal,
+    );
+  const dispatchTrustedClick = async (
+    point: { x?: number; y?: number } | null,
+    description: string,
+    commandSignal?: AbortSignal,
+  ) => {
+    if (!point || typeof point.x !== "number" || typeof point.y !== "number")
+      throw new ChatGPTDesktopBridgeError({
+        kind: "incompatible",
+        detail: `Could not find clickable ${description}.`,
+      });
+    await command(
+      "Input.dispatchMouseEvent",
+      { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 },
+      commandSignal,
+    );
+    await command(
+      "Input.dispatchMouseEvent",
+      { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 },
+      commandSignal,
+    );
+  };
+  const trustedClickExpression = async (expression: string, commandSignal?: AbortSignal) =>
+    dispatchTrustedClick(
+      (await evaluate(
+        `(() => { const element = (${expression}); if (!(element instanceof Element)) return null; const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null; })()`,
+        commandSignal,
+      )) as { x?: number; y?: number } | null,
+      "renderer control",
+      commandSignal,
+    );
+  const trustedClick = async (selector: string, commandSignal?: AbortSignal) =>
+    trustedClickExpression(`document.querySelector(${JSON.stringify(selector)})`, commandSignal);
+  return { evaluate, trustedClick, trustedClickExpression, close };
 }
 
-async function withCdp<T>(
-  endpoint: string,
-  run: (evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>) => Promise<T>,
-): Promise<T> {
-  const cdp = await openCdp(endpoint);
-  try {
-    return await run(cdp.evaluate);
-  } finally {
-    cdp.close();
-  }
-}
-
-const rendererProbe = `(() => ({ composer: Boolean(document.querySelector('textarea, [contenteditable="true"]')), conversationId: location.pathname.match(/\\/c\\/(${UUID.source})/iu)?.[1] ?? null }))()`;
-const setAndSend = (text: string) => `(() => {
-  const editor = document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-  const send = [...document.querySelectorAll('button')].find((button) => /send/i.test(button.getAttribute('aria-label') || button.textContent || ''));
-  if (!editor || !send) return { ok: false };
-  if (editor instanceof HTMLTextAreaElement) { editor.focus(); editor.value = ${JSON.stringify(text)}; editor.dispatchEvent(new Event('input', { bubbles: true })); }
-  else { editor.focus(); editor.textContent = ${JSON.stringify(text)}; editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(text)} })); }
-  send.click(); return { ok: true };
-})()`;
-const navigateConversation = (id: string) =>
-  `(() => { location.assign('/c/${id}'); return true; })()`;
-const readTurns = `(() => [...document.querySelectorAll(${JSON.stringify(TURN_SELECTOR)})].map((turn) => { const message = turn.matches('[data-message-author-role]') ? turn : turn.querySelector('[data-message-author-role]'); return { id: turn.getAttribute(${JSON.stringify(TURN_ID_ATTRIBUTE)}), role: message?.getAttribute('data-message-author-role') || '', text: message?.textContent || '' }; }).filter((turn) => turn.id))()`;
-const isGenerating = `(() => Boolean(document.querySelector('[data-testid*="stop" i], button[aria-label*="stop" i]')))`;
-const discoverConversation = `(() => location.pathname.match(/\\/c\\/(${UUID.source})/iu)?.[1] ?? null)()`;
+const QUICK_CHAT = '[data-pip-obstacle="quick-chat"]';
+const EDITOR = `${QUICK_CHAT} [contenteditable="true"][aria-label="Message ChatGPT"]`;
+const SEND = `${QUICK_CHAT} button[aria-label="Send"]`;
+const NEW_CHAT = `${QUICK_CHAT} button[aria-label="New chat"]`;
+const ADD_FILES = `${QUICK_CHAT} button[aria-label="Add files and more"]`;
+const rendererProbe = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); const editor = document.querySelector(${JSON.stringify(EDITOR)}); return { composer: Boolean(surface && editor), empty: Boolean(editor && !(editor.textContent || '').trim()) }; })()`;
+const quickChatButton = `[...document.querySelectorAll('button')].find((candidate) => (candidate.textContent || '').trim().split('\\n')[0]?.trim() === 'Chat')`;
+const mutateEditor = (text: string) =>
+  `(() => { const editor = document.querySelector(${JSON.stringify(EDITOR)}); if (!(editor instanceof HTMLElement)) return { ok: false, reason: 'editor' }; editor.focus(); const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(true); selection?.removeAllRanges(); selection?.addRange(range); const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)}); if (!inserted) editor.textContent = ${JSON.stringify(text)}; editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(text)} })); return { ok: true }; })()`;
+const sendEnabled = `(() => { const send = document.querySelector(${JSON.stringify(SEND)}); return Boolean(send && !send.disabled && send.getAttribute('aria-disabled') !== 'true'); })()`;
+const injectImages = (
+  images: ReadonlyArray<{
+    readonly name: string;
+    readonly mimeType: string;
+    readonly base64: string;
+  }>,
+) =>
+  `(() => { const input = document.querySelector(${JSON.stringify(`${QUICK_CHAT} input[type="file"][aria-label="Attach files"]`)}); if (!(input instanceof HTMLInputElement)) return { ok: false, reason: 'attachment-input' }; const transfer = new DataTransfer(); for (const image of ${JSON.stringify(images)}) { const binary = atob(image.base64); transfer.items.add(new File([Uint8Array.from(binary, c => c.charCodeAt(0))], image.name, { type: image.mimeType })); } input.files = transfer.files; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); return { ok: true }; })()`;
+const attachmentReady = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return Boolean(surface?.querySelector('[data-testid*="attachment" i], [aria-label*="Remove" i]')); })()`;
+const readTurns = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return []; const units = [...surface.querySelectorAll('[data-content-search-unit-key]')]; const modern = units.map(unit => { const id = unit.getAttribute('data-content-search-unit-key') || ''; const match = id.match(/:(user|assistant)$/); return match ? { id, role: match[1], text: unit.textContent || '' } : null; }).filter(Boolean); if (modern.length) return modern; return [...surface.querySelectorAll('[data-message-author-role]')].map((unit, index) => ({ id: unit.getAttribute('data-message-id') || \`legacy:\${index}:\${unit.getAttribute('data-message-author-role') || ''}\`, role: unit.getAttribute('data-message-author-role') || '', text: unit.textContent || '' })); })()`;
+const isGenerating = `(() => Boolean(document.querySelector(${JSON.stringify(`${QUICK_CHAT} button[aria-label="Stop"]`)})))()`;
+const queryCache = `(() => { const fibers = []; for (const node of [document.documentElement, ...[...document.querySelectorAll('*')].slice(0, 300)]) { for (const key of Object.keys(node)) if (key.startsWith('__reactFiber$')) fibers.push(node[key]); } const seen = new Set(), queue = fibers; const enqueue = (value) => { if (value && (typeof value === 'object' || typeof value === 'function') && !seen.has(value)) queue.push(value); }; while (queue.length && seen.size < 2_000) { const value = queue.shift(); if (!value || seen.has(value)) continue; seen.add(value); if (typeof value.getQueryCache === 'function') { try { return value.getQueryCache().getAll().map((query) => ({ key: query.queryKey, data: query.state?.data, updatedAt: query.state?.dataUpdatedAt })); } catch {} } for (const key of ['return', 'child', 'sibling', 'stateNode', 'memoizedState', 'memoizedProps', 'dependencies', 'next', 'context', '_currentValue', '_currentValue2']) { try { enqueue(value[key]); } catch {} } } return []; })()`;
 
 function assistantTurns(turns: ReadonlyArray<RendererTurn>): ReadonlyArray<RendererTurn> {
   return turns.filter((turn) => turn.role === "assistant" && turn.text.trim().length > 0);
+}
+
+/** Converts desktop quick-chat units to stable message ids without using turn wrappers. */
+export function parseRoleUnits(
+  units: ReadonlyArray<RendererRoleUnit>,
+): ReadonlyArray<RendererTurn> {
+  return units.flatMap((unit) => {
+    const match = unit.key.match(/:(user|assistant)$/u);
+    return match ? [{ id: unit.key, role: match[1]!, text: unit.text }] : [];
+  });
+}
+
+function textFromMessage(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.content === "string") return record.content;
+  if (typeof record.text === "string") return record.text;
+  if (record.content && typeof record.content === "object") {
+    const parts = (record.content as { parts?: unknown }).parts;
+    if (Array.isArray(parts) && parts.every((part) => typeof part === "string"))
+      return parts.join("\n");
+  }
+  return undefined;
+}
+
+type ConversationNode = { readonly parent?: unknown; readonly message?: unknown };
+
+/** Read a React Query conversation in its actual current-node order, not object insertion order. */
+export function conversationMessages(
+  data: unknown,
+): ReadonlyArray<{ readonly role: string; readonly text: string }> {
+  const record = data as {
+    current_node?: unknown;
+    mapping?: Record<string, ConversationNode>;
+  } | null;
+  if (!record?.mapping || typeof record.current_node !== "string") return [];
+  const result: Array<{ readonly role: string; readonly text: string }> = [];
+  const seen = new Set<string>();
+  let id: string | null = record.current_node;
+  while (id && !seen.has(id) && seen.size < 512) {
+    seen.add(id);
+    const node: ConversationNode | undefined = record.mapping[id];
+    if (!node) break;
+    const message = node.message as { author?: { role?: unknown } } | undefined;
+    const role = message?.author?.role;
+    const text = textFromMessage(message);
+    if ((role === "user" || role === "assistant") && text?.trim()) result.push({ role, text });
+    id = typeof node.parent === "string" ? node.parent : null;
+  }
+  return result.toReversed();
+}
+
+/** Finds the backend id from React Query data, never from a local quick-chat URL. */
+export function discoverStableConversationId(
+  queries: ReadonlyArray<QueryRecord>,
+  sentText: string,
+): string | undefined {
+  const matches: Array<{ id: string; updatedAt: number }> = [];
+  for (const query of queries) {
+    if (
+      query.key[0] !== "chatgpt-conversation" ||
+      typeof query.key[1] !== "string" ||
+      !BACKEND_CONVERSATION_ID.test(query.key[1])
+    )
+      continue;
+    const data = query.data as { mapping?: Record<string, unknown>; messages?: unknown } | null;
+    const messages = data?.mapping
+      ? conversationMessages(data).map(({ role, text }) => ({
+          role,
+          message: { author: { role }, content: text },
+        }))
+      : Array.isArray(data?.messages)
+        ? data.messages
+        : [];
+    if (
+      messages.some((message) => {
+        const record = message as {
+          message?: unknown;
+          role?: unknown;
+          author?: { role?: unknown };
+        };
+        const candidate = record.message ?? message;
+        const role =
+          record.role ??
+          record.author?.role ??
+          (candidate as { author?: { role?: unknown } })?.author?.role;
+        return role === "user" && textFromMessage(candidate) === sentText;
+      })
+    )
+      matches.push({ id: query.key[1], updatedAt: query.updatedAt ?? 0 });
+  }
+  return matches.sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id;
+}
+
+export function verifyOpenedConversation(
+  queries: ReadonlyArray<QueryRecord>,
+  id: string,
+  visibleTurns: ReadonlyArray<RendererTurn>,
+): boolean {
+  const query = queries.find(
+    (candidate) => candidate.key[0] === "chatgpt-conversation" && candidate.key[1] === id,
+  );
+  if (!query) return false;
+  const expected = conversationMessages(query.data);
+  const actual = visibleTurns
+    .filter((turn) => (turn.role === "user" || turn.role === "assistant") && turn.text.trim())
+    .map(({ role, text }) => ({ role, text }));
+  const tailLength = Math.min(2, expected.length, actual.length);
+  if (!tailLength) return false;
+  return expected.slice(-tailLength).every((message, index) => {
+    const visible = actual.slice(-tailLength)[index];
+    return visible?.role === message.role && visible.text === message.text;
+  });
+}
+
+type ConversationHistoryEntry = { readonly id: string; readonly title: string };
+
+/** Flatten every page of React Query's infinite conversation-history result. */
+export function findConversationHistoryEntry(
+  queries: ReadonlyArray<QueryRecord>,
+  id: string,
+): ConversationHistoryEntry | undefined {
+  if (!BACKEND_CONVERSATION_ID.test(id)) return undefined;
+  for (const query of queries) {
+    if (query.key[0] !== "chatgpt-conversations") continue;
+    const data = query.data as { pages?: unknown; items?: unknown; conversations?: unknown } | null;
+    const pages = Array.isArray(data?.pages) ? data.pages : [data];
+    for (const page of pages) {
+      const items = Array.isArray((page as { items?: unknown } | null)?.items)
+        ? ((page as { items: unknown[] }).items ?? [])
+        : Array.isArray(data?.conversations)
+          ? data.conversations
+          : Array.isArray(data?.items)
+            ? data.items
+            : [];
+      for (const item of items) {
+        const record = item as { id?: unknown; conversation_id?: unknown; title?: unknown };
+        if ((record.id === id || record.conversation_id === id) && typeof record.title === "string")
+          return { id, title: record.title };
+      }
+    }
+  }
+  return undefined;
 }
 
 function contextWasReplaced(error: unknown): boolean {
@@ -431,25 +646,67 @@ async function evaluateWithRetry(
 
 async function waitForRenderer(
   evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
-  expectedConversationId: string | undefined,
+  requireEmpty: boolean,
   signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const probe = (await evaluateWithRetry(evaluate, rendererProbe, signal)) as RendererProbe;
-    if (
-      probe?.composer &&
-      (!expectedConversationId || probe.conversationId === expectedConversationId)
-    )
-      return;
+    if (probe?.composer && (!requireEmpty || probe.empty)) return;
     await abortableDelay(POLL_INTERVAL_MS, signal);
   }
   throw new ChatGPTDesktopBridgeError({
     kind: "timeout",
-    detail: expectedConversationId
-      ? "Timed out opening the saved ChatGPT conversation."
+    detail: requireEmpty
+      ? "Timed out opening a new ChatGPT conversation."
       : "Timed out waiting for the ChatGPT renderer.",
   });
+}
+
+const modelLabel: Record<
+  NonNullable<Parameters<ChatGPTDesktopBridgeShape["send"]>[0]["model"]>,
+  string
+> = { latest: "GPT-5.6 Sol", "5.5": "GPT-5.5", "5.4": "GPT-5.4", "5.3": "GPT-5.3", o3: "o3" };
+
+const visibleMenuItem = (text: string, submenu = false) =>
+  `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const menu = ${submenu ? "menus.at(-1)" : "menus[0]"}; return menu ? [...menu.querySelectorAll('[role="menuitem"]')].find((item) => (item.textContent || '').trim() === ${JSON.stringify(text)}) : null; })()`;
+const modelMenuState = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const outer = menus[0]; if (!outer) return null; const selected = [...outer.querySelectorAll('[role="menuitem"][data-chatgpt-model-selected="true"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; const version = [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; return { selected, version }; })()`;
+const modelSubmenuTrigger = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const outer = menus[0]; return outer ? [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].find((item) => { const rect = item.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }) : null; })()`;
+const historyTrigger = `(() => [...document.querySelectorAll(${JSON.stringify(`${QUICK_CHAT} button[aria-label]`)})].find((button) => { const label = button.getAttribute('aria-label') || ''; const rect = button.getBoundingClientRect(); return label.startsWith('View chat history, current chat:') && rect.width > 0 && rect.height > 0; }) || null)()`;
+const historyEntry = (title: string) =>
+  `(() => { const root = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return root ? [...root.querySelectorAll('button,[role="menuitem"]')].find((item) => { const label = item.getAttribute('aria-label'); const rect = item.getBoundingClientRect(); return (label === ${JSON.stringify(title)} || (item.textContent || '').trim() === ${JSON.stringify(title)}) && !item.hidden && item.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }) : null; })()`;
+
+async function ensureQuickChat(
+  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate" | "trustedClickExpression">,
+  signal?: AbortSignal,
+): Promise<void> {
+  const probe = (await evaluateWithRetry(cdp.evaluate, rendererProbe, signal)) as RendererProbe;
+  if (!probe?.composer) await cdp.trustedClickExpression(quickChatButton, signal);
+  await waitForRenderer(cdp.evaluate, false, signal);
+}
+
+async function configureModel(
+  cdp: Awaited<ReturnType<typeof openCdp>>,
+  input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0],
+): Promise<void> {
+  const { trustedClick, trustedClickExpression, evaluate } = cdp;
+  const trigger = `${QUICK_CHAT} button[aria-label="Select ChatGPT model"]`;
+  await trustedClick(trigger, input.signal);
+  const state = (await evaluateWithRetry(evaluate, modelMenuState, input.signal)) as {
+    selected?: string;
+    version?: string;
+  } | null;
+  const effort = input.reasoningEffort
+    ? input.reasoningEffort.charAt(0).toUpperCase() + input.reasoningEffort.slice(1)
+    : undefined;
+  const effortNeedsChanging = effort !== undefined && state?.selected !== effort;
+  if (effortNeedsChanging) await trustedClickExpression(visibleMenuItem(effort), input.signal);
+  const label = input.model ? modelLabel[input.model] : undefined;
+  if (label && state?.version !== label) {
+    if (effortNeedsChanging) await trustedClick(trigger, input.signal);
+    await trustedClickExpression(modelSubmenuTrigger, input.signal);
+    await trustedClickExpression(visibleMenuItem(label, true), input.signal);
+  }
 }
 
 /** Kept as an async generator so cancellation only owns the active response, never ChatGPT's tools. */
@@ -458,32 +715,82 @@ async function* streamSend(
 ): AsyncIterable<{ conversationId: string; text: string }> {
   const cdp = await openCdp(input.endpoint, input.signal);
   try {
-    const { evaluate } = cdp;
+    const { evaluate, trustedClick, trustedClickExpression } = cdp;
+    await ensureQuickChat(cdp, input.signal);
     if (input.conversationId) {
-      await evaluateWithRetry(evaluate, navigateConversation(input.conversationId), input.signal);
-      await waitForRenderer(evaluate, input.conversationId, input.signal);
-      const activeId = String(
-        (await evaluateWithRetry(evaluate, discoverConversation, input.signal)) ?? "",
+      const history = findConversationHistoryEntry(
+        (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
+        input.conversationId,
       );
-      if (activeId !== input.conversationId)
+      if (!history)
         throw new ChatGPTDesktopBridgeError({
           kind: "incompatible",
-          detail: "ChatGPT Desktop did not open the requested saved conversation.",
+          detail: "The requested ChatGPT conversation was not present in quick-chat history.",
         });
-    } else await waitForRenderer(evaluate, undefined, input.signal);
+      await trustedClickExpression(historyTrigger, input.signal);
+      await trustedClickExpression(historyEntry(history.title), input.signal);
+      await waitForRenderer(evaluate, false, input.signal);
+      const verified = verifyOpenedConversation(
+        (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
+        input.conversationId,
+        (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
+      );
+      if (!verified)
+        throw new ChatGPTDesktopBridgeError({
+          kind: "incompatible",
+          detail: "ChatGPT Desktop could not verify the requested saved conversation.",
+        });
+    } else {
+      await trustedClick(NEW_CHAT, input.signal);
+      await waitForRenderer(evaluate, true, input.signal);
+    }
+    await configureModel(cdp, input);
     const before = new Set(
       assistantTurns(
         (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
       ).map((turn) => turn.id),
     );
-    const sent = (await evaluateWithRetry(evaluate, setAndSend(input.text), input.signal)) as {
+    if ((input.images?.length ?? 0) > 0) {
+      await trustedClick(ADD_FILES, input.signal);
+      const attached = (await evaluateWithRetry(
+        evaluate,
+        injectImages(input.images ?? []),
+        input.signal,
+      )) as { ok?: boolean; reason?: string };
+      if (!attached.ok)
+        throw new ChatGPTDesktopBridgeError({
+          kind: "incompatible",
+          detail: "ChatGPT renderer does not expose a supported image attachment control.",
+        });
+      const attachmentDeadline = Date.now() + COMMAND_TIMEOUT_MS;
+      while (!(await evaluateWithRetry(evaluate, attachmentReady, input.signal))) {
+        if (Date.now() >= attachmentDeadline)
+          throw new ChatGPTDesktopBridgeError({
+            kind: "timeout",
+            detail: "ChatGPT Desktop did not acknowledge the image attachment.",
+          });
+        await abortableDelay(POLL_INTERVAL_MS, input.signal);
+      }
+    }
+    const sent = (await evaluateWithRetry(evaluate, mutateEditor(input.text), input.signal)) as {
       ok?: boolean;
+      reason?: string;
     };
     if (!sent?.ok)
       throw new ChatGPTDesktopBridgeError({
         kind: "incompatible",
-        detail: "ChatGPT renderer does not expose a supported send control.",
+        detail: "ChatGPT renderer does not expose a supported message editor.",
       });
+    const sendDeadline = Date.now() + COMMAND_TIMEOUT_MS;
+    while (!(await evaluateWithRetry(evaluate, sendEnabled, input.signal))) {
+      if (Date.now() >= sendDeadline)
+        throw new ChatGPTDesktopBridgeError({
+          kind: "timeout",
+          detail: "ChatGPT Desktop did not enable Send after editing the message.",
+        });
+      await abortableDelay(POLL_INTERVAL_MS, input.signal);
+    }
+    await trustedClick(SEND, input.signal);
     const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
     let conversationId = input.conversationId ?? "";
     let previous = "";
@@ -492,9 +799,11 @@ async function* streamSend(
     let stable = 0;
     while (Date.now() < deadline) {
       if (input.signal?.aborted) throw interrupted();
-      conversationId ||= String(
-        (await evaluateWithRetry(evaluate, discoverConversation, input.signal)) ?? "",
-      );
+      conversationId ||=
+        discoverStableConversationId(
+          (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
+          input.text,
+        ) ?? "";
       const turns = assistantTurns(
         (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
       );
@@ -504,7 +813,7 @@ async function* streamSend(
       if (text.length > 0) {
         responseStarted = true;
         if (text.length > previous.length) {
-          if (!UUID.test(conversationId)) {
+          if (!BACKEND_CONVERSATION_ID.test(conversationId)) {
             await abortableDelay(POLL_INTERVAL_MS, input.signal);
             continue;
           }
@@ -530,9 +839,12 @@ export const ChatGPTDesktopBridgeLive = Layer.succeed(ChatGPTDesktopBridge, {
   health: (endpoint) =>
     Effect.tryPromise({
       try: async () => {
-        await withCdp(endpoint, async (evaluate) => {
-          await waitForRenderer(evaluate, undefined);
-        });
+        const cdp = await openCdp(endpoint);
+        try {
+          await ensureQuickChat(cdp);
+        } finally {
+          cdp.close();
+        }
         return { compatible: true, detail: "Connected to ChatGPT Desktop." };
       },
       catch: (cause) =>
@@ -546,10 +858,28 @@ export const ChatGPTDesktopBridgeLive = Layer.succeed(ChatGPTDesktopBridge, {
 /** Narrow test seam for CDP transport and renderer-state behavior. */
 export const ChatGPTDesktopBridgeTest = {
   assistantTurns,
+  conversationMessages,
+  discoverStableConversationId,
   discoverTarget,
+  findConversationHistoryEntry,
   openCdp,
+  parseRoleUnits,
   streamSend,
+  mutateEditor,
+  expressions: {
+    attachmentReady,
+    historyEntry,
+    historyTrigger,
+    injectImages,
+    modelMenuState,
+    modelSubmenuTrigger,
+    visibleMenuItem,
+  },
+  configureModel,
+  ensureQuickChat,
+  selectDesktopTarget,
   validateEndpoint,
   validateWebSocketEndpoint,
+  verifyOpenedConversation,
   waitForRenderer,
 };

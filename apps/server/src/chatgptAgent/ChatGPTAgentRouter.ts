@@ -10,7 +10,17 @@ import {
  * this predicate so desktop threads never acquire provider state by accident.
  */
 export const CHATGPT_AGENT_INSTANCE_ID = ProviderInstanceId.make("chatgptAgent");
-export const CHATGPT_AGENT_MODEL = "desktop";
+/** `desktop` remains readable from persisted legacy selections. */
+export const CHATGPT_AGENT_MODEL = "latest";
+export const CHATGPT_AGENT_LEGACY_MODEL = "desktop";
+export type ChatGPTAgentModel = "latest" | "5.5" | "5.4" | "5.3" | "o3";
+
+export function normalizeChatGPTAgentModel(model: string | null | undefined): ChatGPTAgentModel {
+  if (!model || model === CHATGPT_AGENT_LEGACY_MODEL) return CHATGPT_AGENT_MODEL;
+  return ["latest", "5.5", "5.4", "5.3", "o3"].includes(model)
+    ? (model as ChatGPTAgentModel)
+    : CHATGPT_AGENT_MODEL;
+}
 
 export const isChatGPTAgentSelection = (
   selection: Pick<ModelSelection, "instanceId"> | undefined | null,
