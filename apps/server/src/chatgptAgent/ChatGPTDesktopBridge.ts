@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 
 const RENDERER_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 10_000;
+const CLIENT_PROBE_TIMEOUT_MS = 4_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 const THOUGHT_STREAM_INTERVAL_MS = 2_000;
@@ -231,17 +232,16 @@ export function selectDesktopTarget(targets: ReadonlyArray<CdpTarget>): CdpTarge
   const isLocalRenderer = (candidate: CdpTarget) =>
     usable(candidate) &&
     /^http:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?\//iu.test(candidate.url ?? "");
-  const isStandaloneQuickChatWindow = (candidate: CdpTarget) =>
-    /[?&]initialRoute=%2Fchatgpt%2Fquick-chat/iu.test(candidate.url ?? "");
+  const isAuxiliaryWindow = (candidate: CdpTarget) =>
+    /[?&]initialRoute=/iu.test(candidate.url ?? "");
   return (
     targets.find(
       (candidate) =>
         isLocalRenderer(candidate) &&
+        !isAuxiliaryWindow(candidate) &&
         /[?&]mcpAppSandboxDevtools=1(?:[&#]|$)/iu.test(candidate.url ?? ""),
     ) ??
-    targets.find(
-      (candidate) => isLocalRenderer(candidate) && !isStandaloneQuickChatWindow(candidate),
-    ) ??
+    targets.find((candidate) => isLocalRenderer(candidate) && !isAuxiliaryWindow(candidate)) ??
     targets.find(
       (candidate) =>
         usable(candidate) &&
@@ -520,7 +520,7 @@ const conversationClientPrelude = `
       for (const key of Object.keys(node)) if (key.startsWith('__reactFiber$')) queue.push(node[key]);
     }
     const seen = new Set();
-    while (queue.length && seen.size < 100000) {
+    while (queue.length && seen.size < 50000) {
       const value = queue.shift();
       if (!value || (typeof value !== 'object' && typeof value !== 'function') || seen.has(value)) continue;
       seen.add(value);
@@ -567,10 +567,16 @@ function withConversationClient(body: string): string {
   return `(async () => { ${conversationClientPrelude} const client = findConversationClient(); if (!client) return null; ${body} })()`;
 }
 
+const warmConversationClient = withConversationClient(`return true;`);
+
 function conversationSnapshotFromClient(id: string): string {
   return withConversationClient(`
     try {
-      const data = await client.get(${JSON.stringify(id)});
+      const data = await Promise.race([
+        Promise.resolve(client.get(${JSON.stringify(id)})),
+        new Promise((resolve) => setTimeout(() => resolve(null), ${CLIENT_PROBE_TIMEOUT_MS})),
+      ]);
+      if (!data) return null;
       const conversationId = typeof data?.conversation_id === 'string' ? data.conversation_id : '';
       if (!conversationId) return null;
       const current = typeof data.current_node === 'string' ? data.mapping?.[data.current_node]?.message : null;
@@ -587,7 +593,7 @@ function conversationSnapshotFromClient(id: string): string {
   `);
 }
 
-function discoverConversationIdFromClient(sentText: string): string {
+function discoverConversationIdFromClient(): string {
   return withConversationClient(`
     try {
       const prefix = 'View chat history, current chat:';
@@ -597,34 +603,20 @@ function discoverConversationIdFromClient(sentText: string): string {
           return rect.width > 0 && rect.height > 0;
         });
       const currentTitle = (titleButton?.getAttribute('aria-label') || '').slice(prefix.length).trim();
-      const response = await client.list({ expand: false, limit: 20 });
+      const response = await Promise.race([
+        Promise.resolve(client.list({ expand: false, limit: 20 })),
+        new Promise((resolve) => setTimeout(() => resolve(null), ${CLIENT_PROBE_TIMEOUT_MS})),
+      ]);
       const items = Array.isArray(response?.items) ? response.items : Array.isArray(response) ? response : [];
-      if (currentTitle) {
-        const matching = items
-          .filter((item) => item?.title === currentTitle)
-          .sort((a, b) => Number(b?.update_time || 0) - Number(a?.update_time || 0))[0];
-        const matchingId = typeof matching?.id === 'string'
-          ? matching.id
-          : typeof matching?.conversation_id === 'string'
-            ? matching.conversation_id
-            : '';
-        if (matchingId) return matchingId;
-      }
-      // The title can lag for the first few polls. Verify only the newest
-      // candidate rather than loading an entire history page serially.
-      const newest = items[0];
-      const newestId = typeof newest?.id === 'string'
-        ? newest.id
-        : typeof newest?.conversation_id === 'string'
-          ? newest.conversation_id
-          : '';
-      if (!newestId) return null;
-      const data = await client.get(newestId);
-      return orderedMessages(data).some(
-        (message) => message.role === 'user' && message.text === ${JSON.stringify(sentText)},
-      )
-        ? (typeof data?.conversation_id === 'string' ? data.conversation_id : newestId)
-        : null;
+      if (!currentTitle) return null;
+      const matching = items
+        .filter((item) => item?.title === currentTitle)
+        .sort((a, b) => Number(new Date(b?.update_time || 0)) - Number(new Date(a?.update_time || 0)))[0];
+      return typeof matching?.id === 'string'
+        ? matching.id
+        : typeof matching?.conversation_id === 'string'
+          ? matching.conversation_id
+          : null;
     } catch { return null; }
   `);
 }
@@ -805,6 +797,19 @@ async function evaluateWithRetry(
   }
 }
 
+async function evaluateClientBestEffort(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  expression: string,
+  signal?: AbortSignal,
+): Promise<unknown | null> {
+  try {
+    return await evaluateWithRetry(evaluate, expression, signal);
+  } catch (error) {
+    if (isChatGPTDesktopBridgeError(error) && error.kind === "timeout") return null;
+    throw error;
+  }
+}
+
 async function waitForRenderer(
   evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
   requireEmpty: boolean,
@@ -981,7 +986,9 @@ async function configureModel(
     await clickRendererControlWhenReady(evaluate, visibleMenuItem(label, true), input.signal);
     await waitForModelMenusClosed(evaluate, input.signal);
   } else if (!effortNeedsChanging) {
-    await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
+    if (state.selected)
+      await clickRendererControlWhenReady(evaluate, visibleMenuItem(state.selected), input.signal);
+    else await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
     await waitForModelMenusClosed(evaluate, input.signal);
   }
 }
@@ -1031,6 +1038,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
   try {
     const { evaluate, trustedClick } = cdp;
     await ensureQuickChat(cdp, input.signal);
+    await evaluateClientBestEffort(evaluate, warmConversationClient, input.signal);
     if (input.conversationId) {
       let title = "";
       let expected: ReadonlyArray<{ readonly role: string; readonly text: string }> = [];
@@ -1143,6 +1151,8 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
     let lastThoughtYieldAt = 0;
     let nextClientProbeAt = 0;
     let clientSnapshot: ClientConversationSnapshot | null = null;
+    let pendingReasoning: RendererReasoning | null = null;
+    let latestDomAssistantText = "";
     let responseStarted = false;
 
     // A ChatGPT Agent turn is intentionally unbounded. Long-running tasks may
@@ -1151,38 +1161,64 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
     while (true) {
       if (input.signal?.aborted) throw interrupted();
       const nowMs = Date.now();
-      if (nowMs >= nextClientProbeAt) {
-        nextClientProbeAt = nowMs + 1_000;
-        if (!conversationId) {
-          const clientId = await evaluateWithRetry(
-            evaluate,
-            discoverConversationIdFromClient(input.text),
-            input.signal,
-          );
-          if (typeof clientId === "string" && isBackendConversationId(clientId))
-            conversationId = clientId;
-          else
-            conversationId =
-              discoverStableConversationId(
-                (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
-                input.text,
-              ) ?? "";
-        }
-        if (isBackendConversationId(conversationId)) {
-          const snapshot = await evaluateWithRetry(
-            evaluate,
-            conversationSnapshotFromClient(conversationId),
-            input.signal,
-          );
-          clientSnapshot = snapshot as ClientConversationSnapshot | null;
-        }
-      }
 
-      const reasoning = (await evaluateWithRetry(
+      const currentReasoning = (await evaluateWithRetry(
         evaluate,
         readLatestReasoning,
         input.signal,
       )) as RendererReasoning | null;
+      const currentReasoningText = currentReasoning?.text?.trim() ?? "";
+      const currentReasoningId = currentReasoning?.id ?? "";
+      if (
+        currentReasoningText.length > 0 &&
+        (currentReasoningId !== baselineReasoningId ||
+          currentReasoningText !== baselineReasoningText)
+      )
+        pendingReasoning = currentReasoning;
+
+      const turns = assistantTurns(
+        (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
+      );
+      const newest = turns.toReversed().find((turn) => !before.has(turn.id));
+      const visibleAssistantText = newest?.text ?? "";
+      if (visibleAssistantText.length >= latestDomAssistantText.length)
+        latestDomAssistantText = visibleAssistantText;
+
+      const generating = Boolean(await evaluateWithRetry(evaluate, isGenerating, input.signal));
+      const completedInDom = Boolean(
+        await evaluateWithRetry(evaluate, responseComplete, input.signal),
+      );
+
+      if (nowMs >= nextClientProbeAt) {
+        nextClientProbeAt = nowMs + 1_000;
+        if (!conversationId) {
+          const clientId = await evaluateClientBestEffort(
+            evaluate,
+            discoverConversationIdFromClient(),
+            input.signal,
+          );
+          if (typeof clientId === "string" && isBackendConversationId(clientId)) {
+            conversationId = clientId;
+          } else {
+            const queries = await evaluateClientBestEffort(evaluate, queryCache, input.signal);
+            conversationId =
+              discoverStableConversationId(
+                Array.isArray(queries) ? (queries as QueryRecord[]) : [],
+                input.text,
+              ) ?? "";
+          }
+        }
+        if (isBackendConversationId(conversationId)) {
+          const snapshot = await evaluateClientBestEffort(
+            evaluate,
+            conversationSnapshotFromClient(conversationId),
+            input.signal,
+          );
+          if (snapshot) clientSnapshot = snapshot as ClientConversationSnapshot;
+        }
+      }
+
+      const reasoning = pendingReasoning;
       const reasoningText = reasoning?.text?.trim() ?? "";
       const reasoningId = reasoning?.id ?? "";
       const isCurrentTurnReasoning =
@@ -1199,11 +1235,6 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
         lastThoughtYieldAt = nowMs;
       }
 
-      const turns = assistantTurns(
-        (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
-      );
-      const newest = turns.toReversed().find((turn) => !before.has(turn.id));
-      const domAssistantText = newest?.text ?? "";
       const snapshotMessages = clientSnapshot?.messages ?? [];
       const sentMessageIndex = snapshotMessages.findLastIndex(
         (message) => message.role === "user" && message.text === input.text,
@@ -1216,9 +1247,9 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
               .find((message) => message.role === "assistant")?.text ?? "")
           : "";
       const assistantText =
-        snapshotAssistantText.length > domAssistantText.length
+        snapshotAssistantText.length > latestDomAssistantText.length
           ? snapshotAssistantText
-          : domAssistantText;
+          : latestDomAssistantText;
       if (assistantText.length > 0) {
         responseStarted = true;
         if (
@@ -1234,11 +1265,13 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
         }
       }
 
-      const generating = Boolean(await evaluateWithRetry(evaluate, isGenerating, input.signal));
-      const completedInDom = Boolean(
-        await evaluateWithRetry(evaluate, responseComplete, input.signal),
-      );
-      if (responseStarted && !generating && (clientSnapshot?.complete === true || completedInDom))
+      if (
+        responseStarted &&
+        previousAssistantText.length > 0 &&
+        isBackendConversationId(conversationId) &&
+        !generating &&
+        (clientSnapshot?.complete === true || completedInDom)
+      )
         return;
       await abortableDelay(POLL_INTERVAL_MS, input.signal);
     }
@@ -1272,8 +1305,10 @@ export const ChatGPTDesktopBridgeTest = {
   assistantTurns,
   conversationMessages,
   conversationSnapshotFromClient,
+  discoverConversationIdFromClient,
   discoverStableConversationId,
   discoverTarget,
+  evaluateClientBestEffort,
   findConversationHistoryEntry,
   openCdp,
   parseRoleUnits,
@@ -1296,6 +1331,7 @@ export const ChatGPTDesktopBridgeTest = {
     responseComplete,
     sendAcknowledged,
     visibleMenuItem,
+    warmConversationClient,
   },
   configureModel,
   ensureQuickChat,

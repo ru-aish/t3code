@@ -104,6 +104,16 @@ describe("ChatGPTDesktopBridge", () => {
     const target = ChatGPTDesktopBridgeTest.selectDesktopTarget([
       {
         type: "page",
+        url: "http://127.0.0.1:5175/?initialRoute=%2Fhotkey-window&mcpAppSandboxDevtools=1",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9337/hotkey-devtools",
+      },
+      {
+        type: "page",
+        url: "http://127.0.0.1:5175/?initialRoute=%2Fhotkey-window",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9337/hotkey",
+      },
+      {
+        type: "page",
         url: "http://127.0.0.1:5175/?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
         webSocketDebuggerUrl: "ws://127.0.0.1:9337/prewarm",
       },
@@ -314,6 +324,45 @@ describe("ChatGPTDesktopBridge", () => {
     assert.match(ChatGPTDesktopBridgeTest.expressions.modelMenuState, /pointerEvents/u);
   });
 
+  it("bounds optional Desktop client probes below the CDP command timeout", () => {
+    const discovery = ChatGPTDesktopBridgeTest.discoverConversationIdFromClient();
+    const snapshot = ChatGPTDesktopBridgeTest.conversationSnapshotFromClient(conversationId);
+    for (const expression of [
+      discovery,
+      snapshot,
+      ChatGPTDesktopBridgeTest.expressions.warmConversationClient,
+    ])
+      assert.doesNotThrow(() => new Function(`return (${expression});`));
+    assert.match(discovery, /Promise\.race/u);
+    assert.match(discovery, /setTimeout/u);
+    assert.match(discovery, /4000/u);
+    assert.notMatch(discovery, /client\.get/u);
+    assert.match(snapshot, /Promise\.race/u);
+    assert.match(snapshot, /4000/u);
+  });
+
+  it("treats optional client timeouts as missing metadata, not turn failures", async () => {
+    const timedOut = await ChatGPTDesktopBridgeTest.evaluateClientBestEffort(async () => {
+      throw new ChatGPTDesktopBridgeError({ kind: "timeout", detail: "slow optional probe" });
+    }, "probe");
+    assert.equal(timedOut, null);
+
+    await assertRejected(
+      ChatGPTDesktopBridgeTest.evaluateClientBestEffort(async () => {
+        throw new ChatGPTDesktopBridgeError({ kind: "incompatible", detail: "broken renderer" });
+      }, "probe"),
+      /broken renderer/u,
+    );
+  });
+
+  it("reads visible DOM state before optional conversation discovery", () => {
+    const source = ChatGPTDesktopBridgeTest.streamSend.toString();
+    assert.ok(
+      source.indexOf("readLatestReasoning") < source.indexOf("discoverConversationIdFromClient"),
+    );
+    assert.ok(source.indexOf("readTurns") < source.indexOf("discoverConversationIdFromClient"));
+  });
+
   it("reads the Desktop reasoning accordion and has no wall-clock response deadline", () => {
     assert.match(
       ChatGPTDesktopBridgeTest.expressions.readLatestReasoning,
@@ -417,7 +466,7 @@ describe("ChatGPTDesktopBridge", () => {
     assert.match(clicks[4]!, /GPT-5\.5/u);
   });
 
-  it("waits for the asynchronously mounted Desktop model menu and closes it when unchanged", async () => {
+  it("waits for the asynchronously mounted Desktop model menu and dismisses it through the selected effort", async () => {
     let probes = 0;
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.configureModel(
@@ -443,7 +492,7 @@ describe("ChatGPTDesktopBridge", () => {
     assert.equal(probes, 4);
     assert.equal(clicks.length, 2);
     assert.match(clicks[0]!, /Select ChatGPT model/u);
-    assert.match(clicks[1]!, /Select ChatGPT model/u);
+    assert.match(clicks[1]!, /High/u);
   });
 
   it("activates Send once and polls acknowledgement without duplicate submission", async () => {
