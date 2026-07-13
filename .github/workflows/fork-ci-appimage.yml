@@ -124,6 +124,8 @@ jobs:
 
           mkdir -p appimage-artifact
           cp "${appimages[0]}" appimage-artifact/
+          cp scripts/run-browser-artifact.sh appimage-artifact/run-browser.sh
+          chmod +x appimage-artifact/run-browser.sh
           (
             cd appimage-artifact
             sha256sum ./*.AppImage > SHA256SUMS.txt
@@ -132,6 +134,11 @@ jobs:
               "$GITHUB_RUN_ID" \
               "$GITHUB_REPOSITORY" > BUILD_INFO.txt
           )
+
+      - name: Smoke-test browser launcher
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/t3-browser-smoke
+        run: appimage-artifact/run-browser.sh --help
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v7
