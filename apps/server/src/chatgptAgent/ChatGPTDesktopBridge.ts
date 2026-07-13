@@ -1,3 +1,4 @@
+// -diagnostics globalTimers:off globalFetch:off globalDate:off
 /**
  * The only module that knows ChatGPT Desktop's CDP/renderer details. Nothing
  * outside this adapter may depend on DOM selectors, renderer state, or CDP.
@@ -30,6 +31,8 @@ export class ChatGPTDesktopBridgeError extends Schema.TaggedErrorClass<ChatGPTDe
     return `ChatGPT Desktop ${this.kind}: ${this.detail}`;
   }
 }
+
+const isChatGPTDesktopBridgeError = Schema.is(ChatGPTDesktopBridgeError);
 
 export interface ChatGPTDesktopBridgeShape {
   readonly health: (
@@ -780,7 +783,7 @@ export function findConversationHistoryEntry(
 
 function contextWasReplaced(error: unknown): boolean {
   return (
-    error instanceof ChatGPTDesktopBridgeError &&
+    isChatGPTDesktopBridgeError(error) &&
     /context.*(destroyed|not found)|target.*navigat/iu.test(error.detail)
   );
 }
@@ -1139,7 +1142,7 @@ export const ChatGPTDesktopBridgeLive = Layer.succeed(ChatGPTDesktopBridge, {
         return { compatible: true, detail: "Connected to ChatGPT Desktop." };
       },
       catch: (cause) =>
-        cause instanceof ChatGPTDesktopBridgeError
+        isChatGPTDesktopBridgeError(cause)
           ? cause
           : unavailable("Unable to inspect ChatGPT Desktop."),
     }),

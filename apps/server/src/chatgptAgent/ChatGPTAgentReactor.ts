@@ -12,11 +12,12 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as NodeFSP from "node:fs/promises";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { resolveThreadWorkspaceCwd } from "../checkpointing/Utils.ts";
@@ -48,7 +49,7 @@ export {
 export class ChatGPTAgentReactor extends Context.Service<
   ChatGPTAgentReactor,
   { readonly start: () => Effect.Effect<void, never, Scope.Scope> }
->()("t3/chatgptAgent/Reactor") {}
+>()("t3/chatgptAgent/ChatGPTAgentReactor") {}
 
 const now = Effect.map(DateTime.now, DateTime.formatIso);
 const envelope = (workspace: string) =>
@@ -58,8 +59,9 @@ type TurnStartEvent = Extract<OrchestrationEvent, { type: "thread.turn-start-req
 type InterruptEvent = Extract<OrchestrationEvent, { type: "thread.turn-interrupt-requested" }>;
 type SessionStopEvent = Extract<OrchestrationEvent, { type: "thread.session-stop-requested" }>;
 
+const isChatGPTDesktopBridgeError = Schema.is(ChatGPTDesktopBridgeError);
 const toBridgeError = (cause: unknown) =>
-  cause instanceof ChatGPTDesktopBridgeError
+  isChatGPTDesktopBridgeError(cause)
     ? cause
     : new ChatGPTDesktopBridgeError({
         kind: "unavailable",
@@ -77,6 +79,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
     const desktopController = yield* ChatGPTDesktopController;
     const bindings = yield* ChatGPTAgentThreadBindings;
     const crypto = yield* Crypto.Crypto;
+    const fs = yield* FileSystem.FileSystem;
     const coordinator = yield* makeChatGPTAgentTurnCoordinator;
     const claimedStartEvents = new Set<string>();
 
@@ -249,45 +252,47 @@ export const ChatGPTAgentReactorLive = Layer.effect(
           "The requested user message was not found.",
         );
       }
-      const imagesOrError = yield* Effect.tryPromise({
-        try: async () =>
-          Promise.all(
-            (user.attachments ?? []).map(async (attachment) => {
-              if (attachment.type !== "image" || !attachment.mimeType.startsWith("image/")) {
-                throw new ChatGPTDesktopBridgeError({
-                  kind: "incompatible",
-                  detail: `ChatGPT Agent only supports image attachments (${attachment.name} is unsupported).`,
-                });
-              }
-              const path = resolveAttachmentPath({
-                attachmentsDir: serverConfig.attachmentsDir,
-                attachment,
+      const imagesOrError = yield* Effect.all(
+        (user.attachments ?? []).map((attachment) =>
+          Effect.gen(function* () {
+            if (attachment.type !== "image" || !attachment.mimeType.startsWith("image/")) {
+              return yield* new ChatGPTDesktopBridgeError({
+                kind: "incompatible",
+                detail: `ChatGPT Agent only supports image attachments (${attachment.name} is unsupported).`,
               });
-              if (!path) {
-                throw new ChatGPTDesktopBridgeError({
-                  kind: "incompatible",
-                  detail: `Could not resolve image attachment ${attachment.name}.`,
-                });
-              }
-              let bytes: Buffer;
-              try {
-                bytes = await NodeFSP.readFile(path);
-              } catch {
-                throw new ChatGPTDesktopBridgeError({
-                  kind: "incompatible",
-                  detail: `Could not read image attachment ${attachment.name}.`,
-                });
-              }
-              return {
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                base64: bytes.toString("base64"),
-              };
-            }),
-          ),
-        catch: toBridgeError,
-      }).pipe(Effect.match({ onFailure: (error) => error, onSuccess: (images) => images }));
-      if (imagesOrError instanceof ChatGPTDesktopBridgeError) {
+            }
+            const path = resolveAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachment,
+            });
+            if (!path) {
+              return yield* new ChatGPTDesktopBridgeError({
+                kind: "incompatible",
+                detail: `Could not resolve image attachment ${attachment.name}.`,
+              });
+            }
+            const bytes = yield* fs.readFile(path).pipe(
+              Effect.mapError(
+                () =>
+                  new ChatGPTDesktopBridgeError({
+                    kind: "incompatible",
+                    detail: `Could not read image attachment ${attachment.name}.`,
+                  }),
+              ),
+            );
+            return {
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              base64: Buffer.from(bytes).toString("base64"),
+            };
+          }),
+        ),
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.mapError(toBridgeError),
+        Effect.match({ onFailure: (error) => error, onSuccess: (images) => images }),
+      );
+      if (isChatGPTDesktopBridgeError(imagesOrError)) {
         return yield* terminalState(thread, turnId, "error", imagesOrError.detail);
       }
       const images = imagesOrError;

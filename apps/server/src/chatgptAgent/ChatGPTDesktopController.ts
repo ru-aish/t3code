@@ -1,3 +1,4 @@
+// -diagnostics nodeBuiltinImport:off globalTimers:off
 /**
  * Owns the narrowly scoped local ChatGPT Desktop restart needed to expose CDP.
  * It deliberately never searches process names: only the launcher's own PID
@@ -6,10 +7,13 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 
 import { ChatGPTDesktopBridgeError } from "./ChatGPTDesktopBridge.ts";
+
+const isChatGPTDesktopBridgeError = Schema.is(ChatGPTDesktopBridgeError);
 
 const APP_ID = "codex-desktop";
 const START_SCRIPT = "/home/coder/Code/chatgpt-desktop-linux/codex-app/start.sh";
@@ -202,7 +206,7 @@ export const ChatGPTDesktopControllerLive = Layer.effect(
             return attempt;
           },
           catch: (cause) =>
-            cause instanceof ChatGPTDesktopBridgeError
+            isChatGPTDesktopBridgeError(cause)
               ? cause
               : new ChatGPTDesktopBridgeError({
                   kind: "unavailable",

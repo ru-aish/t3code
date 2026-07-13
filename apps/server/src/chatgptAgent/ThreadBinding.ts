@@ -45,7 +45,7 @@ export class ChatGPTAgentThreadBindings extends Context.Service<
     ) => Effect.Effect<Option.Option<MessageId>, ChatGPTAgentThreadBindingError>;
     readonly delete: (threadId: ThreadId) => Effect.Effect<void, ChatGPTAgentThreadBindingError>;
   }
->()("t3/chatgptAgent/ThreadBindings") {}
+>()("t3/chatgptAgent/ThreadBinding/ChatGPTAgentThreadBindings") {}
 
 const Row = ChatGPTAgentThreadBinding;
 const Get = Schema.Struct({ threadId: ThreadId });
