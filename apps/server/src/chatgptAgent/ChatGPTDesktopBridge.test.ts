@@ -317,9 +317,9 @@ describe("ChatGPTDesktopBridge", () => {
   it("does not toggle quick chat when its composer is already present", async () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.ensureQuickChat({
-      evaluate: async () => ({ composer: true, empty: true, turnCount: 0 }),
-      trustedClickExpression: async (expression: string) => {
-        clicks.push(expression);
+      evaluate: async (expression: string) => {
+        if (/element\.click\(\)/u.test(expression)) clicks.push(expression);
+        return { composer: true, empty: true, turnCount: 0 };
       },
     } as never);
     assert.deepEqual(clicks, []);
@@ -329,12 +329,14 @@ describe("ChatGPTDesktopBridge", () => {
     let probes = 0;
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.ensureQuickChat({
-      evaluate: async () =>
-        probes++ === 0
+      evaluate: async (expression: string) => {
+        if (/element\.click\(\)/u.test(expression)) {
+          clicks.push(expression);
+          return { ok: true };
+        }
+        return probes++ === 0
           ? { composer: false, empty: false, turnCount: 0 }
-          : { composer: true, empty: true, turnCount: 0 },
-      trustedClickExpression: async (expression: string) => {
-        clicks.push(expression);
+          : { composer: true, empty: true, turnCount: 0 };
       },
     } as never);
     assert.equal(clicks.length, 1);
@@ -344,9 +346,12 @@ describe("ChatGPTDesktopBridge", () => {
   it("reuses an already-empty new-chat surface and only clicks New chat for visible history", async () => {
     const readyClicks: string[] = [];
     await ChatGPTDesktopBridgeTest.prepareNewConversation({
-      evaluate: async () => ({ composer: true, empty: true, turnCount: 0 }),
-      trustedClick: async (selector: string) => {
-        readyClicks.push(selector);
+      evaluate: async (expression: string) => {
+        if (/element\.click\(\)/u.test(expression)) {
+          readyClicks.push(expression);
+          return { ok: true };
+        }
+        return { composer: true, empty: true, turnCount: 0 };
       },
     } as never);
     assert.deepEqual(readyClicks, []);
@@ -354,17 +359,18 @@ describe("ChatGPTDesktopBridge", () => {
     let probes = 0;
     const historyClicks: string[] = [];
     await ChatGPTDesktopBridgeTest.prepareNewConversation({
-      evaluate: async () =>
-        probes++ === 0
+      evaluate: async (expression: string) => {
+        if (/element\.click\(\)/u.test(expression)) {
+          historyClicks.push(expression);
+          return { ok: true };
+        }
+        return probes++ === 0
           ? { composer: true, empty: true, turnCount: 2 }
-          : { composer: true, empty: true, turnCount: 0 },
-      trustedClick: async (selector: string) => {
-        historyClicks.push(selector);
+          : { composer: true, empty: true, turnCount: 0 };
       },
     } as never);
-    assert.deepEqual(historyClicks, [
-      '[data-pip-obstacle="quick-chat"] button[aria-label="New chat"]',
-    ]);
+    assert.equal(historyClicks.length, 1);
+    assert.match(historyClicks[0]!, /New chat/u);
   });
 
   it("reopens the model menu after changing effort and always uses the visible version trigger", async () => {
@@ -372,12 +378,14 @@ describe("ChatGPTDesktopBridge", () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.configureModel(
       {
-        evaluate: async () => (probes++ === 0 ? null : { selected: "Low", version: "GPT-5.4" }),
-        trustedClick: async (selector: string) => {
-          clicks.push(selector);
-        },
-        trustedClickExpression: async (expression: string) => {
-          clicks.push(expression);
+        evaluate: async (expression: string) => {
+          if (expression === ChatGPTDesktopBridgeTest.expressions.modelMenuState)
+            return probes++ === 0 ? null : { selected: "Low", version: "GPT-5.4" };
+          if (/element\.click\(\)/u.test(expression)) {
+            clicks.push(expression);
+            return { ok: true };
+          }
+          throw new Error(`Unexpected expression: ${expression}`);
         },
       } as never,
       {
@@ -388,22 +396,25 @@ describe("ChatGPTDesktopBridge", () => {
       },
     );
     assert.equal(clicks.length, 5);
-    assert.match(clicks[1]!, /High/);
-    assert.match(clicks[3]!, /aria-haspopup/);
-    assert.match(clicks[4]!, /GPT-5\.5/);
+    assert.match(clicks[0]!, /Select ChatGPT model/u);
+    assert.match(clicks[1]!, /High/u);
+    assert.match(clicks[3]!, /aria-haspopup/u);
+    assert.match(clicks[4]!, /GPT-5\.5/u);
   });
 
-  it("waits for the asynchronously mounted Desktop model menu before reading it", async () => {
+  it("waits for the asynchronously mounted Desktop model menu and closes it when unchanged", async () => {
     let probes = 0;
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.configureModel(
       {
-        evaluate: async () => (probes++ < 3 ? null : { selected: "High", version: "GPT-5.6 Sol" }),
-        trustedClick: async () => {
-          throw new Error("selector click should not be used");
-        },
-        trustedClickExpression: async (expression: string) => {
-          clicks.push(expression);
+        evaluate: async (expression: string) => {
+          if (expression === ChatGPTDesktopBridgeTest.expressions.modelMenuState)
+            return probes++ < 3 ? null : { selected: "High", version: "GPT-5.6 Sol" };
+          if (/element\.click\(\)/u.test(expression)) {
+            clicks.push(expression);
+            return { ok: true };
+          }
+          throw new Error(`Unexpected expression: ${expression}`);
         },
       } as never,
       {
@@ -414,8 +425,9 @@ describe("ChatGPTDesktopBridge", () => {
       },
     );
     assert.equal(probes, 4);
-    assert.equal(clicks.length, 1);
+    assert.equal(clicks.length, 2);
     assert.match(clicks[0]!, /Select ChatGPT model/u);
+    assert.match(clicks[1]!, /Select ChatGPT model/u);
   });
 
   it("activates Send once and polls acknowledgement without duplicate submission", async () => {

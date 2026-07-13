@@ -838,25 +838,21 @@ const historyTriggerVisible = `Boolean(${historyTrigger})`;
 const historyEntry = (title: string) =>
   `(() => { const root = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return root ? [...root.querySelectorAll('button,[role="menuitem"]')].find((item) => { const label = item.getAttribute('aria-label'); const rect = item.getBoundingClientRect(); return (label === ${JSON.stringify(title)} || (item.textContent || '').trim() === ${JSON.stringify(title)}) && !item.hidden && item.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }) : null; })()`;
 
-async function clickExpressionWhenReady(
-  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "trustedClickExpression">,
+const activateRendererControl = (expression: string) =>
+  `(() => { const element = (${expression}); if (!(element instanceof HTMLElement)) return { ok: false, reason: 'missing' }; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden' || element.hidden || element.getAttribute('aria-hidden') === 'true') return { ok: false, reason: 'hidden' }; if ('disabled' in element && element.disabled) return { ok: false, reason: 'disabled' }; element.click(); return { ok: true }; })()`;
+
+async function clickRendererControlWhenReady(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
   expression: string,
   signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + COMMAND_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    try {
-      await cdp.trustedClickExpression(expression, signal);
-      return;
-    } catch (error) {
-      if (
-        !isChatGPTDesktopBridgeError(error) ||
-        error.kind !== "incompatible" ||
-        !error.detail.startsWith("Could not find clickable renderer control")
-      )
-        throw error;
-      await abortableDelay(POLL_INTERVAL_MS, signal);
-    }
+    const result = (await evaluate(activateRendererControl(expression), signal)) as {
+      ok?: boolean;
+    };
+    if (result?.ok) return;
+    await abortableDelay(POLL_INTERVAL_MS, signal);
   }
   throw new ChatGPTDesktopBridgeError({
     kind: "timeout",
@@ -884,21 +880,25 @@ async function waitForModelMenuState(
 }
 
 async function ensureQuickChat(
-  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate" | "trustedClickExpression">,
+  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate">,
   signal?: AbortSignal,
 ): Promise<void> {
   const probe = (await evaluateWithRetry(cdp.evaluate, rendererProbe, signal)) as RendererProbe;
-  if (!probe?.composer) await clickExpressionWhenReady(cdp, quickChatButton, signal);
+  if (!probe?.composer) await clickRendererControlWhenReady(cdp.evaluate, quickChatButton, signal);
   await waitForRenderer(cdp.evaluate, false, signal);
 }
 
 async function prepareNewConversation(
-  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate" | "trustedClick">,
+  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate">,
   signal?: AbortSignal,
 ): Promise<void> {
   const probe = (await evaluateWithRetry(cdp.evaluate, rendererProbe, signal)) as RendererProbe;
   if (probe?.composer && probe.empty && (probe.turnCount ?? 0) === 0) return;
-  await cdp.trustedClick(NEW_CHAT, signal);
+  await clickRendererControlWhenReady(
+    cdp.evaluate,
+    `document.querySelector(${JSON.stringify(NEW_CHAT)})`,
+    signal,
+  );
   await waitForRenderer(cdp.evaluate, true, signal);
 }
 
@@ -931,7 +931,7 @@ async function configureModel(
     version?: string;
   } | null;
   if (!state) {
-    await clickExpressionWhenReady(cdp, triggerExpression, input.signal);
+    await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
     state = await waitForModelMenuState(evaluate, input.signal);
   }
   const effort = input.reasoningEffort
@@ -939,12 +939,16 @@ async function configureModel(
     : undefined;
   const effortNeedsChanging = effort !== undefined && state.selected !== effort;
   if (effortNeedsChanging)
-    await clickExpressionWhenReady(cdp, visibleMenuItem(effort), input.signal);
+    await clickRendererControlWhenReady(evaluate, visibleMenuItem(effort), input.signal);
   const label = input.model ? modelLabel[input.model] : undefined;
-  if (label && state.version !== label) {
-    if (effortNeedsChanging) await clickExpressionWhenReady(cdp, triggerExpression, input.signal);
-    await clickExpressionWhenReady(cdp, modelSubmenuTrigger, input.signal);
-    await clickExpressionWhenReady(cdp, visibleMenuItem(label, true), input.signal);
+  const modelNeedsChanging = label !== undefined && state.version !== label;
+  if (modelNeedsChanging) {
+    if (effortNeedsChanging)
+      await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
+    await clickRendererControlWhenReady(evaluate, modelSubmenuTrigger, input.signal);
+    await clickRendererControlWhenReady(evaluate, visibleMenuItem(label, true), input.signal);
+  } else if (!effortNeedsChanging) {
+    await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
   }
 }
 
@@ -991,7 +995,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
 }> {
   const cdp = await openCdp(input.endpoint, input.signal);
   try {
-    const { evaluate, trustedClick, trustedClickExpression } = cdp;
+    const { evaluate, trustedClick } = cdp;
     await ensureQuickChat(cdp, input.signal);
     if (input.conversationId) {
       let title = "";
@@ -1038,8 +1042,8 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
       )) as RendererTurn[];
       if (!verifyOpenedMessages(expected, currentTurns)) {
         if (await evaluateWithRetry(evaluate, historyTriggerVisible, input.signal))
-          await trustedClickExpression(historyTrigger, input.signal);
-        await trustedClickExpression(historyEntry(title), input.signal);
+          await clickRendererControlWhenReady(evaluate, historyTrigger, input.signal);
+        await clickRendererControlWhenReady(evaluate, historyEntry(title), input.signal);
         await waitForConversation(evaluate, expected, input.signal);
       }
     } else {
