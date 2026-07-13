@@ -368,10 +368,12 @@ describe("ChatGPTDesktopBridge", () => {
   });
 
   it("reopens the model menu after changing effort and always uses the visible version trigger", async () => {
+    let probes = 0;
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.configureModel(
       {
-        evaluate: async () => ({ selected: "Low", version: "GPT-5.4" }),
+        evaluate: async () =>
+          probes++ === 0 ? null : { selected: "Low", version: "GPT-5.4" },
         trustedClick: async (selector: string) => {
           clicks.push(selector);
         },
@@ -390,6 +392,32 @@ describe("ChatGPTDesktopBridge", () => {
     assert.match(clicks[1]!, /High/);
     assert.match(clicks[3]!, /aria-haspopup/);
     assert.match(clicks[4]!, /GPT-5\.5/);
+  });
+
+  it("waits for the asynchronously mounted Desktop model menu before reading it", async () => {
+    let probes = 0;
+    const clicks: string[] = [];
+    await ChatGPTDesktopBridgeTest.configureModel(
+      {
+        evaluate: async () =>
+          probes++ < 3 ? null : { selected: "High", version: "GPT-5.6 Sol" },
+        trustedClick: async () => {
+          throw new Error("selector click should not be used");
+        },
+        trustedClickExpression: async (expression: string) => {
+          clicks.push(expression);
+        },
+      } as never,
+      {
+        endpoint: "http://127.0.0.1:9222",
+        text: "prompt",
+        reasoningEffort: "high",
+        model: "latest",
+      },
+    );
+    assert.equal(probes, 4);
+    assert.equal(clicks.length, 1);
+    assert.match(clicks[0]!, /Select ChatGPT model/u);
   });
 
   it("keeps CDP transport failure, timeout, and active-command cancellation coverage", async () => {

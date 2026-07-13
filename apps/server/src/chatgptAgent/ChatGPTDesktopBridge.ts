@@ -837,12 +837,57 @@ const historyTriggerVisible = `Boolean(${historyTrigger})`;
 const historyEntry = (title: string) =>
   `(() => { const root = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return root ? [...root.querySelectorAll('button,[role="menuitem"]')].find((item) => { const label = item.getAttribute('aria-label'); const rect = item.getBoundingClientRect(); return (label === ${JSON.stringify(title)} || (item.textContent || '').trim() === ${JSON.stringify(title)}) && !item.hidden && item.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }) : null; })()`;
 
+async function clickExpressionWhenReady(
+  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "trustedClickExpression">,
+  expression: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + COMMAND_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await cdp.trustedClickExpression(expression, signal);
+      return;
+    } catch (error) {
+      if (
+        !isChatGPTDesktopBridgeError(error) ||
+        error.kind !== "incompatible" ||
+        !error.detail.startsWith("Could not find clickable renderer control")
+      )
+        throw error;
+      await abortableDelay(POLL_INTERVAL_MS, signal);
+    }
+  }
+  throw new ChatGPTDesktopBridgeError({
+    kind: "timeout",
+    detail: "Timed out waiting for a ChatGPT Desktop renderer control.",
+  });
+}
+
+async function waitForModelMenuState(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<{ readonly selected?: string; readonly version?: string }> {
+  const deadline = Date.now() + COMMAND_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const state = (await evaluateWithRetry(evaluate, modelMenuState, signal)) as {
+      selected?: string;
+      version?: string;
+    } | null;
+    if (state) return state;
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
+  throw new ChatGPTDesktopBridgeError({
+    kind: "timeout",
+    detail: "Timed out opening the ChatGPT Desktop model menu.",
+  });
+}
+
 async function ensureQuickChat(
   cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate" | "trustedClickExpression">,
   signal?: AbortSignal,
 ): Promise<void> {
   const probe = (await evaluateWithRetry(cdp.evaluate, rendererProbe, signal)) as RendererProbe;
-  if (!probe?.composer) await cdp.trustedClickExpression(quickChatButton, signal);
+  if (!probe?.composer) await clickExpressionWhenReady(cdp, quickChatButton, signal);
   await waitForRenderer(cdp.evaluate, false, signal);
 }
 
@@ -877,23 +922,28 @@ async function configureModel(
   cdp: Awaited<ReturnType<typeof openCdp>>,
   input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0],
 ): Promise<void> {
-  const { trustedClick, trustedClickExpression, evaluate } = cdp;
+  const { evaluate } = cdp;
   const trigger = `${QUICK_CHAT} button[aria-label="Select ChatGPT model"]`;
-  await trustedClick(trigger, input.signal);
-  const state = (await evaluateWithRetry(evaluate, modelMenuState, input.signal)) as {
+  const triggerExpression = `document.querySelector(${JSON.stringify(trigger)})`;
+  let state = (await evaluateWithRetry(evaluate, modelMenuState, input.signal)) as {
     selected?: string;
     version?: string;
   } | null;
+  if (!state) {
+    await clickExpressionWhenReady(cdp, triggerExpression, input.signal);
+    state = await waitForModelMenuState(evaluate, input.signal);
+  }
   const effort = input.reasoningEffort
     ? input.reasoningEffort.charAt(0).toUpperCase() + input.reasoningEffort.slice(1)
     : undefined;
-  const effortNeedsChanging = effort !== undefined && state?.selected !== effort;
-  if (effortNeedsChanging) await trustedClickExpression(visibleMenuItem(effort), input.signal);
+  const effortNeedsChanging = effort !== undefined && state.selected !== effort;
+  if (effortNeedsChanging)
+    await clickExpressionWhenReady(cdp, visibleMenuItem(effort), input.signal);
   const label = input.model ? modelLabel[input.model] : undefined;
-  if (label && state?.version !== label) {
-    if (effortNeedsChanging) await trustedClick(trigger, input.signal);
-    await trustedClickExpression(modelSubmenuTrigger, input.signal);
-    await trustedClickExpression(visibleMenuItem(label, true), input.signal);
+  if (label && state.version !== label) {
+    if (effortNeedsChanging) await clickExpressionWhenReady(cdp, triggerExpression, input.signal);
+    await clickExpressionWhenReady(cdp, modelSubmenuTrigger, input.signal);
+    await clickExpressionWhenReady(cdp, visibleMenuItem(label, true), input.signal);
   }
 }
 
