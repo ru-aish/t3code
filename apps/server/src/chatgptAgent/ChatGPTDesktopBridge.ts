@@ -829,28 +829,31 @@ const modelLabel: Record<
   string
 > = { latest: "GPT-5.6 Sol", "5.5": "GPT-5.5", "5.4": "GPT-5.4", "5.3": "GPT-5.3", o3: "o3" };
 
+const visibleMenuPredicate = `(menu) => { const rect = menu.getBoundingClientRect(); const style = getComputedStyle(menu); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && menu.getAttribute('data-state') !== 'closed' && rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none'; }`;
 const visibleMenuItem = (text: string, submenu = false) =>
-  `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const menu = ${submenu ? "menus.at(-1)" : "menus[0]"}; return menu ? [...menu.querySelectorAll('[role="menuitem"]')].find((item) => (item.textContent || '').trim() === ${JSON.stringify(text)}) : null; })()`;
-const modelMenuState = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const outer = menus[0]; if (!outer) return null; const selected = [...outer.querySelectorAll('[role="menuitem"][data-chatgpt-model-selected="true"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; const version = [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; return { selected, version }; })()`;
-const modelSubmenuTrigger = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const outer = menus[0]; return outer ? [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].find((item) => { const rect = item.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }) : null; })()`;
+  `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter(${visibleMenuPredicate}); const menu = ${submenu ? "menus.at(-1)" : "menus[0]"}; return menu ? [...menu.querySelectorAll('[role="menuitem"]')].find((item) => (item.textContent || '').trim() === ${JSON.stringify(text)}) : null; })()`;
+const modelMenuState = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter(${visibleMenuPredicate}); const outer = menus[0]; if (!outer) return null; const selected = [...outer.querySelectorAll('[role="menuitem"][data-chatgpt-model-selected="true"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; const version = [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; return { selected, version }; })()`;
+const modelSubmenuTrigger = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter(${visibleMenuPredicate}); const outer = menus[0]; return outer ? [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].find((item) => { const rect = item.getBoundingClientRect(); const style = getComputedStyle(item); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none'; }) : null; })()`;
+const modelMenusClosed = `(() => ![...document.querySelectorAll('[role="menu"]')].some(${visibleMenuPredicate}))()`;
 const historyTrigger = `(() => [...document.querySelectorAll(${JSON.stringify(`${QUICK_CHAT} button[aria-label]`)})].find((button) => { const label = button.getAttribute('aria-label') || ''; const rect = button.getBoundingClientRect(); return label.startsWith('View chat history, current chat:') && rect.width > 0 && rect.height > 0; }) || null)()`;
 const historyTriggerVisible = `Boolean(${historyTrigger})`;
 const historyEntry = (title: string) =>
   `(() => { const root = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return root ? [...root.querySelectorAll('button,[role="menuitem"]')].find((item) => { const label = item.getAttribute('aria-label'); const rect = item.getBoundingClientRect(); return (label === ${JSON.stringify(title)} || (item.textContent || '').trim() === ${JSON.stringify(title)}) && !item.hidden && item.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }) : null; })()`;
 
 const activateRendererControl = (expression: string) =>
-  `(() => { const element = (${expression}); if (!(element instanceof HTMLElement)) return { ok: false, reason: 'missing' }; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden' || element.hidden || element.getAttribute('aria-hidden') === 'true') return { ok: false, reason: 'hidden' }; if ('disabled' in element && element.disabled) return { ok: false, reason: 'disabled' }; element.click(); return { ok: true }; })()`;
+  `(() => { const element = (${expression}); if (!(element instanceof HTMLElement)) return { ok: false, reason: 'missing' }; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none' || element.hidden || element.getAttribute('aria-hidden') === 'true') return { ok: false, reason: 'hidden' }; if ('disabled' in element && element.disabled) return { ok: false, reason: 'disabled' }; const clientX = rect.left + rect.width / 2; const clientY = rect.top + rect.height / 2; const common = { bubbles: true, cancelable: true, composed: true, clientX, clientY, screenX: clientX, screenY: clientY, button: 0 }; element.focus({ preventScroll: true }); element.dispatchEvent(new PointerEvent('pointerdown', { ...common, pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, pressure: 0.5 })); element.dispatchEvent(new PointerEvent('pointerup', { ...common, pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0, pressure: 0 })); element.dispatchEvent(new MouseEvent('click', { ...common, view: window, buttons: 0, detail: 1 })); return { ok: true }; })()`;
+const hoverRendererControl = (expression: string) =>
+  `(() => { const element = (${expression}); if (!(element instanceof HTMLElement)) return { ok: false, reason: 'missing' }; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none' || element.hidden || element.getAttribute('aria-hidden') === 'true') return { ok: false, reason: 'hidden' }; const clientX = rect.left + rect.width / 2; const clientY = rect.top + rect.height / 2; element.focus({ preventScroll: true }); for (const type of ['pointerover', 'pointerenter', 'pointermove']) element.dispatchEvent(new PointerEvent(type, { bubbles: type !== 'pointerenter', cancelable: true, composed: true, clientX, clientY, pointerId: 1, pointerType: 'mouse', isPrimary: true })); for (const type of ['mouseover', 'mouseenter', 'mousemove']) element.dispatchEvent(new MouseEvent(type, { bubbles: type !== 'mouseenter', cancelable: true, composed: true, view: window, clientX, clientY })); return { ok: true }; })()`;
 
-async function clickRendererControlWhenReady(
+async function interactWithRendererControlWhenReady(
   evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  interaction: (expression: string) => string,
   expression: string,
   signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + COMMAND_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const result = (await evaluate(activateRendererControl(expression), signal)) as {
-      ok?: boolean;
-    };
+    const result = (await evaluate(interaction(expression), signal)) as { ok?: boolean };
     if (result?.ok) return;
     await abortableDelay(POLL_INTERVAL_MS, signal);
   }
@@ -859,6 +862,18 @@ async function clickRendererControlWhenReady(
     detail: "Timed out waiting for a ChatGPT Desktop renderer control.",
   });
 }
+
+const clickRendererControlWhenReady = (
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  expression: string,
+  signal?: AbortSignal,
+) => interactWithRendererControlWhenReady(evaluate, activateRendererControl, expression, signal);
+
+const hoverRendererControlWhenReady = (
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  expression: string,
+  signal?: AbortSignal,
+) => interactWithRendererControlWhenReady(evaluate, hoverRendererControl, expression, signal);
 
 async function waitForModelMenuState(
   evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
@@ -876,6 +891,21 @@ async function waitForModelMenuState(
   throw new ChatGPTDesktopBridgeError({
     kind: "timeout",
     detail: "Timed out opening the ChatGPT Desktop model menu.",
+  });
+}
+
+async function waitForModelMenusClosed(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + COMMAND_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await evaluateWithRetry(evaluate, modelMenusClosed, signal)) return;
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
+  throw new ChatGPTDesktopBridgeError({
+    kind: "timeout",
+    detail: "Timed out closing the ChatGPT Desktop model menu.",
   });
 }
 
@@ -938,17 +968,21 @@ async function configureModel(
     ? input.reasoningEffort.charAt(0).toUpperCase() + input.reasoningEffort.slice(1)
     : undefined;
   const effortNeedsChanging = effort !== undefined && state.selected !== effort;
-  if (effortNeedsChanging)
+  if (effortNeedsChanging) {
     await clickRendererControlWhenReady(evaluate, visibleMenuItem(effort), input.signal);
+    await waitForModelMenusClosed(evaluate, input.signal);
+  }
   const label = input.model ? modelLabel[input.model] : undefined;
   const modelNeedsChanging = label !== undefined && state.version !== label;
   if (modelNeedsChanging) {
     if (effortNeedsChanging)
       await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
-    await clickRendererControlWhenReady(evaluate, modelSubmenuTrigger, input.signal);
+    await hoverRendererControlWhenReady(evaluate, modelSubmenuTrigger, input.signal);
     await clickRendererControlWhenReady(evaluate, visibleMenuItem(label, true), input.signal);
+    await waitForModelMenusClosed(evaluate, input.signal);
   } else if (!effortNeedsChanging) {
     await clickRendererControlWhenReady(evaluate, triggerExpression, input.signal);
+    await waitForModelMenusClosed(evaluate, input.signal);
   }
 }
 
@@ -1247,12 +1281,15 @@ export const ChatGPTDesktopBridgeTest = {
   mutateEditor,
   submitMessage,
   expressions: {
+    activateRendererControl,
     activateSend,
     attachmentReady,
     historyEntry,
     historyTrigger,
+    hoverRendererControl,
     injectImages,
     isGenerating,
+    modelMenusClosed,
     modelMenuState,
     modelSubmenuTrigger,
     readLatestReasoning,

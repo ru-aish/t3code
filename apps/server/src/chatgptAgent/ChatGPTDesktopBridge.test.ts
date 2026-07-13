@@ -288,9 +288,12 @@ describe("ChatGPTDesktopBridge", () => {
 
   it("generates syntactically valid, visible-menu-scoped renderer expressions", () => {
     for (const expression of [
+      ChatGPTDesktopBridgeTest.expressions.activateRendererControl("document.body"),
       ChatGPTDesktopBridgeTest.expressions.historyTrigger,
       ChatGPTDesktopBridgeTest.expressions.historyEntry("Saved chat"),
+      ChatGPTDesktopBridgeTest.expressions.hoverRendererControl("document.body"),
       ChatGPTDesktopBridgeTest.expressions.isGenerating,
+      ChatGPTDesktopBridgeTest.expressions.modelMenusClosed,
       ChatGPTDesktopBridgeTest.expressions.modelMenuState,
       ChatGPTDesktopBridgeTest.expressions.modelSubmenuTrigger,
       ChatGPTDesktopBridgeTest.expressions.readLatestReasoning,
@@ -299,6 +302,16 @@ describe("ChatGPTDesktopBridge", () => {
       ChatGPTDesktopBridgeTest.conversationSnapshotFromClient(conversationId),
     ])
       assert.doesNotThrow(() => new Function(`return (${expression});`));
+    assert.match(
+      ChatGPTDesktopBridgeTest.expressions.activateRendererControl("document.body"),
+      /PointerEvent\('pointerdown'/u,
+    );
+    assert.match(
+      ChatGPTDesktopBridgeTest.expressions.hoverRendererControl("document.body"),
+      /pointerover/u,
+    );
+    assert.match(ChatGPTDesktopBridgeTest.expressions.modelMenuState, /data-state/u);
+    assert.match(ChatGPTDesktopBridgeTest.expressions.modelMenuState, /pointerEvents/u);
   });
 
   it("reads the Desktop reasoning accordion and has no wall-clock response deadline", () => {
@@ -318,7 +331,7 @@ describe("ChatGPTDesktopBridge", () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.ensureQuickChat({
       evaluate: async (expression: string) => {
-        if (/element\.click\(\)/u.test(expression)) clicks.push(expression);
+        if (/PointerEvent\('pointerdown'/u.test(expression)) clicks.push(expression);
         return { composer: true, empty: true, turnCount: 0 };
       },
     } as never);
@@ -330,7 +343,7 @@ describe("ChatGPTDesktopBridge", () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.ensureQuickChat({
       evaluate: async (expression: string) => {
-        if (/element\.click\(\)/u.test(expression)) {
+        if (/PointerEvent\('pointerdown'/u.test(expression)) {
           clicks.push(expression);
           return { ok: true };
         }
@@ -347,7 +360,7 @@ describe("ChatGPTDesktopBridge", () => {
     const readyClicks: string[] = [];
     await ChatGPTDesktopBridgeTest.prepareNewConversation({
       evaluate: async (expression: string) => {
-        if (/element\.click\(\)/u.test(expression)) {
+        if (/PointerEvent\('pointerdown'/u.test(expression)) {
           readyClicks.push(expression);
           return { ok: true };
         }
@@ -360,7 +373,7 @@ describe("ChatGPTDesktopBridge", () => {
     const historyClicks: string[] = [];
     await ChatGPTDesktopBridgeTest.prepareNewConversation({
       evaluate: async (expression: string) => {
-        if (/element\.click\(\)/u.test(expression)) {
+        if (/PointerEvent\('pointerdown'/u.test(expression)) {
           historyClicks.push(expression);
           return { ok: true };
         }
@@ -381,7 +394,8 @@ describe("ChatGPTDesktopBridge", () => {
         evaluate: async (expression: string) => {
           if (expression === ChatGPTDesktopBridgeTest.expressions.modelMenuState)
             return probes++ === 0 ? null : { selected: "Low", version: "GPT-5.4" };
-          if (/element\.click\(\)/u.test(expression)) {
+          if (expression === ChatGPTDesktopBridgeTest.expressions.modelMenusClosed) return true;
+          if (/PointerEvent\('pointerdown'|pointerover/u.test(expression)) {
             clicks.push(expression);
             return { ok: true };
           }
@@ -398,6 +412,7 @@ describe("ChatGPTDesktopBridge", () => {
     assert.equal(clicks.length, 5);
     assert.match(clicks[0]!, /Select ChatGPT model/u);
     assert.match(clicks[1]!, /High/u);
+    assert.match(clicks[3]!, /pointerover/u);
     assert.match(clicks[3]!, /aria-haspopup/u);
     assert.match(clicks[4]!, /GPT-5\.5/u);
   });
@@ -410,7 +425,8 @@ describe("ChatGPTDesktopBridge", () => {
         evaluate: async (expression: string) => {
           if (expression === ChatGPTDesktopBridgeTest.expressions.modelMenuState)
             return probes++ < 3 ? null : { selected: "High", version: "GPT-5.6 Sol" };
-          if (/element\.click\(\)/u.test(expression)) {
+          if (expression === ChatGPTDesktopBridgeTest.expressions.modelMenusClosed) return true;
+          if (/PointerEvent\('pointerdown'/u.test(expression)) {
             clicks.push(expression);
             return { ok: true };
           }
