@@ -110,6 +110,38 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         });
       });
 
+    const reasoningActivity = (
+      threadId: ThreadId,
+      turnId: TurnId,
+      phase: "updated" | "completed",
+      detail: string,
+      status: "inProgress" | "completed" | "failed" | "stopped",
+    ) =>
+      Effect.gen(function* () {
+        const createdAt = yield* now;
+        yield* engine.dispatch({
+          type: "thread.activity.append",
+          commandId: yield* commandId(`reasoning-${phase}`),
+          threadId,
+          createdAt,
+          activity: {
+            id: yield* eventId,
+            kind: phase === "updated" ? "tool.updated" : "tool.completed",
+            tone: "tool",
+            summary: phase === "updated" ? "ChatGPT Agent thinking" : "ChatGPT Agent thought",
+            payload: {
+              itemType: "dynamic_tool_call",
+              title: "ChatGPT Agent thinking",
+              status,
+              detail: detail.slice(-12_000),
+              data: { toolCallId: `chatgpt-agent-reasoning:${turnId}` },
+            },
+            turnId,
+            createdAt,
+          },
+        });
+      });
+
     const setSession = (
       thread: {
         readonly id: ThreadId;
@@ -308,6 +340,8 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         (option) => option.id === "reasoningEffort",
       )?.value;
       let conversationId = existing?.conversationId;
+      let latestReasoning = "";
+      let reasoningActivityStarted = false;
       const streamed: true | ChatGPTDesktopBridgeError = yield* Stream.fromAsyncIterable(
         bridge.send({
           endpoint: config.chatgptAgent.cdpEndpoint,
@@ -338,22 +372,49 @@ export const ChatGPTAgentReactorLive = Layer.effect(
                 updatedAt: createdAt,
               });
             }
-            if (chunk.text.length > 0 && !task.controller.signal.aborted) {
-              yield* engine.dispatch({
-                type: "thread.message.assistant.delta",
-                commandId: yield* commandId("delta"),
-                threadId: thread.id,
-                messageId: assistantMessageId,
+            if (chunk.text.length === 0 || task.controller.signal.aborted) return;
+            if (chunk.kind === "thinking") {
+              if (chunk.text === latestReasoning) return;
+              latestReasoning = chunk.text;
+              reasoningActivityStarted = true;
+              yield* reasoningActivity(
+                thread.id,
                 turnId,
-                delta: chunk.text,
-                createdAt: yield* now,
-              });
+                "updated",
+                latestReasoning,
+                "inProgress",
+              );
+              return;
             }
+            yield* engine.dispatch({
+              type: "thread.message.assistant.delta",
+              commandId: yield* commandId("delta"),
+              threadId: thread.id,
+              messageId: assistantMessageId,
+              turnId,
+              delta: chunk.text,
+              createdAt: yield* now,
+            });
           }),
         ),
         Effect.as(true as const),
         Effect.catchTag("ChatGPTDesktopBridgeError", Effect.succeed),
       );
+
+      if (reasoningActivityStarted) {
+        yield* reasoningActivity(
+          thread.id,
+          turnId,
+          "completed",
+          latestReasoning,
+          task.controller.signal.aborted ||
+          (streamed !== true && streamed.kind === "interrupted")
+            ? "stopped"
+            : streamed === true
+              ? "completed"
+              : "failed",
+        );
+      }
 
       if (
         task.controller.signal.aborted ||

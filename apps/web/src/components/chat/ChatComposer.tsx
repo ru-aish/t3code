@@ -2721,44 +2721,47 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onInstanceModelChange={onProviderModelSelect}
                 />
 
-                {isComposerFooterCompact && !isChatGPTAgent ? (
-                  <CompactComposerControlsMenu
-                    activePlan={showPlanSidebarToggle}
-                    interactionMode={interactionMode}
-                    planSidebarLabel={planSidebarLabel}
-                    planSidebarOpen={planSidebarOpen}
-                    runtimeMode={runtimeMode}
-                    showInteractionModeToggle={
-                      !isChatGPTAgent && composerProviderControls.showInteractionModeToggle
-                    }
-                    traitsMenuContent={isChatGPTAgent ? null : providerTraitsMenuContent}
-                    onToggleInteractionMode={toggleInteractionMode}
-                    onTogglePlanSidebar={togglePlanSidebar}
-                    onRuntimeModeChange={handleRuntimeModeChange}
-                  />
-                ) : !isChatGPTAgent ? (
+                {isComposerFooterCompact ? (
+                  providerTraitsMenuContent || !isChatGPTAgent ? (
+                    <CompactComposerControlsMenu
+                      activePlan={!isChatGPTAgent && showPlanSidebarToggle}
+                      interactionMode={interactionMode}
+                      planSidebarLabel={planSidebarLabel}
+                      planSidebarOpen={planSidebarOpen}
+                      runtimeMode={runtimeMode}
+                      showInteractionModeToggle={
+                        !isChatGPTAgent && composerProviderControls.showInteractionModeToggle
+                      }
+                      showRuntimeModeControls={!isChatGPTAgent}
+                      traitsMenuContent={providerTraitsMenuContent}
+                      onToggleInteractionMode={toggleInteractionMode}
+                      onTogglePlanSidebar={togglePlanSidebar}
+                      onRuntimeModeChange={handleRuntimeModeChange}
+                    />
+                  ) : null
+                ) : (
                   <>
-                    {!isChatGPTAgent && providerTraitsPicker ? (
+                    {providerTraitsPicker ? (
                       <>
                         <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
                         {providerTraitsPicker}
                       </>
                     ) : null}
-                    <ComposerFooterModeControls
-                      showInteractionModeToggle={
-                        !isChatGPTAgent && composerProviderControls.showInteractionModeToggle
-                      }
-                      interactionMode={interactionMode}
-                      runtimeMode={runtimeMode}
-                      showPlanToggle={showPlanSidebarToggle}
-                      planSidebarLabel={planSidebarLabel}
-                      planSidebarOpen={planSidebarOpen}
-                      onToggleInteractionMode={toggleInteractionMode}
-                      onRuntimeModeChange={handleRuntimeModeChange}
-                      onTogglePlanSidebar={togglePlanSidebar}
-                    />
+                    {!isChatGPTAgent ? (
+                      <ComposerFooterModeControls
+                        showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                        interactionMode={interactionMode}
+                        runtimeMode={runtimeMode}
+                        showPlanToggle={showPlanSidebarToggle}
+                        planSidebarLabel={planSidebarLabel}
+                        planSidebarOpen={planSidebarOpen}
+                        onToggleInteractionMode={toggleInteractionMode}
+                        onRuntimeModeChange={handleRuntimeModeChange}
+                        onTogglePlanSidebar={togglePlanSidebar}
+                      />
+                    ) : null}
                   </>
-                ) : null}
+                )}
               </div>
 
               {/* Right side: send / stop button */}

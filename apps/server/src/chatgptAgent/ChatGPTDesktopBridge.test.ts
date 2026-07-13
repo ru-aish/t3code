@@ -100,12 +100,17 @@ describe("ChatGPTDesktopBridge", () => {
     }
   });
 
-  it("prefers the authenticated local renderer and rejects the quick-chat prewarm target", () => {
+  it("prefers the authenticated main renderer and rejects standalone quick-chat windows", () => {
     const target = ChatGPTDesktopBridgeTest.selectDesktopTarget([
       {
         type: "page",
         url: "http://127.0.0.1:5175/?initialRoute=%2Fchatgpt%2Fquick-chat-prewarm",
         webSocketDebuggerUrl: "ws://127.0.0.1:9337/prewarm",
+      },
+      {
+        type: "page",
+        url: "http://127.0.0.1:5175/?initialRoute=%2Fchatgpt%2Fquick-chat%2Flocal-chatgpt%253Aexample",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9337/quick-chat-window",
       },
       {
         type: "page",
@@ -285,22 +290,81 @@ describe("ChatGPTDesktopBridge", () => {
     for (const expression of [
       ChatGPTDesktopBridgeTest.expressions.historyTrigger,
       ChatGPTDesktopBridgeTest.expressions.historyEntry("Saved chat"),
+      ChatGPTDesktopBridgeTest.expressions.isGenerating,
       ChatGPTDesktopBridgeTest.expressions.modelMenuState,
       ChatGPTDesktopBridgeTest.expressions.modelSubmenuTrigger,
+      ChatGPTDesktopBridgeTest.expressions.readLatestReasoning,
+      ChatGPTDesktopBridgeTest.expressions.responseComplete,
       ChatGPTDesktopBridgeTest.expressions.visibleMenuItem("High"),
+      ChatGPTDesktopBridgeTest.conversationSnapshotFromClient(conversationId),
     ])
       assert.doesNotThrow(() => new Function(`return (${expression});`));
+  });
+
+  it("reads the Desktop reasoning accordion and has no wall-clock response deadline", () => {
+    assert.match(
+      ChatGPTDesktopBridgeTest.expressions.readLatestReasoning,
+      /exploration-accordion-body/u,
+    );
+    assert.match(ChatGPTDesktopBridgeTest.expressions.readLatestReasoning, /Thought/u);
+    assert.match(ChatGPTDesktopBridgeTest.expressions.isGenerating, /startsWith\('stop'\)/u);
+    assert.notMatch(
+      ChatGPTDesktopBridgeTest.streamSend.toString(),
+      /Timed out waiting for ChatGPT Desktop's assistant response|RESPONSE_TIMEOUT_MS/u,
+    );
   });
 
   it("does not toggle quick chat when its composer is already present", async () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.ensureQuickChat({
-      evaluate: async () => ({ composer: true, empty: true }),
+      evaluate: async () => ({ composer: true, empty: true, turnCount: 0 }),
       trustedClickExpression: async (expression: string) => {
         clicks.push(expression);
       },
     } as never);
     assert.deepEqual(clicks, []);
+  });
+
+  it("matches the desktop Chat launcher even when its shortcut is rendered inline", async () => {
+    let probes = 0;
+    const clicks: string[] = [];
+    await ChatGPTDesktopBridgeTest.ensureQuickChat({
+      evaluate: async () =>
+        probes++ === 0
+          ? { composer: false, empty: false, turnCount: 0 }
+          : { composer: true, empty: true, turnCount: 0 },
+      trustedClickExpression: async (expression: string) => {
+        clicks.push(expression);
+      },
+    } as never);
+    assert.equal(clicks.length, 1);
+    assert.match(clicks[0]!, /ChatCtrl\+/u);
+  });
+
+  it("reuses an already-empty new-chat surface and only clicks New chat for visible history", async () => {
+    const readyClicks: string[] = [];
+    await ChatGPTDesktopBridgeTest.prepareNewConversation({
+      evaluate: async () => ({ composer: true, empty: true, turnCount: 0 }),
+      trustedClick: async (selector: string) => {
+        readyClicks.push(selector);
+      },
+    } as never);
+    assert.deepEqual(readyClicks, []);
+
+    let probes = 0;
+    const historyClicks: string[] = [];
+    await ChatGPTDesktopBridgeTest.prepareNewConversation({
+      evaluate: async () =>
+        probes++ === 0
+          ? { composer: true, empty: true, turnCount: 2 }
+          : { composer: true, empty: true, turnCount: 0 },
+      trustedClick: async (selector: string) => {
+        historyClicks.push(selector);
+      },
+    } as never);
+    assert.deepEqual(historyClicks, [
+      '[data-pip-obstacle="quick-chat"] button[aria-label="New chat"]',
+    ]);
   });
 
   it("reopens the model menu after changing effort and always uses the visible version trigger", async () => {

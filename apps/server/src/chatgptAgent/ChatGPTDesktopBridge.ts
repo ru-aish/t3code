@@ -7,13 +7,17 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-const RESPONSE_TIMEOUT_MS = 120_000;
+const RENDERER_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
-const SETTLED_POLLS = 3;
+const THOUGHT_STREAM_INTERVAL_MS = 2_000;
 const BACKEND_CONVERSATION_ID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function isBackendConversationId(value: string): boolean {
+  return BACKEND_CONVERSATION_ID.test(value);
+}
 
 export class ChatGPTDesktopBridgeError extends Schema.TaggedErrorClass<ChatGPTDesktopBridgeError>()(
   "ChatGPTDesktopBridgeError",
@@ -51,6 +55,7 @@ export interface ChatGPTDesktopBridgeShape {
     readonly signal?: AbortSignal;
   }) => AsyncIterable<{
     readonly conversationId: string;
+    readonly kind: "assistant" | "thinking";
     readonly text: string;
   }>;
 }
@@ -78,6 +83,7 @@ export type RendererRoleUnit = { readonly key: string; readonly text: string };
 type RendererProbe = {
   readonly composer?: boolean;
   readonly empty?: boolean;
+  readonly turnCount?: number;
 };
 type CdpTarget = {
   readonly type?: string;
@@ -88,6 +94,17 @@ type QueryRecord = {
   readonly key: ReadonlyArray<unknown>;
   readonly data: unknown;
   readonly updatedAt?: number;
+};
+type RendererReasoning = {
+  readonly id?: string;
+  readonly text?: string;
+  readonly completed?: boolean;
+};
+type ClientConversationSnapshot = {
+  readonly id: string;
+  readonly title: string;
+  readonly messages: ReadonlyArray<{ readonly role: string; readonly text: string }>;
+  readonly complete: boolean;
 };
 
 const unavailable = (detail: string) =>
@@ -208,14 +225,20 @@ async function discoverTarget(
 export function selectDesktopTarget(targets: ReadonlyArray<CdpTarget>): CdpTarget | undefined {
   const usable = (candidate: CdpTarget) =>
     candidate.type === "page" && Boolean(candidate.webSocketDebuggerUrl);
+  const isLocalRenderer = (candidate: CdpTarget) =>
+    usable(candidate) &&
+    /^http:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?\//iu.test(
+      candidate.url ?? "",
+    );
+  const isStandaloneQuickChatWindow = (candidate: CdpTarget) =>
+    /[?&]initialRoute=%2Fchatgpt%2Fquick-chat/iu.test(candidate.url ?? "");
   return (
     targets.find(
       (candidate) =>
-        usable(candidate) &&
-        /^http:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?\//iu.test(
-          candidate.url ?? "",
-        ) &&
-        !/[?&]initialRoute=%2Fchatgpt%2Fquick-chat-prewarm/iu.test(candidate.url ?? ""),
+        isLocalRenderer(candidate) && /[?&]mcpAppSandboxDevtools=1(?:[&#]|$)/iu.test(candidate.url ?? ""),
+    ) ??
+    targets.find(
+      (candidate) => isLocalRenderer(candidate) && !isStandaloneQuickChatWindow(candidate),
     ) ??
     targets.find(
       (candidate) =>
@@ -455,8 +478,8 @@ const EDITOR = `${QUICK_CHAT} [contenteditable="true"][aria-label="Message ChatG
 const SEND = `${QUICK_CHAT} button[aria-label="Send"]`;
 const NEW_CHAT = `${QUICK_CHAT} button[aria-label="New chat"]`;
 const ADD_FILES = `${QUICK_CHAT} button[aria-label="Add files and more"]`;
-const rendererProbe = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); const editor = document.querySelector(${JSON.stringify(EDITOR)}); return { composer: Boolean(surface && editor), empty: Boolean(editor && !(editor.textContent || '').trim()) }; })()`;
-const quickChatButton = `[...document.querySelectorAll('button')].find((candidate) => (candidate.textContent || '').trim().split('\\n')[0]?.trim() === 'Chat')`;
+const rendererProbe = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); const editor = document.querySelector(${JSON.stringify(EDITOR)}); const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const turnCount = surface ? [...surface.querySelectorAll('[data-content-search-unit-key], [data-message-author-role]')].filter(visible).length : 0; return { composer: Boolean(surface && editor && visible(editor)), empty: Boolean(editor && !(editor.textContent || '').trim()), turnCount }; })()`;
+const quickChatButton = `[...document.querySelectorAll('button')].find((candidate) => { const text = (candidate.textContent || '').trim().replace(/\\s+/g, ' '); const rect = candidate.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 && (text === 'Chat' || text.startsWith('ChatCtrl+') || text.startsWith('Chat Ctrl+')); })`;
 const mutateEditor = (text: string) =>
   `(() => { const editor = document.querySelector(${JSON.stringify(EDITOR)}); if (!(editor instanceof HTMLElement)) return { ok: false, reason: 'editor' }; editor.focus(); const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(true); selection?.removeAllRanges(); selection?.addRange(range); const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)}); if (!inserted) editor.textContent = ${JSON.stringify(text)}; editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(text)} })); return { ok: true }; })()`;
 const sendEnabled = `(() => { const send = document.querySelector(${JSON.stringify(SEND)}); return Boolean(send && !send.disabled && send.getAttribute('aria-disabled') !== 'true'); })()`;
@@ -469,9 +492,138 @@ const injectImages = (
 ) =>
   `(() => { const input = document.querySelector(${JSON.stringify(`${QUICK_CHAT} input[type="file"][aria-label="Attach files"]`)}); if (!(input instanceof HTMLInputElement)) return { ok: false, reason: 'attachment-input' }; const transfer = new DataTransfer(); for (const image of ${JSON.stringify(images)}) { const binary = atob(image.base64); transfer.items.add(new File([Uint8Array.from(binary, c => c.charCodeAt(0))], image.name, { type: image.mimeType })); } input.files = transfer.files; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); return { ok: true }; })()`;
 const attachmentReady = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return Boolean(surface?.querySelector('[data-testid*="attachment" i], [aria-label*="Remove" i]')); })()`;
-const readTurns = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return []; const units = [...surface.querySelectorAll('[data-content-search-unit-key]')]; const modern = units.map(unit => { const id = unit.getAttribute('data-content-search-unit-key') || ''; const match = id.match(/:(user|assistant)$/); return match ? { id, role: match[1], text: unit.textContent || '' } : null; }).filter(Boolean); if (modern.length) return modern; return [...surface.querySelectorAll('[data-message-author-role]')].map((unit, index) => ({ id: unit.getAttribute('data-message-id') || \`legacy:\${index}:\${unit.getAttribute('data-message-author-role') || ''}\`, role: unit.getAttribute('data-message-author-role') || '', text: unit.textContent || '' })); })()`;
-const isGenerating = `(() => Boolean(document.querySelector(${JSON.stringify(`${QUICK_CHAT} button[aria-label="Stop"]`)})))()`;
+const readTurns = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return []; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const units = [...surface.querySelectorAll('[data-content-search-unit-key]')].filter(visible); const modern = units.map(unit => { const id = unit.getAttribute('data-content-search-unit-key') || ''; const match = id.match(/:(user|assistant)$/); return match ? { id, role: match[1], text: unit.textContent || '' } : null; }).filter(Boolean); if (modern.length) return modern; return [...surface.querySelectorAll('[data-message-author-role]')].filter(visible).map((unit, index) => ({ id: unit.getAttribute('data-message-id') || \`legacy:\${index}:\${unit.getAttribute('data-message-author-role') || ''}\`, role: unit.getAttribute('data-message-author-role') || '', text: unit.textContent || '' })); })()`;
+const readLatestReasoning = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return null; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1) || surface; const body = turn.querySelector('[data-testid="exploration-accordion-body"]'); if (!(body instanceof HTMLElement)) return null; const text = (body.innerText || body.textContent || '').replace(/\\n{3,}/g, '\\n\\n').trim(); const toggle = body.parentElement?.querySelector('button[aria-expanded]'); const label = (toggle?.textContent || '').trim(); return { id: turn.getAttribute('data-chatgpt-conversation-turn-id') || String(turns.length - 1), text, completed: /^Thought\\b/i.test(label) }; })()`;
+const isGenerating = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...surface.querySelectorAll('button[aria-label], [role="status"][aria-busy="true"]')].some((element) => visible(element) && ((element.getAttribute('aria-label') || '').toLowerCase().startsWith('stop') || element.getAttribute('aria-busy') === 'true')); })()`;
+const responseComplete = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1); if (!turn) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...turn.querySelectorAll('button[aria-label]')].some((button) => visible(button) && /^(Copy|Copy message|Good response|Bad response)$/i.test(button.getAttribute('aria-label') || '')); })()`;
 const queryCache = `(() => { const fibers = []; for (const node of [document.documentElement, ...[...document.querySelectorAll('*')].slice(0, 300)]) { for (const key of Object.keys(node)) if (key.startsWith('__reactFiber$')) fibers.push(node[key]); } const seen = new Set(), queue = fibers; const enqueue = (value) => { if (value && (typeof value === 'object' || typeof value === 'function') && !seen.has(value)) queue.push(value); }; while (queue.length && seen.size < 2_000) { const value = queue.shift(); if (!value || seen.has(value)) continue; seen.add(value); if (typeof value.getQueryCache === 'function') { try { return value.getQueryCache().getAll().map((query) => ({ key: query.queryKey, data: query.state?.data, updatedAt: query.state?.dataUpdatedAt })); } catch {} } for (const key of ['return', 'child', 'sibling', 'stateNode', 'memoizedState', 'memoizedProps', 'dependencies', 'next', 'context', '_currentValue', '_currentValue2']) { try { enqueue(value[key]); } catch {} } } return []; })()`;
+
+const conversationClientPrelude = `
+  const cacheKey = Symbol.for('t3.chatgptAgent.conversationClient');
+  const isConversationClient = (value) => {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+    let own = [], proto = [];
+    try { own = Reflect.ownKeys(value); } catch {}
+    try { const parent = Object.getPrototypeOf(value); proto = parent ? Reflect.ownKeys(parent) : []; } catch {}
+    const names = new Set([...own, ...proto].filter((key) => typeof key === 'string'));
+    return names.has('startCompletionStream') && names.has('list') && names.has('get');
+  };
+  const findConversationClient = () => {
+    const cached = globalThis[cacheKey];
+    if (isConversationClient(cached)) return cached;
+    const queue = [];
+    for (const node of [document.documentElement, ...document.querySelectorAll('*')]) {
+      for (const key of Object.keys(node)) if (key.startsWith('__reactFiber$')) queue.push(node[key]);
+    }
+    const seen = new Set();
+    while (queue.length && seen.size < 100000) {
+      const value = queue.shift();
+      if (!value || (typeof value !== 'object' && typeof value !== 'function') || seen.has(value)) continue;
+      seen.add(value);
+      if (isConversationClient(value)) {
+        try { globalThis[cacheKey] = value; } catch {}
+        return value;
+      }
+      if (value instanceof Map) for (const entry of value.values()) queue.push(entry);
+      for (const key of ['return', 'child', 'sibling', 'stateNode', 'memoizedState', 'memoizedProps', 'dependencies', 'next', 'context', '_currentValue', '_currentValue2', 'current', 'node', 'signalBindings', 'init', 'value']) {
+        try {
+          const child = value[key];
+          if (child && (typeof child === 'object' || typeof child === 'function')) queue.push(child);
+        } catch {}
+      }
+    }
+    return null;
+  };
+  const messageText = (value) => {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return '';
+    if (typeof value.content === 'string') return value.content;
+    if (typeof value.text === 'string') return value.text;
+    const parts = value.content && typeof value.content === 'object' ? value.content.parts : null;
+    return Array.isArray(parts) && parts.every((part) => typeof part === 'string') ? parts.join('\\n') : '';
+  };
+  const orderedMessages = (data) => {
+    if (!data || typeof data !== 'object' || !data.mapping || typeof data.current_node !== 'string') return [];
+    const result = [], visited = new Set();
+    let id = data.current_node;
+    while (typeof id === 'string' && !visited.has(id) && visited.size < 512) {
+      visited.add(id);
+      const node = data.mapping[id];
+      if (!node) break;
+      const role = node.message?.author?.role;
+      const text = messageText(node.message);
+      if ((role === 'user' || role === 'assistant') && text.trim()) result.push({ role, text });
+      id = typeof node.parent === 'string' ? node.parent : null;
+    }
+    return result.reverse();
+  };
+`;
+
+function withConversationClient(body: string): string {
+  return `(async () => { ${conversationClientPrelude} const client = findConversationClient(); if (!client) return null; ${body} })()`;
+}
+
+function conversationSnapshotFromClient(id: string): string {
+  return withConversationClient(`
+    try {
+      const data = await client.get(${JSON.stringify(id)});
+      const conversationId = typeof data?.conversation_id === 'string' ? data.conversation_id : '';
+      if (!conversationId) return null;
+      const current = typeof data.current_node === 'string' ? data.mapping?.[data.current_node]?.message : null;
+      const status = typeof current?.status === 'string' ? current.status : '';
+      const complete = current?.author?.role === 'assistant' &&
+        (current?.end_turn === true || status === 'finished_successfully' || status === 'complete');
+      return {
+        id: conversationId,
+        title: typeof data.title === 'string' ? data.title : '',
+        messages: orderedMessages(data),
+        complete,
+      };
+    } catch { return null; }
+  `);
+}
+
+function discoverConversationIdFromClient(sentText: string): string {
+  return withConversationClient(`
+    try {
+      const prefix = 'View chat history, current chat:';
+      const titleButton = [...document.querySelectorAll(${JSON.stringify(`${QUICK_CHAT} button[aria-label^="View chat history, current chat:"]`)})]
+        .find((button) => {
+          const rect = button.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+      const currentTitle = (titleButton?.getAttribute('aria-label') || '').slice(prefix.length).trim();
+      const response = await client.list({ expand: false, limit: 20 });
+      const items = Array.isArray(response?.items) ? response.items : Array.isArray(response) ? response : [];
+      if (currentTitle) {
+        const matching = items
+          .filter((item) => item?.title === currentTitle)
+          .sort((a, b) => Number(b?.update_time || 0) - Number(a?.update_time || 0))[0];
+        const matchingId = typeof matching?.id === 'string'
+          ? matching.id
+          : typeof matching?.conversation_id === 'string'
+            ? matching.conversation_id
+            : '';
+        if (matchingId) return matchingId;
+      }
+      // The title can lag for the first few polls. Verify only the newest
+      // candidate rather than loading an entire history page serially.
+      const newest = items[0];
+      const newestId = typeof newest?.id === 'string'
+        ? newest.id
+        : typeof newest?.conversation_id === 'string'
+          ? newest.conversation_id
+          : '';
+      if (!newestId) return null;
+      const data = await client.get(newestId);
+      return orderedMessages(data).some(
+        (message) => message.role === 'user' && message.text === ${JSON.stringify(sentText)},
+      )
+        ? (typeof data?.conversation_id === 'string' ? data.conversation_id : newestId)
+        : null;
+    } catch { return null; }
+  `);
+}
 
 function assistantTurns(turns: ReadonlyArray<RendererTurn>): ReadonlyArray<RendererTurn> {
   return turns.filter((turn) => turn.role === "assistant" && turn.text.trim().length > 0);
@@ -538,7 +690,7 @@ export function discoverStableConversationId(
     if (
       query.key[0] !== "chatgpt-conversation" ||
       typeof query.key[1] !== "string" ||
-      !BACKEND_CONVERSATION_ID.test(query.key[1])
+      !isBackendConversationId(query.key[1])
     )
       continue;
     const data = query.data as { mapping?: Record<string, unknown>; messages?: unknown } | null;
@@ -570,16 +722,10 @@ export function discoverStableConversationId(
   return matches.sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id;
 }
 
-export function verifyOpenedConversation(
-  queries: ReadonlyArray<QueryRecord>,
-  id: string,
+function verifyOpenedMessages(
+  expected: ReadonlyArray<{ readonly role: string; readonly text: string }>,
   visibleTurns: ReadonlyArray<RendererTurn>,
 ): boolean {
-  const query = queries.find(
-    (candidate) => candidate.key[0] === "chatgpt-conversation" && candidate.key[1] === id,
-  );
-  if (!query) return false;
-  const expected = conversationMessages(query.data);
   const actual = visibleTurns
     .filter((turn) => (turn.role === "user" || turn.role === "assistant") && turn.text.trim())
     .map(({ role, text }) => ({ role, text }));
@@ -591,6 +737,17 @@ export function verifyOpenedConversation(
   });
 }
 
+export function verifyOpenedConversation(
+  queries: ReadonlyArray<QueryRecord>,
+  id: string,
+  visibleTurns: ReadonlyArray<RendererTurn>,
+): boolean {
+  const query = queries.find(
+    (candidate) => candidate.key[0] === "chatgpt-conversation" && candidate.key[1] === id,
+  );
+  return query ? verifyOpenedMessages(conversationMessages(query.data), visibleTurns) : false;
+}
+
 type ConversationHistoryEntry = { readonly id: string; readonly title: string };
 
 /** Flatten every page of React Query's infinite conversation-history result. */
@@ -598,7 +755,7 @@ export function findConversationHistoryEntry(
   queries: ReadonlyArray<QueryRecord>,
   id: string,
 ): ConversationHistoryEntry | undefined {
-  if (!BACKEND_CONVERSATION_ID.test(id)) return undefined;
+  if (!isBackendConversationId(id)) return undefined;
   for (const query of queries) {
     if (query.key[0] !== "chatgpt-conversations") continue;
     const data = query.data as { pages?: unknown; items?: unknown; conversations?: unknown } | null;
@@ -649,10 +806,10 @@ async function waitForRenderer(
   requireEmpty: boolean,
   signal?: AbortSignal,
 ): Promise<void> {
-  const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
+  const deadline = Date.now() + RENDERER_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const probe = (await evaluateWithRetry(evaluate, rendererProbe, signal)) as RendererProbe;
-    if (probe?.composer && (!requireEmpty || probe.empty)) return;
+    if (probe?.composer && (!requireEmpty || (probe.empty && (probe.turnCount ?? 0) === 0))) return;
     await abortableDelay(POLL_INTERVAL_MS, signal);
   }
   throw new ChatGPTDesktopBridgeError({
@@ -673,6 +830,7 @@ const visibleMenuItem = (text: string, submenu = false) =>
 const modelMenuState = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const outer = menus[0]; if (!outer) return null; const selected = [...outer.querySelectorAll('[role="menuitem"][data-chatgpt-model-selected="true"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; const version = [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].map((item) => (item.textContent || '').trim()).find(Boolean) || ''; return { selected, version }; })()`;
 const modelSubmenuTrigger = `(() => { const menus = [...document.querySelectorAll('[role="menu"]')].filter((menu) => { const rect = menu.getBoundingClientRect(); return !menu.hidden && menu.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }); const outer = menus[0]; return outer ? [...outer.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].find((item) => { const rect = item.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }) : null; })()`;
 const historyTrigger = `(() => [...document.querySelectorAll(${JSON.stringify(`${QUICK_CHAT} button[aria-label]`)})].find((button) => { const label = button.getAttribute('aria-label') || ''; const rect = button.getBoundingClientRect(); return label.startsWith('View chat history, current chat:') && rect.width > 0 && rect.height > 0; }) || null)()`;
+const historyTriggerVisible = `Boolean(${historyTrigger})`;
 const historyEntry = (title: string) =>
   `(() => { const root = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return root ? [...root.querySelectorAll('button,[role="menuitem"]')].find((item) => { const label = item.getAttribute('aria-label'); const rect = item.getBoundingClientRect(); return (label === ${JSON.stringify(title)} || (item.textContent || '').trim() === ${JSON.stringify(title)}) && !item.hidden && item.getAttribute('aria-hidden') !== 'true' && rect.width > 0 && rect.height > 0; }) : null; })()`;
 
@@ -683,6 +841,33 @@ async function ensureQuickChat(
   const probe = (await evaluateWithRetry(cdp.evaluate, rendererProbe, signal)) as RendererProbe;
   if (!probe?.composer) await cdp.trustedClickExpression(quickChatButton, signal);
   await waitForRenderer(cdp.evaluate, false, signal);
+}
+
+async function prepareNewConversation(
+  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate" | "trustedClick">,
+  signal?: AbortSignal,
+): Promise<void> {
+  const probe = (await evaluateWithRetry(cdp.evaluate, rendererProbe, signal)) as RendererProbe;
+  if (probe?.composer && probe.empty && (probe.turnCount ?? 0) === 0) return;
+  await cdp.trustedClick(NEW_CHAT, signal);
+  await waitForRenderer(cdp.evaluate, true, signal);
+}
+
+async function waitForConversation(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  expected: ReadonlyArray<{ readonly role: string; readonly text: string }>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + COMMAND_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const turns = (await evaluateWithRetry(evaluate, readTurns, signal)) as RendererTurn[];
+    if (verifyOpenedMessages(expected, turns)) return;
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
+  throw new ChatGPTDesktopBridgeError({
+    kind: "incompatible",
+    detail: "ChatGPT Desktop could not verify the requested saved conversation.",
+  });
 }
 
 async function configureModel(
@@ -712,37 +897,66 @@ async function configureModel(
 /** Kept as an async generator so cancellation only owns the active response, never ChatGPT's tools. */
 async function* streamSend(
   input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0],
-): AsyncIterable<{ conversationId: string; text: string }> {
+): AsyncIterable<{
+  conversationId: string;
+  kind: "assistant" | "thinking";
+  text: string;
+}> {
   const cdp = await openCdp(input.endpoint, input.signal);
   try {
     const { evaluate, trustedClick, trustedClickExpression } = cdp;
     await ensureQuickChat(cdp, input.signal);
     if (input.conversationId) {
-      const history = findConversationHistoryEntry(
-        (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
-        input.conversationId,
-      );
-      if (!history)
+      let title = "";
+      let expected: ReadonlyArray<{ readonly role: string; readonly text: string }> = [];
+      const snapshot = (await evaluateWithRetry(
+        evaluate,
+        conversationSnapshotFromClient(input.conversationId),
+        input.signal,
+      )) as ClientConversationSnapshot | null;
+      if (
+        snapshot?.id === input.conversationId &&
+        isBackendConversationId(snapshot.id) &&
+        snapshot.title &&
+        snapshot.messages.length > 0
+      ) {
+        title = snapshot.title;
+        expected = snapshot.messages;
+      } else {
+        const queries = (await evaluateWithRetry(
+          evaluate,
+          queryCache,
+          input.signal,
+        )) as QueryRecord[];
+        const history = findConversationHistoryEntry(queries, input.conversationId);
+        const query = queries.find(
+          (candidate) =>
+            candidate.key[0] === "chatgpt-conversation" &&
+            candidate.key[1] === input.conversationId,
+        );
+        if (history && query) {
+          title = history.title;
+          expected = conversationMessages(query.data);
+        }
+      }
+      if (!title || expected.length === 0)
         throw new ChatGPTDesktopBridgeError({
           kind: "incompatible",
           detail: "The requested ChatGPT conversation was not present in quick-chat history.",
         });
-      await trustedClickExpression(historyTrigger, input.signal);
-      await trustedClickExpression(historyEntry(history.title), input.signal);
-      await waitForRenderer(evaluate, false, input.signal);
-      const verified = verifyOpenedConversation(
-        (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
-        input.conversationId,
-        (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
-      );
-      if (!verified)
-        throw new ChatGPTDesktopBridgeError({
-          kind: "incompatible",
-          detail: "ChatGPT Desktop could not verify the requested saved conversation.",
-        });
+      const currentTurns = (await evaluateWithRetry(
+        evaluate,
+        readTurns,
+        input.signal,
+      )) as RendererTurn[];
+      if (!verifyOpenedMessages(expected, currentTurns)) {
+        if (await evaluateWithRetry(evaluate, historyTriggerVisible, input.signal))
+          await trustedClickExpression(historyTrigger, input.signal);
+        await trustedClickExpression(historyEntry(title), input.signal);
+        await waitForConversation(evaluate, expected, input.signal);
+      }
     } else {
-      await trustedClick(NEW_CHAT, input.signal);
-      await waitForRenderer(evaluate, true, input.signal);
+      await prepareNewConversation(cdp, input.signal);
     }
     await configureModel(cdp, input);
     const before = new Set(
@@ -790,46 +1004,123 @@ async function* streamSend(
         });
       await abortableDelay(POLL_INTERVAL_MS, input.signal);
     }
+    const reasoningBefore = (await evaluateWithRetry(
+      evaluate,
+      readLatestReasoning,
+      input.signal,
+    )) as RendererReasoning | null;
     await trustedClick(SEND, input.signal);
-    const deadline = Date.now() + RESPONSE_TIMEOUT_MS;
     let conversationId = input.conversationId ?? "";
-    let previous = "";
+    let previousAssistantText = "";
+    const baselineReasoningText = reasoningBefore?.text ?? "";
+    const baselineReasoningId = reasoningBefore?.id ?? "";
+    let lastYieldedReasoningText = "";
+    let lastThoughtYieldAt = 0;
+    let nextClientProbeAt = 0;
+    let clientSnapshot: ClientConversationSnapshot | null = null;
     let responseStarted = false;
-    let sawGenerating = false;
-    let stable = 0;
-    while (Date.now() < deadline) {
+
+    // A ChatGPT Agent turn is intentionally unbounded. Long-running tasks may
+    // take hours; cancellation, an explicit renderer failure, or a completed
+    // response ends the stream instead of an arbitrary wall-clock deadline.
+    while (true) {
       if (input.signal?.aborted) throw interrupted();
-      conversationId ||=
-        discoverStableConversationId(
-          (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
-          input.text,
-        ) ?? "";
+      const nowMs = Date.now();
+      if (nowMs >= nextClientProbeAt) {
+        nextClientProbeAt = nowMs + 1_000;
+        if (!conversationId) {
+          const clientId = await evaluateWithRetry(
+            evaluate,
+            discoverConversationIdFromClient(input.text),
+            input.signal,
+          );
+          if (typeof clientId === "string" && isBackendConversationId(clientId))
+            conversationId = clientId;
+          else
+            conversationId =
+              discoverStableConversationId(
+                (await evaluateWithRetry(evaluate, queryCache, input.signal)) as QueryRecord[],
+                input.text,
+              ) ?? "";
+        }
+        if (isBackendConversationId(conversationId)) {
+          const snapshot = await evaluateWithRetry(
+            evaluate,
+            conversationSnapshotFromClient(conversationId),
+            input.signal,
+          );
+          clientSnapshot = snapshot as ClientConversationSnapshot | null;
+        }
+      }
+
+      const reasoning = (await evaluateWithRetry(
+        evaluate,
+        readLatestReasoning,
+        input.signal,
+      )) as RendererReasoning | null;
+      const reasoningText = reasoning?.text?.trim() ?? "";
+      const reasoningId = reasoning?.id ?? "";
+      const isCurrentTurnReasoning =
+        reasoningText.length > 0 &&
+        (reasoningId !== baselineReasoningId || reasoningText !== baselineReasoningText);
+      const shouldYieldThought =
+        isCurrentTurnReasoning &&
+        reasoningText !== lastYieldedReasoningText &&
+        isBackendConversationId(conversationId) &&
+        (reasoning?.completed === true || nowMs - lastThoughtYieldAt >= THOUGHT_STREAM_INTERVAL_MS);
+      if (shouldYieldThought) {
+        yield { conversationId, kind: "thinking", text: reasoningText };
+        lastYieldedReasoningText = reasoningText;
+        lastThoughtYieldAt = nowMs;
+      }
+
       const turns = assistantTurns(
         (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[],
       );
       const newest = turns.toReversed().find((turn) => !before.has(turn.id));
-      const text = newest?.text ?? "";
-      const generating = Boolean(await evaluateWithRetry(evaluate, isGenerating, input.signal));
-      if (text.length > 0) {
+      const domAssistantText = newest?.text ?? "";
+      const snapshotMessages = clientSnapshot?.messages ?? [];
+      const sentMessageIndex = snapshotMessages.findLastIndex(
+        (message) => message.role === "user" && message.text === input.text,
+      );
+      const snapshotAssistantText =
+        sentMessageIndex >= 0
+          ? (snapshotMessages
+              .slice(sentMessageIndex + 1)
+              .toReversed()
+              .find((message) => message.role === "assistant")?.text ?? "")
+          : "";
+      const assistantText =
+        snapshotAssistantText.length > domAssistantText.length
+          ? snapshotAssistantText
+          : domAssistantText;
+      if (assistantText.length > 0) {
         responseStarted = true;
-        if (text.length > previous.length) {
-          if (!BACKEND_CONVERSATION_ID.test(conversationId)) {
-            await abortableDelay(POLL_INTERVAL_MS, input.signal);
-            continue;
-          }
-          yield { conversationId, text: text.slice(previous.length) };
-          previous = text;
-          stable = 0;
-        } else stable += 1;
+        if (
+          assistantText.length > previousAssistantText.length &&
+          isBackendConversationId(conversationId)
+        ) {
+          yield {
+            conversationId,
+            kind: "assistant",
+            text: assistantText.slice(previousAssistantText.length),
+          };
+          previousAssistantText = assistantText;
+        }
       }
-      sawGenerating ||= generating;
-      if (responseStarted && ((sawGenerating && !generating) || stable >= SETTLED_POLLS)) return;
+
+      const generating = Boolean(await evaluateWithRetry(evaluate, isGenerating, input.signal));
+      const completedInDom = Boolean(
+        await evaluateWithRetry(evaluate, responseComplete, input.signal),
+      );
+      if (
+        responseStarted &&
+        !generating &&
+        (clientSnapshot?.complete === true || completedInDom)
+      )
+        return;
       await abortableDelay(POLL_INTERVAL_MS, input.signal);
     }
-    throw new ChatGPTDesktopBridgeError({
-      kind: "timeout",
-      detail: "Timed out waiting for ChatGPT Desktop's assistant response.",
-    });
   } finally {
     cdp.close();
   }
@@ -859,6 +1150,7 @@ export const ChatGPTDesktopBridgeLive = Layer.succeed(ChatGPTDesktopBridge, {
 export const ChatGPTDesktopBridgeTest = {
   assistantTurns,
   conversationMessages,
+  conversationSnapshotFromClient,
   discoverStableConversationId,
   discoverTarget,
   findConversationHistoryEntry,
@@ -871,12 +1163,16 @@ export const ChatGPTDesktopBridgeTest = {
     historyEntry,
     historyTrigger,
     injectImages,
+    isGenerating,
     modelMenuState,
     modelSubmenuTrigger,
+    readLatestReasoning,
+    responseComplete,
     visibleMenuItem,
   },
   configureModel,
   ensureQuickChat,
+  prepareNewConversation,
   selectDesktopTarget,
   validateEndpoint,
   validateWebSocketEndpoint,
