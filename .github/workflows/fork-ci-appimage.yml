@@ -1,0 +1,138 @@
+name: Fork CI and AppImage
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feature/**"
+      - "fix/**"
+  workflow_dispatch:
+
+concurrency:
+  group: fork-ci-appimage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Server checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Typecheck server
+        run: vp run --filter t3 typecheck
+
+      - name: Test ChatGPT Agent server integration
+        run: |
+          pnpm exec vitest run \
+            apps/server/src/chatgptAgent/ChatGPTDesktopBridge.test.ts \
+            apps/server/src/chatgptAgent/ChatGPTDesktopController.test.ts \
+            apps/server/src/chatgptAgent/ChatGPTAgentRouter.test.ts \
+            apps/server/src/chatgptAgent/ChatGPTAgentTurnCoordinator.test.ts \
+            apps/server/src/chatgptAgent/ThreadBinding.test.ts
+
+  web:
+    name: Web checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Typecheck web
+        run: vp run --filter @t3tools/web typecheck
+
+      - name: Test ChatGPT Agent web integration
+        run: |
+          pnpm exec vitest run \
+            apps/web/src/chatgptAgent.test.ts \
+            apps/web/src/composerDraftStore.test.ts \
+            apps/web/src/components/chat/composerProviderState.test.tsx
+
+  appimage:
+    name: Build Linux AppImage
+    needs:
+      - server
+      - web
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Install Linux packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes imagemagick
+
+      - name: Build AppImage
+        env:
+          T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+          T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+          T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+        run: pnpm dist:desktop:linux
+
+      - name: Prepare downloadable artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t appimages < <(find release -maxdepth 1 -type f -name '*.AppImage' -print | sort)
+          if (( ${#appimages[@]} != 1 )); then
+            printf 'Expected exactly one AppImage, found %d.\n' "${#appimages[@]}" >&2
+            printf '%s\n' "${appimages[@]:-}" >&2
+            exit 1
+          fi
+
+          mkdir -p appimage-artifact
+          cp "${appimages[0]}" appimage-artifact/
+          (
+            cd appimage-artifact
+            sha256sum ./*.AppImage > SHA256SUMS.txt
+            printf 'commit=%s\nworkflow_run=%s\nrepository=%s\n' \
+              "$GITHUB_SHA" \
+              "$GITHUB_RUN_ID" \
+              "$GITHUB_REPOSITORY" > BUILD_INFO.txt
+          )
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: t3code-linux-${{ github.sha }}
+          path: appimage-artifact/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
