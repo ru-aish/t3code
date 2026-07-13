@@ -230,15 +230,14 @@ export function selectDesktopTarget(targets: ReadonlyArray<CdpTarget>): CdpTarge
     candidate.type === "page" && Boolean(candidate.webSocketDebuggerUrl);
   const isLocalRenderer = (candidate: CdpTarget) =>
     usable(candidate) &&
-    /^http:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?\//iu.test(
-      candidate.url ?? "",
-    );
+    /^http:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?\//iu.test(candidate.url ?? "");
   const isStandaloneQuickChatWindow = (candidate: CdpTarget) =>
     /[?&]initialRoute=%2Fchatgpt%2Fquick-chat/iu.test(candidate.url ?? "");
   return (
     targets.find(
       (candidate) =>
-        isLocalRenderer(candidate) && /[?&]mcpAppSandboxDevtools=1(?:[&#]|$)/iu.test(candidate.url ?? ""),
+        isLocalRenderer(candidate) &&
+        /[?&]mcpAppSandboxDevtools=1(?:[&#]|$)/iu.test(candidate.url ?? ""),
     ) ??
     targets.find(
       (candidate) => isLocalRenderer(candidate) && !isStandaloneQuickChatWindow(candidate),
@@ -410,7 +409,7 @@ async function openCdp(
             reject(
               new ChatGPTDesktopBridgeError({
                 kind: "timeout",
-                detail: "ChatGPT Desktop did not complete a CDP command in time.",
+                detail: `ChatGPT Desktop did not complete CDP command ${method} in time.`,
               }),
             ),
           ),
@@ -486,6 +485,8 @@ const quickChatButton = `[...document.querySelectorAll('button')].find((candidat
 const mutateEditor = (text: string) =>
   `(() => { const editor = document.querySelector(${JSON.stringify(EDITOR)}); if (!(editor instanceof HTMLElement)) return { ok: false, reason: 'editor' }; editor.focus(); const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(true); selection?.removeAllRanges(); selection?.addRange(range); const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)}); if (!inserted) editor.textContent = ${JSON.stringify(text)}; editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(text)} })); return { ok: true }; })()`;
 const sendEnabled = `(() => { const send = document.querySelector(${JSON.stringify(SEND)}); return Boolean(send && !send.disabled && send.getAttribute('aria-disabled') !== 'true'); })()`;
+const activateSend = `(() => { const send = document.querySelector(${JSON.stringify(SEND)}); if (!(send instanceof HTMLButtonElement)) return { ok: false, reason: 'missing' }; if (send.disabled || send.getAttribute('aria-disabled') === 'true') return { ok: false, reason: 'disabled' }; send.click(); return { ok: true }; })()`;
+const sendAcknowledged = `(() => { const root = document.querySelector(${JSON.stringify(QUICK_CHAT)}); const editor = document.querySelector(${JSON.stringify(EDITOR)}); const stop = root ? [...root.querySelectorAll('button[aria-label]')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().startsWith('stop')) : null; const visible = (element) => { if (!element) return false; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return Boolean(editor && !(editor.textContent || '').trim()) || visible(stop); })()`;
 const injectImages = (
   images: ReadonlyArray<{
     readonly name: string;
@@ -947,10 +948,43 @@ async function configureModel(
   }
 }
 
+async function submitMessage(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  let activationTimeout: ChatGPTDesktopBridgeError | undefined;
+  let result: { ok?: boolean; reason?: string } | undefined;
+  try {
+    result = (await evaluate(activateSend, signal)) as typeof result;
+  } catch (error) {
+    if (!isChatGPTDesktopBridgeError(error) || error.kind !== "timeout") throw error;
+    activationTimeout = error;
+  }
+
+  if (result && !result.ok)
+    throw new ChatGPTDesktopBridgeError({
+      kind: "incompatible",
+      detail:
+        result.reason === "disabled"
+          ? "ChatGPT Desktop disabled Send before submission."
+          : "ChatGPT Desktop does not expose a supported Send control.",
+    });
+
+  const deadline = Date.now() + COMMAND_TIMEOUT_MS;
+  while (!(await evaluateWithRetry(evaluate, sendAcknowledged, signal))) {
+    if (Date.now() >= deadline) {
+      if (activationTimeout) throw activationTimeout;
+      throw new ChatGPTDesktopBridgeError({
+        kind: "timeout",
+        detail: "ChatGPT Desktop did not acknowledge the submitted message.",
+      });
+    }
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
+}
+
 /** Kept as an async generator so cancellation only owns the active response, never ChatGPT's tools. */
-async function* streamSend(
-  input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0],
-): AsyncIterable<{
+async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0]): AsyncIterable<{
   conversationId: string;
   kind: "assistant" | "thinking";
   text: string;
@@ -1062,7 +1096,7 @@ async function* streamSend(
       readLatestReasoning,
       input.signal,
     )) as RendererReasoning | null;
-    await trustedClick(SEND, input.signal);
+    await submitMessage(evaluate, input.signal);
     let conversationId = input.conversationId ?? "";
     let previousAssistantText = "";
     const baselineReasoningText = reasoningBefore?.text ?? "";
@@ -1166,11 +1200,7 @@ async function* streamSend(
       const completedInDom = Boolean(
         await evaluateWithRetry(evaluate, responseComplete, input.signal),
       );
-      if (
-        responseStarted &&
-        !generating &&
-        (clientSnapshot?.complete === true || completedInDom)
-      )
+      if (responseStarted && !generating && (clientSnapshot?.complete === true || completedInDom))
         return;
       await abortableDelay(POLL_INTERVAL_MS, input.signal);
     }
@@ -1211,7 +1241,9 @@ export const ChatGPTDesktopBridgeTest = {
   parseRoleUnits,
   streamSend,
   mutateEditor,
+  submitMessage,
   expressions: {
+    activateSend,
     attachmentReady,
     historyEntry,
     historyTrigger,
@@ -1221,6 +1253,7 @@ export const ChatGPTDesktopBridgeTest = {
     modelSubmenuTrigger,
     readLatestReasoning,
     responseComplete,
+    sendAcknowledged,
     visibleMenuItem,
   },
   configureModel,

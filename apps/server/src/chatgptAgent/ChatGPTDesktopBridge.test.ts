@@ -372,8 +372,7 @@ describe("ChatGPTDesktopBridge", () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.configureModel(
       {
-        evaluate: async () =>
-          probes++ === 0 ? null : { selected: "Low", version: "GPT-5.4" },
+        evaluate: async () => (probes++ === 0 ? null : { selected: "Low", version: "GPT-5.4" }),
         trustedClick: async (selector: string) => {
           clicks.push(selector);
         },
@@ -399,8 +398,7 @@ describe("ChatGPTDesktopBridge", () => {
     const clicks: string[] = [];
     await ChatGPTDesktopBridgeTest.configureModel(
       {
-        evaluate: async () =>
-          probes++ < 3 ? null : { selected: "High", version: "GPT-5.6 Sol" },
+        evaluate: async () => (probes++ < 3 ? null : { selected: "High", version: "GPT-5.6 Sol" }),
         trustedClick: async () => {
           throw new Error("selector click should not be used");
         },
@@ -418,6 +416,41 @@ describe("ChatGPTDesktopBridge", () => {
     assert.equal(probes, 4);
     assert.equal(clicks.length, 1);
     assert.match(clicks[0]!, /Select ChatGPT model/u);
+  });
+
+  it("activates Send once and polls acknowledgement without duplicate submission", async () => {
+    let activations = 0;
+    let acknowledgementProbes = 0;
+    await ChatGPTDesktopBridgeTest.submitMessage(async (expression: string) => {
+      if (expression === ChatGPTDesktopBridgeTest.expressions.activateSend) {
+        activations += 1;
+        return { ok: true };
+      }
+      assert.equal(expression, ChatGPTDesktopBridgeTest.expressions.sendAcknowledged);
+      acknowledgementProbes += 1;
+      return acknowledgementProbes >= 3;
+    });
+    assert.equal(activations, 1);
+    assert.equal(acknowledgementProbes, 3);
+  });
+
+  it("does not retry Send when activation times out but ChatGPT acknowledges it", async () => {
+    let activations = 0;
+    let acknowledgementProbes = 0;
+    await ChatGPTDesktopBridgeTest.submitMessage(async (expression: string) => {
+      if (expression === ChatGPTDesktopBridgeTest.expressions.activateSend) {
+        activations += 1;
+        throw new ChatGPTDesktopBridgeError({
+          kind: "timeout",
+          detail: "ambiguous activation timeout",
+        });
+      }
+      assert.equal(expression, ChatGPTDesktopBridgeTest.expressions.sendAcknowledged);
+      acknowledgementProbes += 1;
+      return true;
+    });
+    assert.equal(activations, 1);
+    assert.equal(acknowledgementProbes, 1);
   });
 
   it("keeps CDP transport failure, timeout, and active-command cancellation coverage", async () => {
@@ -447,7 +480,7 @@ describe("ChatGPTDesktopBridge", () => {
         const cdp = await ChatGPTDesktopBridgeTest.openCdp("http://127.0.0.1:9222", undefined, {
           commandMs: 1,
         });
-        await assertRejected(cdp.evaluate("1"), /did not complete/u);
+        await assertRejected(cdp.evaluate("1"), /Runtime\.evaluate/u);
         const controller = new AbortController();
         const pending = cdp.evaluate("2", controller.signal);
         controller.abort();
