@@ -511,19 +511,6 @@ function providerSelectionsFromModelSelection(
   return { [modelSelection.instanceId]: options };
 }
 
-function modelSelectionByProviderToOptions(
-  map: Partial<Record<string, ModelSelection>> | null | undefined,
-): ProviderOptionSelectionsByProvider | null {
-  if (!map) return null;
-  const result: ProviderOptionSelectionsByProvider = {};
-  for (const [provider, selection] of Object.entries(map)) {
-    if (selection?.options && selection.options.length > 0) {
-      result[provider] = selection.options;
-    }
-  }
-  return Object.keys(result).length > 0 ? result : null;
-}
-
 function cloneModelSelection(selection: ModelSelection): DeepMutable<ModelSelection> {
   return {
     ...selection,
@@ -1006,9 +993,13 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
       ))
     : baseModel;
+  // A saved thread selection is authoritative when resuming.  Draft/sticky
+  // state is useful for new threads but must never replace an existing
+  // thread's reasoning choice when the picker/provider is rehydrated.
   const modelOptions =
-    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
     providerSelectionsFromModelSelection(input.threadModelSelection) ??
+    (instanceSelection ? providerSelectionsFromModelSelection(instanceSelection) : null) ??
+    (legacySelection ? providerSelectionsFromModelSelection(legacySelection) : null) ??
     providerSelectionsFromModelSelection(input.projectModelSelection) ??
     null;
 

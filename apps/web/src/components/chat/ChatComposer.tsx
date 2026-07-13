@@ -75,7 +75,6 @@ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
-import { ChatGPTAgentTargetBadge } from "./ChatGPTAgentTargetBadge";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
@@ -2721,10 +2720,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   getModelDisabledReason={getModelDisabledReason}
                   onInstanceModelChange={onProviderModelSelect}
                 />
-
-                {isChatGPTAgent ? (
-                  <ChatGPTAgentTargetBadge compact={isComposerFooterCompact} />
-                ) : null}
 
                 {isComposerFooterCompact && !isChatGPTAgent ? (
                   <CompactComposerControlsMenu

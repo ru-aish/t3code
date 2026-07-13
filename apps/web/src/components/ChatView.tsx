@@ -3908,8 +3908,7 @@ function ChatViewContent(props: ChatViewProps) {
     // Canonicalize it here so every persisted/start-turn path carries the
     // agent instance id that the server routes to ChatGPT Desktop.
     const dispatchModelSelection =
-      resolveChatGPTAgentModelSelection(ctxSelectedModelSelection.instanceId) ??
-      ctxSelectedModelSelection;
+      resolveChatGPTAgentModelSelection(ctxSelectedModelSelection) ?? ctxSelectedModelSelection;
     const promptForSend = promptRef.current;
     const {
       trimmedPrompt: trimmed,
