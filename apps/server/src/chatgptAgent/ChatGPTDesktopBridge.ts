@@ -496,7 +496,7 @@ const injectImages = (
 ) =>
   `(() => { const input = document.querySelector(${JSON.stringify(`${QUICK_CHAT} input[type="file"][aria-label="Attach files"]`)}); if (!(input instanceof HTMLInputElement)) return { ok: false, reason: 'attachment-input' }; const transfer = new DataTransfer(); for (const image of ${JSON.stringify(images)}) { const binary = atob(image.base64); transfer.items.add(new File([Uint8Array.from(binary, c => c.charCodeAt(0))], image.name, { type: image.mimeType })); } input.files = transfer.files; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); return { ok: true }; })()`;
 const attachmentReady = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return Boolean(surface?.querySelector('[data-testid*="attachment" i], [aria-label*="Remove" i]')); })()`;
-const readTurns = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return []; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const units = [...surface.querySelectorAll('[data-content-search-unit-key]')].filter(visible); const modern = units.map(unit => { const id = unit.getAttribute('data-content-search-unit-key') || ''; const match = id.match(/:(user|assistant)$/); return match ? { id, role: match[1], text: unit.textContent || '' } : null; }).filter(Boolean); if (modern.length) return modern; return [...surface.querySelectorAll('[data-message-author-role]')].filter(visible).map((unit, index) => ({ id: unit.getAttribute('data-message-id') || \`legacy:\${index}:\${unit.getAttribute('data-message-author-role') || ''}\`, role: unit.getAttribute('data-message-author-role') || '', text: unit.textContent || '' })); })()`;
+const readTurns = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return []; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const text = (unit) => unit instanceof HTMLElement ? (unit.innerText || unit.textContent || '') : (unit.textContent || ''); const units = [...surface.querySelectorAll('[data-content-search-unit-key]')].filter(visible); const modern = units.map(unit => { const id = unit.getAttribute('data-content-search-unit-key') || ''; const match = id.match(/:(user|assistant)$/); return match ? { id, role: match[1], text: text(unit) } : null; }).filter(Boolean); if (modern.length) return modern; return [...surface.querySelectorAll('[data-message-author-role]')].filter(visible).map((unit, index) => ({ id: unit.getAttribute('data-message-id') || \`legacy:\${index}:\${unit.getAttribute('data-message-author-role') || ''}\`, role: unit.getAttribute('data-message-author-role') || '', text: text(unit) })); })()`;
 const readLatestReasoning = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return null; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1) || surface; const body = turn.querySelector('[data-testid="exploration-accordion-body"]'); if (!(body instanceof HTMLElement)) return null; const text = (body.innerText || body.textContent || '').replace(/\\n{3,}/g, '\\n\\n').trim(); const toggle = body.parentElement?.querySelector('button[aria-expanded]'); const label = (toggle?.textContent || '').trim(); return { id: turn.getAttribute('data-chatgpt-conversation-turn-id') || String(turns.length - 1), text, completed: /^Thought\\b/i.test(label) }; })()`;
 const isGenerating = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...surface.querySelectorAll('button[aria-label], [role="status"][aria-busy="true"]')].some((element) => visible(element) && ((element.getAttribute('aria-label') || '').toLowerCase().startsWith('stop') || element.getAttribute('aria-busy') === 'true')); })()`;
 const responseComplete = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1); if (!turn) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...turn.querySelectorAll('button[aria-label]')].some((button) => visible(button) && /^(Copy|Copy message|Good response|Bad response)$/i.test(button.getAttribute('aria-label') || '')); })()`;
@@ -544,7 +544,16 @@ const conversationClientPrelude = `
     if (typeof value.content === 'string') return value.content;
     if (typeof value.text === 'string') return value.text;
     const parts = value.content && typeof value.content === 'object' ? value.content.parts : null;
-    return Array.isArray(parts) && parts.every((part) => typeof part === 'string') ? parts.join('\\n') : '';
+    if (!Array.isArray(parts)) return '';
+    return parts
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return '';
+        if (typeof part.text === 'string') return part.text;
+        return typeof part.content === 'string' && /text/i.test(String(part.content_type || '')) ? part.content : '';
+      })
+      .filter((part) => part.trim())
+      .join('\\n');
   };
   const orderedMessages = (data) => {
     if (!data || typeof data !== 'object' || !data.mapping || typeof data.current_node !== 'string') return [];
@@ -643,8 +652,22 @@ function textFromMessage(value: unknown): string | undefined {
   if (typeof record.text === "string") return record.text;
   if (record.content && typeof record.content === "object") {
     const parts = (record.content as { parts?: unknown }).parts;
-    if (Array.isArray(parts) && parts.every((part) => typeof part === "string"))
-      return parts.join("\n");
+    if (Array.isArray(parts)) {
+      const text = parts
+        .flatMap((part) => {
+          if (typeof part === "string") return [part];
+          if (!part || typeof part !== "object") return [];
+          const record = part as Record<string, unknown>;
+          if (typeof record.text === "string") return [record.text];
+          return typeof record.content === "string" &&
+            /text/iu.test(String(record.content_type ?? ""))
+            ? [record.content]
+            : [];
+        })
+        .filter((part) => part.trim())
+        .join("\n");
+      if (text) return text;
+    }
   }
   return undefined;
 }
@@ -718,6 +741,14 @@ export function discoverStableConversationId(
   return matches.sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id;
 }
 
+function comparableMessageText(text: string): string {
+  return text
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[\t ]+/gu, " ")
+    .replace(/ *\n */gu, "\n")
+    .trim();
+}
+
 function verifyOpenedMessages(
   expected: ReadonlyArray<{ readonly role: string; readonly text: string }>,
   visibleTurns: ReadonlyArray<RendererTurn>,
@@ -729,7 +760,10 @@ function verifyOpenedMessages(
   if (!tailLength) return false;
   return expected.slice(-tailLength).every((message, index) => {
     const visible = actual.slice(-tailLength)[index];
-    return visible?.role === message.role && visible.text === message.text;
+    return (
+      visible?.role === message.role &&
+      comparableMessageText(visible.text) === comparableMessageText(message.text)
+    );
   });
 }
 
@@ -1328,6 +1362,7 @@ export const ChatGPTDesktopBridgeTest = {
     modelMenuState,
     modelSubmenuTrigger,
     readLatestReasoning,
+    readTurns,
     responseComplete,
     sendAcknowledged,
     visibleMenuItem,

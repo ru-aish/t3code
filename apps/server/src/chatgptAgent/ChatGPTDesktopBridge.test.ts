@@ -222,6 +222,41 @@ describe("ChatGPTDesktopBridge", () => {
     );
   });
 
+  it("preserves paragraph boundaries and normalizes harmless whitespace while verifying saved conversations", () => {
+    assert.match(ChatGPTDesktopBridgeTest.expressions.readTurns, /innerText/u);
+    const query = {
+      key: ["chatgpt-conversation", conversationId],
+      data: {
+        current_node: "b",
+        mapping: {
+          a: {
+            parent: null,
+            message: {
+              author: { role: "user" },
+              content: { parts: ["Workspace line.\n\nPrompt line."] },
+            },
+          },
+          b: {
+            parent: "a",
+            message: { author: { role: "assistant" }, content: { parts: ["answer"] } },
+          },
+        },
+      },
+    };
+    assert.isTrue(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, [
+        { id: "a:user", role: "user", text: "Workspace  line.\r\n\r\nPrompt line." },
+        { id: "b:assistant", role: "assistant", text: "answer" },
+      ]),
+    );
+    assert.isFalse(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, [
+        { id: "a:user", role: "user", text: "Different prompt." },
+        { id: "b:assistant", role: "assistant", text: "answer" },
+      ]),
+    );
+  });
+
   it("finds a saved conversation in every infinite-history page", () => {
     assert.deepEqual(
       ChatGPTDesktopBridgeTest.findConversationHistoryEntry(
@@ -276,6 +311,60 @@ describe("ChatGPTDesktopBridge", () => {
         { id: "user:user", role: "user", text: "wrong branch" },
         { id: "assistant:assistant", role: "assistant", text: "stale" },
       ]),
+    );
+  });
+
+  it("keeps textual parts from multimodal messages while ignoring image pointers", () => {
+    const query = {
+      current_node: "assistant",
+      mapping: {
+        user: {
+          parent: null,
+          message: {
+            author: { role: "user" },
+            content: {
+              content_type: "multimodal_text",
+              parts: [
+                {
+                  content_type: "image_asset_pointer",
+                  asset_pointer: "file-service://example",
+                },
+                "Image prompt text.",
+                { content_type: "input_text", content: "Second text part." },
+                { text: "Third text part." },
+              ],
+            },
+          },
+        },
+        assistant: {
+          parent: "user",
+          message: { author: { role: "assistant" }, content: { parts: ["answer"] } },
+        },
+      },
+    };
+    assert.deepEqual(ChatGPTDesktopBridgeTest.conversationMessages(query), [
+      { role: "user", text: "Image prompt text.\nSecond text part.\nThird text part." },
+      { role: "assistant", text: "answer" },
+    ]);
+    const expression = ChatGPTDesktopBridgeTest.conversationSnapshotFromClient(conversationId);
+    assert.match(expression, /typeof part\.text === 'string'/u);
+    assert.match(expression, /content_type/u);
+    assert.notMatch(
+      ChatGPTDesktopBridgeTest.conversationMessages({
+        current_node: "recap",
+        mapping: {
+          recap: {
+            parent: null,
+            message: {
+              author: { role: "assistant" },
+              content: { content_type: "reasoning_recap", content: "Worked for a second" },
+            },
+          },
+        },
+      })
+        .map((message) => message.text)
+        .join("\n"),
+      /Worked for/u,
     );
   });
 
