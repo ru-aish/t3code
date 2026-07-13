@@ -749,6 +749,35 @@ function comparableMessageText(text: string): string {
     .trim();
 }
 
+function semanticTokens(text: string): ReadonlyArray<string> {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+/** Match a backend Markdown writing artifact to the same document rendered as desktop UI text. */
+function renderedWritingArtifactMatches(expected: string, visible: string): boolean {
+  if (!/^\s*:::writing\{[^\n]*\}/u.test(expected)) return false;
+  const markdown = expected
+    .replace(/^\s*:::writing\{[^\n]*\}\s*/u, "")
+    .replace(/\s*:::\s*$/u, "")
+    // Remove list markers before heading markers so section numbers in headings remain meaningful.
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gmu, "")
+    .replace(/^\s{0,3}#{1,6}\s+/gmu, "")
+    .replace(/^\s*```[^\n]*$/gmu, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/gu, "$1")
+    .replace(/<[^>]+>/gu, " ");
+  const rendered = visible
+    .replace(/^\s*Writing\s*\n(?:\s*Edit\s*\n)?/iu, "")
+    .replace(/<[^>]+>/gu, " ");
+  const expectedTokens = semanticTokens(markdown);
+  const visibleTokens = semanticTokens(rendered);
+  return (
+    expectedTokens.length > 0 &&
+    expectedTokens.length === visibleTokens.length &&
+    expectedTokens.every((token, index) => token === visibleTokens[index])
+  );
+}
+
 function verifyOpenedMessages(
   expected: ReadonlyArray<{ readonly role: string; readonly text: string }>,
   visibleTurns: ReadonlyArray<RendererTurn>,
@@ -760,9 +789,10 @@ function verifyOpenedMessages(
   if (!tailLength) return false;
   return expected.slice(-tailLength).every((message, index) => {
     const visible = actual.slice(-tailLength)[index];
+    if (visible?.role !== message.role) return false;
+    if (comparableMessageText(visible.text) === comparableMessageText(message.text)) return true;
     return (
-      visible?.role === message.role &&
-      comparableMessageText(visible.text) === comparableMessageText(message.text)
+      message.role === "assistant" && renderedWritingArtifactMatches(message.text, visible.text)
     );
   });
 }

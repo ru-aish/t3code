@@ -257,6 +257,67 @@ describe("ChatGPTDesktopBridge", () => {
     );
   });
 
+  it("verifies backend writing artifacts against their rendered Desktop text", () => {
+    const artifact = `:::writing{variant="document" id="42"}\n# Operations Manual\n\n## 1. Scope\n\nThe same rendered content.\n\n1. Record the incident.\n2. Preserve evidence.\n\n- Restore safely.\n- Verify completion.\n:::`;
+    const query = {
+      key: ["chatgpt-conversation", conversationId],
+      data: {
+        current_node: "assistant",
+        mapping: {
+          user: {
+            parent: null,
+            message: { author: { role: "user" }, content: { parts: ["Create a manual."] } },
+          },
+          assistant: {
+            parent: "user",
+            message: { author: { role: "assistant" }, content: { parts: [artifact] } },
+          },
+        },
+      },
+    };
+    const rendered = [
+      { id: "user:user", role: "user", text: "Create a manual." },
+      {
+        id: "assistant:assistant",
+        role: "assistant",
+        text: `Writing\nEdit\nOperations Manual\n1. Scope\n\nThe same rendered content.\n\nRecord the incident.\nPreserve evidence.\n\nRestore safely.\nVerify completion.`,
+      },
+    ];
+    assert.isTrue(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, rendered),
+    );
+    assert.isFalse(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation([query], conversationId, [
+        rendered[0]!,
+        { ...rendered[1]!, text: `${rendered[1]!.text}\nUnexpected mutation.` },
+      ]),
+    );
+    assert.isFalse(
+      ChatGPTDesktopBridgeTest.verifyOpenedConversation(
+        [
+          {
+            ...query,
+            data: {
+              ...query.data,
+              mapping: {
+                ...query.data.mapping,
+                assistant: {
+                  parent: "user",
+                  message: {
+                    author: { role: "assistant" },
+                    content: { parts: ["Operations Manual"] },
+                  },
+                },
+              },
+            },
+          },
+        ],
+        conversationId,
+        rendered,
+      ),
+    );
+  });
+
   it("finds a saved conversation in every infinite-history page", () => {
     assert.deepEqual(
       ChatGPTDesktopBridgeTest.findConversationHistoryEntry(
