@@ -1,4 +1,4 @@
-// -diagnostics globalTimers:off globalFetch:off globalDate:off
+// @effect-diagnostics globalTimers:off globalFetch:off globalDate:off
 /**
  * The only module that knows ChatGPT Desktop's CDP/renderer details. Nothing
  * outside this adapter may depend on DOM selectors, renderer state, or CDP.

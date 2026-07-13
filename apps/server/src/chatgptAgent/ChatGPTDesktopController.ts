@@ -1,4 +1,4 @@
-// -diagnostics nodeBuiltinImport:off globalTimers:off
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 /**
  * Owns the narrowly scoped local ChatGPT Desktop restart needed to expose CDP.
  * It deliberately never searches process names: only the launcher's own PID
