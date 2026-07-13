@@ -43,6 +43,7 @@ jobs:
           vp test run \
             apps/server/src/chatgptAgent/ChatGPTDesktopBridge.test.ts \
             apps/server/src/chatgptAgent/ChatGPTDesktopController.test.ts \
+            apps/server/src/chatgptAgent/ChatGPTAgentReactor.test.ts \
             apps/server/src/chatgptAgent/ChatGPTAgentRouter.test.ts \
             apps/server/src/chatgptAgent/ChatGPTAgentTurnCoordinator.test.ts \
             apps/server/src/chatgptAgent/ThreadBinding.test.ts

@@ -68,6 +68,16 @@ const toBridgeError = (cause: unknown) =>
         detail: "Could not communicate with ChatGPT Desktop.",
       });
 
+type ChatGPTAgentStreamOutcome = "succeeded" | "interrupted" | "failed";
+
+/** A projected partial response must never remain permanently streaming. */
+export function shouldFinalizeChatGPTAssistantMessage(input: {
+  readonly assistantMessageStarted: boolean;
+  readonly outcome: ChatGPTAgentStreamOutcome;
+}): boolean {
+  return input.outcome === "succeeded" || input.assistantMessageStarted;
+}
+
 export const ChatGPTAgentReactorLive = Layer.effect(
   ChatGPTAgentReactor,
   Effect.gen(function* () {
@@ -347,6 +357,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       let conversationId = existing?.conversationId;
       let latestReasoning = "";
       let reasoningActivityStarted = false;
+      let assistantMessageStarted = false;
       const streamed: true | ChatGPTDesktopBridgeError = yield* Stream.fromAsyncIterable(
         bridge.send({
           endpoint: config.chatgptAgent.cdpEndpoint,
@@ -382,13 +393,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
               if (chunk.text === latestReasoning) return;
               latestReasoning = chunk.text;
               reasoningActivityStarted = true;
-              yield* reasoningActivity(
-                thread.id,
-                turnId,
-                "updated",
-                latestReasoning,
-                "inProgress",
-              );
+              yield* reasoningActivity(thread.id, turnId, "updated", latestReasoning, "inProgress");
               return;
             }
             yield* engine.dispatch({
@@ -400,6 +405,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
               delta: chunk.text,
               createdAt: yield* now,
             });
+            assistantMessageStarted = true;
           }),
         ),
         Effect.as(true as const),
@@ -412,8 +418,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
           turnId,
           "completed",
           latestReasoning,
-          task.controller.signal.aborted ||
-          (streamed !== true && streamed.kind === "interrupted")
+          task.controller.signal.aborted || (streamed !== true && streamed.kind === "interrupted")
             ? "stopped"
             : streamed === true
               ? "completed"
@@ -421,26 +426,36 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         );
       }
 
+      const streamOutcome: ChatGPTAgentStreamOutcome =
+        task.controller.signal.aborted || (streamed !== true && streamed.kind === "interrupted")
+          ? "interrupted"
+          : streamed === true
+            ? "succeeded"
+            : "failed";
       if (
-        task.controller.signal.aborted ||
-        (streamed !== true && streamed.kind === "interrupted")
+        shouldFinalizeChatGPTAssistantMessage({
+          assistantMessageStarted,
+          outcome: streamOutcome,
+        })
       ) {
+        yield* engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: yield* commandId("complete"),
+          threadId: thread.id,
+          messageId: assistantMessageId,
+          turnId,
+          createdAt: yield* now,
+        });
+      }
+      if (streamOutcome === "interrupted") {
         return yield* terminalState(thread, turnId, task.terminalState);
       }
-      if (streamed !== true) {
+      if (streamOutcome === "failed" && streamed !== true) {
         return yield* terminalState(thread, turnId, "error", streamed.detail);
       }
       if (initialSend && conversationId) {
         yield* bindings.markWorkspaceEnvelopeSent(thread.id, yield* now);
       }
-      yield* engine.dispatch({
-        type: "thread.message.assistant.complete",
-        commandId: yield* commandId("complete"),
-        threadId: thread.id,
-        messageId: assistantMessageId,
-        turnId,
-        createdAt: yield* now,
-      });
       yield* terminalState(thread, turnId, "ready");
     });
 
