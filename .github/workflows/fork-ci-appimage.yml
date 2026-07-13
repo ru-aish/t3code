@@ -26,7 +26,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Vite+
+      - id: setup_vp
+        name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
@@ -37,6 +38,7 @@ jobs:
         run: vp run --filter t3 typecheck
 
       - name: Test ChatGPT Agent server integration
+        if: "${{ always() && steps.setup_vp.outcome == 'success' }}"
         run: |
           vp test run \
             apps/server/src/chatgptAgent/ChatGPTDesktopBridge.test.ts \
@@ -54,7 +56,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Vite+
+      - id: setup_vp
+        name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
@@ -65,6 +68,7 @@ jobs:
         run: vp run --filter @t3tools/web typecheck
 
       - name: Test ChatGPT Agent web integration
+        if: "${{ always() && steps.setup_vp.outcome == 'success' }}"
         run: |
           vp test run \
             apps/web/src/chatgptAgent.test.ts \
