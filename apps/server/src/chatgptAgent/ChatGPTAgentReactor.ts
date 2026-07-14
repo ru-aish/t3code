@@ -440,7 +440,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         ),
       );
 
-    const process = Effect.fn("ChatGPTAgentReactor.process")(function* (
+    const processTurn = Effect.fn("ChatGPTAgentReactor.process")(function* (
       event: TurnStartEvent,
       task: ChatGPTAgentActiveTurn,
     ) {
@@ -729,7 +729,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       yield* coordinator
         .withThreadLock(
           event.payload.threadId,
-          process(event, task).pipe(
+          processTurn(event, task).pipe(
             Effect.catchCause((cause) => {
               if (Cause.hasInterruptsOnly(cause) || task.controller.signal.aborted)
                 return Effect.void;
