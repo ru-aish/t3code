@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 const RENDERER_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 10_000;
 const CLIENT_PROBE_TIMEOUT_MS = 4_000;
+const SAVED_CONVERSATION_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 const THOUGHT_STREAM_INTERVAL_MS = 2_000;
@@ -114,6 +115,14 @@ type ClientConversationSnapshot = {
   readonly complete: boolean;
 };
 type ClientConversationLookup = ClientConversationSnapshot | { readonly deleted: true };
+type SavedConversationResolution =
+  | { readonly kind: "current" }
+  | { readonly kind: "deleted" }
+  | {
+      readonly kind: "history";
+      readonly title: string;
+      readonly expected: ReadonlyArray<{ readonly role: string; readonly text: string }>;
+    };
 
 const unavailable = (detail: string) =>
   new ChatGPTDesktopBridgeError({ kind: "unavailable", detail });
@@ -1027,6 +1036,67 @@ async function waitForConversation(
   });
 }
 
+async function resolveSavedConversation(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  id: string,
+  signal?: AbortSignal,
+): Promise<SavedConversationResolution> {
+  const deadline = Date.now() + SAVED_CONVERSATION_TIMEOUT_MS;
+  while (true) {
+    const lookup = (await evaluateWithRetry(
+      evaluate,
+      conversationSnapshotFromClient(id),
+      signal,
+    )) as ClientConversationLookup | null;
+    if (lookup && "deleted" in lookup) return { kind: "deleted" };
+
+    // `client.get()` can temporarily exceed its bounded probe on very large
+    // conversations. The lighter history-list lookup still identifies the
+    // exact conversation currently mounted in quick chat, so do not turn a
+    // transient metadata miss into a false "missing history" failure.
+    const currentId = await evaluateClientBestEffort(
+      evaluate,
+      discoverConversationIdFromClient(),
+      signal,
+    );
+    if (currentId === id) return { kind: "current" };
+
+    if (
+      lookup?.id === id &&
+      isBackendConversationId(lookup.id) &&
+      lookup.title &&
+      lookup.messages.length > 0
+    )
+      return {
+        kind: "history",
+        title: lookup.title,
+        expected: lookup.messages,
+      };
+
+    const queries = (await evaluateWithRetry(evaluate, queryCache, signal)) as QueryRecord[];
+    const history = findConversationHistoryEntry(queries, id);
+    const query = queries.find(
+      (candidate) => candidate.key[0] === "chatgpt-conversation" && candidate.key[1] === id,
+    );
+    if (history && query) {
+      const expected = conversationMessages(query.data);
+      if (expected.length > 0)
+        return {
+          kind: "history",
+          title: history.title,
+          expected,
+        };
+    }
+
+    if (Date.now() >= deadline)
+      throw new ChatGPTDesktopBridgeError({
+        kind: "timeout",
+        detail: "Timed out resolving the requested ChatGPT conversation.",
+      });
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
+}
+
 async function configureModel(
   cdp: Awaited<ReturnType<typeof openCdp>>,
   input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0],
@@ -1116,59 +1186,30 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
     let conversationReplaced = false;
     let sentText = input.text;
     if (input.conversationId) {
-      let title = "";
-      let expected: ReadonlyArray<{ readonly role: string; readonly text: string }> = [];
-      const lookup = (await evaluateWithRetry(
+      const resolution = await resolveSavedConversation(
         evaluate,
-        conversationSnapshotFromClient(input.conversationId),
+        input.conversationId,
         input.signal,
-      )) as ClientConversationLookup | null;
-      if (lookup && "deleted" in lookup) {
+      );
+      if (resolution.kind === "deleted") {
         conversationReplaced = true;
         sentText = input.replacementText ?? input.text;
         await prepareNewConversation(cdp, input.signal);
-      } else {
-        const snapshot = lookup;
-        if (
-          snapshot?.id === input.conversationId &&
-          isBackendConversationId(snapshot.id) &&
-          snapshot.title &&
-          snapshot.messages.length > 0
-        ) {
-          title = snapshot.title;
-          expected = snapshot.messages;
-        } else {
-          const queries = (await evaluateWithRetry(
-            evaluate,
-            queryCache,
-            input.signal,
-          )) as QueryRecord[];
-          const history = findConversationHistoryEntry(queries, input.conversationId);
-          const query = queries.find(
-            (candidate) =>
-              candidate.key[0] === "chatgpt-conversation" &&
-              candidate.key[1] === input.conversationId,
-          );
-          if (history && query) {
-            title = history.title;
-            expected = conversationMessages(query.data);
-          }
-        }
-        if (!title || expected.length === 0)
-          throw new ChatGPTDesktopBridgeError({
-            kind: "incompatible",
-            detail: "The requested ChatGPT conversation was not present in quick-chat history.",
-          });
+      } else if (resolution.kind === "history") {
         const currentTurns = (await evaluateWithRetry(
           evaluate,
           readTurns,
           input.signal,
         )) as RendererTurn[];
-        if (!verifyOpenedMessages(expected, currentTurns)) {
+        if (!verifyOpenedMessages(resolution.expected, currentTurns)) {
           if (await evaluateWithRetry(evaluate, historyTriggerVisible, input.signal))
             await clickRendererControlWhenReady(evaluate, historyTrigger, input.signal);
-          await clickRendererControlWhenReady(evaluate, historyEntry(title), input.signal);
-          await waitForConversation(evaluate, expected, input.signal);
+          await clickRendererControlWhenReady(
+            evaluate,
+            historyEntry(resolution.title),
+            input.signal,
+          );
+          await waitForConversation(evaluate, resolution.expected, input.signal);
         }
       }
     } else {
@@ -1427,6 +1468,7 @@ export const ChatGPTDesktopBridgeTest = {
   configureModel,
   ensureQuickChat,
   prepareNewConversation,
+  resolveSavedConversation,
   selectDesktopTarget,
   validateEndpoint,
   validateWebSocketEndpoint,
