@@ -413,26 +413,32 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       },
     );
 
-    const watchDesktopActivity = Effect.forever(
-      Effect.gen(function* () {
-        const config = yield* settings.getSettings;
-        if (!config.chatgptAgent.enabled) {
-          yield* Effect.sleep("1 second");
-          return;
-        }
-        yield* Stream.fromAsyncIterable(
-          bridge.watchCurrent({ endpoint: config.chatgptAgent.cdpEndpoint }),
-          toBridgeError,
-        ).pipe(Stream.runForEach(applyLateDesktopActivity));
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("chatgpt agent desktop activity watcher restarting", {
-            cause: Cause.pretty(cause),
-          }),
+    const watchDesktopActivity = (signal: AbortSignal) =>
+      Effect.forever(
+        Effect.gen(function* () {
+          const config = yield* settings.getSettings;
+          if (!config.chatgptAgent.enabled) {
+            yield* Effect.sleep("1 second");
+            return;
+          }
+          yield* Stream.fromAsyncIterable(
+            bridge.watchCurrent({
+              endpoint: config.chatgptAgent.cdpEndpoint,
+              signal,
+            }),
+            toBridgeError,
+          ).pipe(Stream.runForEach(applyLateDesktopActivity));
+        }).pipe(
+          Effect.catchCause((cause) =>
+            signal.aborted
+              ? Effect.void
+              : Effect.logWarning("chatgpt agent desktop activity watcher restarting", {
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+          Effect.delay("1 second"),
         ),
-        Effect.delay("1 second"),
-      ),
-    );
+      );
 
     const process = Effect.fn("ChatGPTAgentReactor.process")(function* (
       event: TurnStartEvent,
@@ -750,7 +756,9 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       });
 
     const start = Effect.fn("ChatGPTAgentReactor.start")(function* () {
-      yield* watchDesktopActivity.pipe(Effect.forkScoped);
+      const watcherController = new AbortController();
+      yield* Effect.addFinalizer(() => Effect.sync(() => watcherController.abort()));
+      yield* watchDesktopActivity(watcherController.signal).pipe(Effect.forkScoped);
       yield* Stream.runForEach(engine.streamDomainEvents, (event) => {
         switch (event.type) {
           case "thread.turn-start-requested":
