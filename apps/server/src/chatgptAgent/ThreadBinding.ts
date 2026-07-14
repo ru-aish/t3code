@@ -27,6 +27,9 @@ export class ChatGPTAgentThreadBindings extends Context.Service<
     readonly get: (
       threadId: ThreadId,
     ) => Effect.Effect<Option.Option<ChatGPTAgentThreadBinding>, ChatGPTAgentThreadBindingError>;
+    readonly findByConversationId: (
+      conversationId: string,
+    ) => Effect.Effect<Option.Option<ChatGPTAgentThreadBinding>, ChatGPTAgentThreadBindingError>;
     readonly upsert: (
       binding: ChatGPTAgentThreadBinding,
     ) => Effect.Effect<void, ChatGPTAgentThreadBindingError>;
@@ -49,6 +52,7 @@ export class ChatGPTAgentThreadBindings extends Context.Service<
 
 const Row = ChatGPTAgentThreadBinding;
 const Get = Schema.Struct({ threadId: ThreadId });
+const FindByConversationId = Schema.Struct({ conversationId: TrimmedNonEmptyString });
 const Mark = Schema.Struct({ threadId: ThreadId, sentAt: IsoDateTime });
 const ReserveInitialSend = Schema.Struct({
   threadId: ThreadId,
@@ -80,6 +84,17 @@ export const layer = Layer.effect(
         SELECT thread_id AS "threadId", conversation_id AS "conversationId",
           workspace_envelope_sent_at AS "workspaceEnvelopeSentAt", created_at AS "createdAt", updated_at AS "updatedAt"
         FROM chatgpt_agent_thread_bindings WHERE thread_id = ${threadId}`,
+    });
+    const findByConversationId = SqlSchema.findOneOption({
+      Request: FindByConversationId,
+      Result: Row,
+      execute: ({ conversationId }) => sql`
+        SELECT thread_id AS "threadId", conversation_id AS "conversationId",
+          workspace_envelope_sent_at AS "workspaceEnvelopeSentAt", created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM chatgpt_agent_thread_bindings
+        WHERE conversation_id = ${conversationId}
+        ORDER BY updated_at DESC
+        LIMIT 1`,
     });
     const putRow = SqlSchema.void({
       Request: Row,
@@ -131,6 +146,18 @@ export const layer = Layer.effect(
             }),
           ),
           Effect.mapError((cause) => error("ChatGPTAgentThreadBindings.get", cause, threadId)),
+        ),
+      findByConversationId: (conversationId) =>
+        findByConversationId({ conversationId }).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed(Option.none()),
+              onSome: (row) => decode(row).pipe(Effect.map(Option.some)),
+            }),
+          ),
+          Effect.mapError((cause) =>
+            error("ChatGPTAgentThreadBindings.findByConversationId", cause),
+          ),
         ),
       upsert: (binding) =>
         putRow(binding).pipe(

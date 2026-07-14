@@ -500,8 +500,57 @@ describe("ChatGPTDesktopBridge", () => {
     );
     assert.match(trustedClicks[0]!, /Keep chatting here/u);
     assert.match(trustedClicks[0]!, /Continue with a task/u);
+    assert.match(trustedClicks[0]!, /aria-hidden=\"true\"/u);
+    assert.match(trustedClicks[0]!, /hidden\.remove\(\)/u);
+    assert.match(trustedClicks[0]!, /visibleText\(button\)/u);
     assert.match(trustedClicks[0]!, /return continueWithTask \? keep : null/u);
     assert.equal(probes.length, 2);
+  });
+
+  it("pairs only the assistant response after the latest visible user message", () => {
+    assert.deepEqual(
+      ChatGPTDesktopBridgeTest.latestConversationTexts([
+        { id: "1:user", role: "user", text: "first" },
+        { id: "1:assistant", role: "assistant", text: "first answer" },
+        { id: "2:user", role: "user", text: "continue" },
+        { id: "2:assistant", role: "assistant", text: "resumed answer" },
+      ]),
+      { userText: "continue", assistantText: "resumed answer" },
+    );
+  });
+
+  it("keeps a persistent current-conversation watcher for late Desktop resumes", () => {
+    const source = ChatGPTDesktopBridgeTest.streamCurrentActivity.toString();
+    assert.match(source, /keepChattingHereIfPrompted/u);
+    assert.match(source, /nextHeartbeatAt/u);
+    assert.match(source, /active: false/u);
+    assert.match(source, /discoverConversationIdFromClient/u);
+  });
+
+  it("replaces a provisional assistant preamble when Desktop rewrites the turn", () => {
+    assert.deepEqual(ChatGPTDesktopBridgeTest.reconcileAssistantText("", "I’ll inspect it."), {
+      kind: "append",
+      text: "I’ll inspect it.",
+    });
+    assert.deepEqual(
+      ChatGPTDesktopBridgeTest.reconcileAssistantText("I’ll inspect it.", "I’ll inspect it. Done."),
+      { kind: "append", text: " Done." },
+    );
+    assert.deepEqual(
+      ChatGPTDesktopBridgeTest.reconcileAssistantText(
+        "I’ll inspect the repository layout.",
+        "The repository is a TypeScript monorepo.",
+      ),
+      { kind: "replace", text: "The repository is a TypeScript monorepo." },
+    );
+  });
+
+  it("keeps completion provisional long enough for a handoff or resumed generation to appear", () => {
+    const source = ChatGPTDesktopBridgeTest.streamSend.toString();
+    assert.match(source, /completionCandidateSince/u);
+    assert.match(source, /completionCandidateSignature/u);
+    assert.match(source, /nowMs - completionCandidateSince >= RESPONSE_SETTLE_MS/u);
+    assert.ok(source.indexOf("keepChattingHereIfPrompted") < source.indexOf("completionEligible"));
   });
 
   it("leaves ordinary quick-chat responses untouched when no task handoff is visible", async () => {

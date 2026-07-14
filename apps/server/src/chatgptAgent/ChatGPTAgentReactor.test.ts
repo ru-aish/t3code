@@ -1,12 +1,24 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  chatGPTActivityMatchesUser,
   chatGPTBindingWorkspaceEnvelopeSentAt,
   shouldFinalizeChatGPTAssistantMessage,
   shouldUpdateChatGPTConversationBinding,
 } from "./ChatGPTAgentReactor.ts";
 
 describe("ChatGPTAgentReactor assistant settlement", () => {
+  it("matches resumed Desktop activity to the exact T3 user message or its workspace envelope", () => {
+    expect(chatGPTActivityMatchesUser("inspect the repo", "inspect the repo")).toBe(true);
+    expect(
+      chatGPTActivityMatchesUser(
+        "Workspace: /tmp/repo. This folder is the working space.\n\ninspect the repo",
+        "inspect the repo",
+      ),
+    ).toBe(true);
+    expect(chatGPTActivityMatchesUser("continue", "inspect the repo")).toBe(false);
+  });
+
   it("preserves successful-turn completion even before a visible delta", () => {
     expect(
       shouldFinalizeChatGPTAssistantMessage({

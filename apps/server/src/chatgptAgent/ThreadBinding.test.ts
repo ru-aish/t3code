@@ -27,6 +27,11 @@ layer("ChatGPTAgentThreadBindings", (it) => {
         assert.equal(binding.value.conversationId, "11111111-1111-4111-8111-111111111111");
         assert.equal(binding.value.workspaceEnvelopeSentAt, "2026-07-13T00:01:00.000Z");
       }
+      const byConversation = yield* bindings.findByConversationId(
+        "11111111-1111-4111-8111-111111111111",
+      );
+      assert.equal(byConversation._tag, "Some");
+      if (byConversation._tag === "Some") assert.equal(byConversation.value.threadId, threadId);
     }),
   );
 

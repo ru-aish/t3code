@@ -17,6 +17,28 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Check repository
+        run: vp check
+
+      - name: Typecheck repository
+        run: vp run typecheck
+
   server:
     name: Server checks
     runs-on: ubuntu-latest
@@ -42,6 +64,7 @@ jobs:
         run: |
           vp test run \
             apps/server/src/chatgptAgent/ChatGPTDesktopBridge.test.ts \
+            apps/server/src/orchestration/messageText.test.ts \
             apps/server/src/chatgptAgent/ChatGPTDesktopController.test.ts \
             apps/server/src/chatgptAgent/ChatGPTAgentReactor.test.ts \
             apps/server/src/chatgptAgent/ChatGPTAgentRouter.test.ts \
@@ -79,6 +102,7 @@ jobs:
   appimage:
     name: Build Linux AppImage
     needs:
+      - quality
       - server
       - web
     if: "${{ always() && !cancelled() }}"

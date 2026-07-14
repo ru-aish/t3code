@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
+import { applyMessageTextUpdate } from "./messageText.ts";
 import {
   MessageSentPayloadSchema,
   ProjectCreatedPayload,
@@ -415,11 +416,12 @@ export function projectEvent(
               entry.id === message.id
                 ? {
                     ...entry,
-                    text: message.streaming
-                      ? `${entry.text}${message.text}`
-                      : message.text.length > 0
-                        ? message.text
-                        : entry.text,
+                    text: applyMessageTextUpdate({
+                      previous: entry.text,
+                      text: message.text,
+                      streaming: message.streaming,
+                      ...(payload.replace !== undefined ? { replace: payload.replace } : {}),
+                    }),
                     streaming: message.streaming,
                     updatedAt: message.updatedAt,
                     turnId: message.turnId,

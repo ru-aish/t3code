@@ -31,7 +31,12 @@ import {
   isChatGPTAgentTurnStart,
   normalizeChatGPTAgentModel,
 } from "./ChatGPTAgentRouter.ts";
-import { ChatGPTDesktopBridge, ChatGPTDesktopBridgeError } from "./ChatGPTDesktopBridge.ts";
+import {
+  ChatGPTDesktopBridge,
+  ChatGPTDesktopBridgeError,
+  reconcileAssistantText,
+  type ChatGPTDesktopActivity,
+} from "./ChatGPTDesktopBridge.ts";
 import { ChatGPTDesktopController } from "./ChatGPTDesktopController.ts";
 import {
   makeChatGPTAgentTurnCoordinator,
@@ -69,6 +74,21 @@ const toBridgeError = (cause: unknown) =>
       });
 
 type ChatGPTAgentStreamOutcome = "succeeded" | "interrupted" | "failed";
+
+type ChatGPTLateRecovery = {
+  readonly conversationId: string;
+  readonly turnId: TurnId;
+  readonly assistantMessageId: MessageId;
+  assistantText: string;
+  latestReasoning: string;
+  reasoningActivityStarted: boolean;
+};
+
+export function chatGPTActivityMatchesUser(activityUserText: string, t3UserText: string): boolean {
+  const activity = activityUserText.trim();
+  const user = t3UserText.trim();
+  return activity === user || activity.endsWith(`\n\n${user}`);
+}
 
 /** A projected partial response must never remain permanently streaming. */
 export function shouldFinalizeChatGPTAssistantMessage(input: {
@@ -109,6 +129,8 @@ export const ChatGPTAgentReactorLive = Layer.effect(
     const fs = yield* FileSystem.FileSystem;
     const coordinator = yield* makeChatGPTAgentTurnCoordinator;
     const claimedStartEvents = new Set<string>();
+    const lateRecoveries = new Map<string, ChatGPTLateRecovery>();
+    const ignoredConversationsUntilIdle = new Set<string>();
 
     const commandId = (label: string) =>
       crypto.randomUUIDv4.pipe(Effect.map((id) => CommandId.make(`chatgpt-agent:${label}:${id}`)));
@@ -227,6 +249,189 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         );
         yield* setSession(thread, state, null);
       });
+
+    const finishLateRecoveryLocked = (
+      thread: { readonly id: ThreadId; readonly runtimeMode: OrchestrationSession["runtimeMode"] },
+      recovery: ChatGPTLateRecovery,
+      state: "ready" | ChatGPTAgentTurnTerminalState,
+    ) =>
+      Effect.gen(function* () {
+        if (recovery.reasoningActivityStarted) {
+          yield* reasoningActivity(
+            thread.id,
+            recovery.turnId,
+            "completed",
+            recovery.latestReasoning,
+            state === "ready" ? "completed" : "stopped",
+          );
+        }
+        yield* engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: yield* commandId("late-complete"),
+          threadId: thread.id,
+          messageId: recovery.assistantMessageId,
+          turnId: recovery.turnId,
+          createdAt: yield* now,
+        });
+        lateRecoveries.delete(thread.id);
+        if (state !== "ready") ignoredConversationsUntilIdle.add(recovery.conversationId);
+        yield* terminalState(thread, recovery.turnId, state);
+      });
+
+    const settleLateRecovery = (
+      threadId: ThreadId,
+      state: "ready" | ChatGPTAgentTurnTerminalState,
+    ) =>
+      coordinator.withThreadLock(
+        threadId,
+        Effect.gen(function* () {
+          const recovery = lateRecoveries.get(threadId);
+          if (!recovery) return false;
+          const thread = yield* snapshots.getThreadDetailById(threadId);
+          if (Option.isNone(thread)) {
+            lateRecoveries.delete(threadId);
+            return false;
+          }
+          yield* finishLateRecoveryLocked(thread.value, recovery, state);
+          return true;
+        }),
+      );
+
+    const applyLateDesktopActivity = Effect.fn("ChatGPTAgentReactor.applyLateDesktopActivity")(
+      function* (desktopActivity: ChatGPTDesktopActivity) {
+        if (ignoredConversationsUntilIdle.has(desktopActivity.conversationId)) {
+          if (!desktopActivity.active)
+            ignoredConversationsUntilIdle.delete(desktopActivity.conversationId);
+          return;
+        }
+        const binding = yield* bindings.findByConversationId(desktopActivity.conversationId);
+        if (Option.isNone(binding)) return;
+        const threadId = binding.value.threadId;
+        const initialThread = yield* snapshots.getThreadDetailById(threadId);
+        if (Option.isNone(initialThread) || !isChatGPTAgentThread(initialThread.value)) return;
+        const initialRecovery = lateRecoveries.get(threadId);
+        if (
+          initialThread.value.session?.status === "running" &&
+          (!initialRecovery || initialThread.value.session.activeTurnId !== initialRecovery.turnId)
+        )
+          return;
+
+        yield* coordinator.withThreadLock(
+          threadId,
+          Effect.gen(function* () {
+            const threadOption = yield* snapshots.getThreadDetailById(threadId);
+            if (Option.isNone(threadOption) || !isChatGPTAgentThread(threadOption.value)) return;
+            const thread = threadOption.value;
+            const existingRecovery = lateRecoveries.get(threadId);
+            if (
+              thread.session?.status === "running" &&
+              (!existingRecovery || thread.session.activeTurnId !== existingRecovery.turnId)
+            )
+              return;
+
+            if (!desktopActivity.active) {
+              if (existingRecovery)
+                yield* finishLateRecoveryLocked(thread, existingRecovery, "ready");
+              return;
+            }
+
+            const latestUser = thread.messages.toReversed().find((message) => message.role === "user");
+            if (
+              !existingRecovery &&
+              (!latestUser ||
+                !chatGPTActivityMatchesUser(desktopActivity.userText, latestUser.text))
+            )
+              return;
+
+            let recovery = existingRecovery;
+            let started = false;
+            if (!recovery) {
+              const latestTurn = thread.latestTurn;
+              if (!latestTurn) return;
+              const existingAssistant = thread.messages
+                .toReversed()
+                .find(
+                  (message) =>
+                    message.role === "assistant" && message.turnId === latestTurn.turnId,
+                );
+              recovery = {
+                conversationId: desktopActivity.conversationId,
+                turnId: latestTurn.turnId,
+                assistantMessageId:
+                  existingAssistant?.id ?? MessageId.make(yield* crypto.randomUUIDv4),
+                assistantText: existingAssistant?.text ?? "",
+                latestReasoning: "",
+                reasoningActivityStarted: false,
+              };
+              lateRecoveries.set(threadId, recovery);
+              started = true;
+              yield* setSession(thread, "running", recovery.turnId);
+              yield* activity(
+                thread.id,
+                recovery.turnId,
+                "info",
+                "ChatGPT Agent resumed",
+                "ChatGPT Desktop resumed producing output for the previously completed turn.",
+              );
+            }
+
+            const update = reconcileAssistantText(
+              recovery.assistantText,
+              desktopActivity.assistantText,
+            );
+            if (started || update.kind !== "none") {
+              yield* engine.dispatch({
+                type: "thread.message.assistant.delta",
+                commandId: yield* commandId("late-delta"),
+                threadId: thread.id,
+                messageId: recovery.assistantMessageId,
+                turnId: recovery.turnId,
+                delta: update.kind === "none" ? "" : update.text,
+                ...(update.kind === "replace" ? { replace: true } : {}),
+                createdAt: yield* now,
+              });
+              recovery.assistantText = desktopActivity.assistantText;
+            }
+
+            if (
+              desktopActivity.reasoningText &&
+              desktopActivity.reasoningText !== recovery.latestReasoning
+            ) {
+              recovery.latestReasoning = desktopActivity.reasoningText;
+              recovery.reasoningActivityStarted = true;
+              yield* reasoningActivity(
+                thread.id,
+                recovery.turnId,
+                "updated",
+                recovery.latestReasoning,
+                "inProgress",
+              );
+            }
+          }),
+        );
+      },
+    );
+
+    const watchDesktopActivity = Effect.forever(
+      Effect.gen(function* () {
+        const config = yield* settings.getSettings;
+        if (!config.chatgptAgent.enabled) {
+          yield* Effect.sleep("1 second");
+          return;
+        }
+        yield* Stream.fromAsyncIterable(
+          bridge.watchCurrent({ endpoint: config.chatgptAgent.cdpEndpoint }),
+          toBridgeError,
+        ).pipe(Stream.runForEach(applyLateDesktopActivity));
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("chatgpt agent desktop activity watcher restarting", {
+            cause: Cause.pretty(cause),
+          }),
+        ),
+        Effect.delay("1 second"),
+      ),
+    );
 
     const process = Effect.fn("ChatGPTAgentReactor.process")(function* (
       event: TurnStartEvent,
@@ -442,6 +647,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
               messageId: assistantMessageId,
               turnId,
               delta: chunk.text,
+              ...(chunk.replace ? { replace: true } : {}),
               createdAt: yield* now,
             });
             assistantMessageStarted = true;
@@ -511,6 +717,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       ) {
         return;
       }
+      yield* settleLateRecovery(event.payload.threadId, "interrupted");
       const task = yield* coordinator.start(event.payload.threadId);
       yield* coordinator
         .withThreadLock(
@@ -537,10 +744,13 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       Effect.gen(function* () {
         const thread = yield* snapshots.getThreadDetailById(event.payload.threadId);
         if (Option.isNone(thread) || !isChatGPTAgentThread(thread.value)) return;
-        yield* coordinator.interrupt(event.payload.threadId, state);
+        const interruptedTurn = yield* coordinator.interrupt(event.payload.threadId, state);
+        if (interruptedTurn === undefined)
+          yield* settleLateRecovery(event.payload.threadId, state);
       });
 
     const start = Effect.fn("ChatGPTAgentReactor.start")(function* () {
+      yield* watchDesktopActivity.pipe(Effect.forkScoped);
       yield* Stream.runForEach(engine.streamDomainEvents, (event) => {
         switch (event.type) {
           case "thread.turn-start-requested":

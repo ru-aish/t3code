@@ -743,6 +743,7 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   delta: Schema.String,
+  replace: Schema.optional(Schema.Boolean),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
@@ -927,6 +928,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   messageId: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
+  replace: Schema.optional(Schema.Boolean),
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,

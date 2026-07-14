@@ -48,6 +48,7 @@ import {
   OrchestrationProjectionPipeline,
   type OrchestrationProjectionPipelineShape,
 } from "../Services/ProjectionPipeline.ts";
+import { applyMessageTextUpdate } from "../messageText.ts";
 import {
   attachmentRelativePath,
   parseAttachmentIdFromRelativePath,
@@ -816,17 +817,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             messageId: event.payload.messageId,
           });
           const previousMessage = Option.getOrUndefined(existingMessage);
-          const nextText = Option.match(existingMessage, {
-            onNone: () => event.payload.text,
-            onSome: (message) => {
-              if (event.payload.streaming) {
-                return `${message.text}${event.payload.text}`;
-              }
-              if (event.payload.text.length === 0) {
-                return message.text;
-              }
-              return event.payload.text;
-            },
+          const nextText = applyMessageTextUpdate({
+            previous: Option.getOrUndefined(existingMessage)?.text,
+            text: event.payload.text,
+            streaming: event.payload.streaming,
+            ...(event.payload.replace !== undefined ? { replace: event.payload.replace } : {}),
           });
           const nextAttachments =
             event.payload.attachments !== undefined
@@ -1084,13 +1079,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
           });
           if (Option.isSome(existingTurn)) {
-            const nextState =
-              existingTurn.value.state === "completed" || existingTurn.value.state === "error"
-                ? existingTurn.value.state
-                : "running";
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
-              state: nextState,
+              state: existingTurn.value.state === "error" ? "error" : "running",
+              completedAt:
+                existingTurn.value.state === "error" ? existingTurn.value.completedAt : null,
               pendingMessageId:
                 existingTurn.value.pendingMessageId ??
                 (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),

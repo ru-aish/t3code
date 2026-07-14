@@ -14,12 +14,25 @@ const CLIENT_PROBE_TIMEOUT_MS = 4_000;
 const SAVED_CONVERSATION_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
+const RESPONSE_SETTLE_MS = 1_500;
 const THOUGHT_STREAM_INTERVAL_MS = 2_000;
 const BACKEND_CONVERSATION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function isBackendConversationId(value: string): boolean {
   return BACKEND_CONVERSATION_ID.test(value);
+}
+
+type AssistantTextUpdate =
+  | { readonly kind: "none" }
+  | { readonly kind: "append"; readonly text: string }
+  | { readonly kind: "replace"; readonly text: string };
+
+export function reconcileAssistantText(previous: string, next: string): AssistantTextUpdate {
+  if (!next || next === previous) return { kind: "none" };
+  if (!previous) return { kind: "append", text: next };
+  if (next.startsWith(previous)) return { kind: "append", text: next.slice(previous.length) };
+  return { kind: "replace", text: next };
 }
 
 export class ChatGPTDesktopBridgeError extends Schema.TaggedErrorClass<ChatGPTDesktopBridgeError>()(
@@ -44,6 +57,11 @@ export interface ChatGPTDesktopBridgeShape {
     ChatGPTDesktopBridgeError
   >;
   /** Opens an existing stable conversation, sends text, and yields only new assistant text. */
+  /** Watches the current quick-chat conversation for externally resumed work. */
+  readonly watchCurrent: (input: {
+    readonly endpoint: string;
+    readonly signal?: AbortSignal;
+  }) => AsyncIterable<ChatGPTDesktopActivity>;
   readonly send: (input: {
     readonly endpoint: string;
     readonly conversationId?: string;
@@ -64,6 +82,7 @@ export interface ChatGPTDesktopBridgeShape {
     readonly conversationId: string;
     readonly kind: "assistant" | "thinking";
     readonly text: string;
+    readonly replace?: boolean;
     readonly conversationReplaced?: boolean;
   }>;
 }
@@ -115,6 +134,13 @@ type ClientConversationSnapshot = {
   readonly complete: boolean;
 };
 type ClientConversationLookup = ClientConversationSnapshot | { readonly deleted: true };
+export type ChatGPTDesktopActivity = {
+  readonly conversationId: string;
+  readonly active: boolean;
+  readonly userText: string;
+  readonly assistantText: string;
+  readonly reasoningText: string;
+};
 type SavedConversationResolution =
   | { readonly kind: "current" }
   | { readonly kind: "deleted" }
@@ -495,7 +521,7 @@ const NEW_CHAT = `${QUICK_CHAT} button[aria-label="New chat"]`;
 const ADD_FILES = `${QUICK_CHAT} button[aria-label="Add files and more"]`;
 const rendererProbe = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); const editor = document.querySelector(${JSON.stringify(EDITOR)}); const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const turnCount = surface ? [...surface.querySelectorAll('[data-content-search-unit-key], [data-message-author-role]')].filter(visible).length : 0; return { composer: Boolean(surface && editor && visible(editor)), empty: Boolean(editor && !(editor.textContent || '').trim()), turnCount }; })()`;
 const quickChatButton = `[...document.querySelectorAll('button')].find((candidate) => { const text = (candidate.textContent || '').trim().replace(/\\s+/g, ' '); const rect = candidate.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 && (text === 'Chat' || text.startsWith('ChatCtrl+') || text.startsWith('Chat Ctrl+')); })`;
-const keepChattingHereControl = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return null; const visible = (element) => { if (!(element instanceof HTMLElement)) return false; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' '); const buttons = [...surface.querySelectorAll('button')].filter(visible); const keep = buttons.find((button) => normalize(button.textContent) === 'Keep chatting here'); if (!keep) return null; const actions = keep.closest('form') || keep.parentElement; const continueWithTask = actions ? [...actions.querySelectorAll('button')].find((button) => visible(button) && normalize(button.textContent) === 'Continue with a task') : null; return continueWithTask ? keep : null; })()`;
+const keepChattingHereControl = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return null; const visible = (element) => { if (!(element instanceof HTMLElement)) return false; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' '); const visibleText = (element) => { const clone = element.cloneNode(true); for (const hidden of clone.querySelectorAll('[aria-hidden="true"]')) hidden.remove(); return normalize(clone.textContent); }; const buttons = [...surface.querySelectorAll('button')].filter(visible); const keep = buttons.find((button) => visibleText(button) === 'Keep chatting here'); if (!keep) return null; const actions = keep.closest('form') || keep.parentElement; const continueWithTask = actions ? [...actions.querySelectorAll('button')].find((button) => visible(button) && visibleText(button) === 'Continue with a task') : null; return continueWithTask ? keep : null; })()`;
 const taskHandoffPresent = `Boolean(${keepChattingHereControl})`;
 const mutateEditor = (text: string) =>
   `(() => { const editor = document.querySelector(${JSON.stringify(EDITOR)}); if (!(editor instanceof HTMLElement)) return { ok: false, reason: 'editor' }; editor.focus(); const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(true); selection?.removeAllRanges(); selection?.addRange(range); const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)}); if (!inserted) editor.textContent = ${JSON.stringify(text)}; editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(text)} })); return { ok: true }; })()`;
@@ -652,6 +678,22 @@ function discoverConversationIdFromClient(): string {
 
 function assistantTurns(turns: ReadonlyArray<RendererTurn>): ReadonlyArray<RendererTurn> {
   return turns.filter((turn) => turn.role === "assistant" && turn.text.trim().length > 0);
+}
+
+export function latestConversationTexts(turns: ReadonlyArray<RendererTurn>): {
+  readonly userText: string;
+  readonly assistantText: string;
+} {
+  const userIndex = turns.findLastIndex((turn) => turn.role === "user" && turn.text.trim().length > 0);
+  if (userIndex < 0) return { userText: "", assistantText: "" };
+  const userText = turns[userIndex]?.text.trim() ?? "";
+  const assistantText =
+    turns
+      .slice(userIndex + 1)
+      .toReversed()
+      .find((turn) => turn.role === "assistant" && turn.text.trim().length > 0)
+      ?.text.trim() ?? "";
+  return { userText, assistantText };
 }
 
 /** Converts desktop quick-chat units to stable message ids without using turn wrappers. */
@@ -1212,11 +1254,101 @@ async function submitMessage(
   }
 }
 
+async function* streamCurrentActivity(input: {
+  readonly endpoint: string;
+  readonly signal?: AbortSignal;
+}): AsyncIterable<ChatGPTDesktopActivity> {
+  const cdp = await openCdp(input.endpoint, input.signal);
+  try {
+    const { evaluate } = cdp;
+    let clientWarmed = false;
+    let conversationId = "";
+    let nextClientProbeAt = 0;
+    let previousSignature = "";
+    let previousActive = false;
+    let nextHeartbeatAt = 0;
+    let previousActivity: ChatGPTDesktopActivity | null = null;
+
+    while (!input.signal?.aborted) {
+      const probe = (await evaluateWithRetry(evaluate, rendererProbe, input.signal)) as RendererProbe;
+      if (!probe?.composer) {
+        if (previousActivity?.active) yield { ...previousActivity, active: false };
+        conversationId = "";
+        previousSignature = "";
+        previousActive = false;
+        previousActivity = null;
+        clientWarmed = false;
+        await abortableDelay(POLL_INTERVAL_MS, input.signal);
+        continue;
+      }
+      if (!clientWarmed) {
+        await evaluateClientBestEffort(evaluate, warmConversationClient, input.signal);
+        clientWarmed = true;
+      }
+      const handoffHandled = await keepChattingHereIfPrompted(cdp, input.signal);
+      const nowMs = Date.now();
+      if (nowMs >= nextClientProbeAt) {
+        nextClientProbeAt = nowMs + 1_000;
+        const currentId = await evaluateClientBestEffort(
+          evaluate,
+          discoverConversationIdFromClient(),
+          input.signal,
+        );
+        if (typeof currentId === "string" && isBackendConversationId(currentId)) {
+          if (conversationId && currentId !== conversationId && previousActivity?.active) {
+            yield { ...previousActivity, active: false };
+          }
+          if (currentId !== conversationId) {
+            conversationId = currentId;
+            previousSignature = "";
+            previousActive = false;
+            previousActivity = null;
+          }
+        }
+      }
+
+      const turns = (await evaluateWithRetry(evaluate, readTurns, input.signal)) as RendererTurn[];
+      const { userText, assistantText } = latestConversationTexts(turns);
+      const reasoning = (await evaluateWithRetry(
+        evaluate,
+        readLatestReasoning,
+        input.signal,
+      )) as RendererReasoning | null;
+      const generating = Boolean(await evaluateWithRetry(evaluate, isGenerating, input.signal));
+      const active = handoffHandled || generating;
+      if (isBackendConversationId(conversationId) && userText) {
+        const activity: ChatGPTDesktopActivity = {
+          conversationId,
+          active,
+          userText,
+          assistantText,
+          reasoningText: reasoning?.text?.trim() ?? "",
+        };
+        const signature = JSON.stringify(activity);
+        const shouldYield =
+          (active && (signature !== previousSignature || nowMs >= nextHeartbeatAt)) ||
+          (!active && previousActive);
+        if (shouldYield) {
+          yield activity;
+          nextHeartbeatAt = nowMs + 1_000;
+        }
+        previousSignature = signature;
+        previousActive = active;
+        previousActivity = activity;
+      }
+      await abortableDelay(POLL_INTERVAL_MS, input.signal);
+    }
+  } finally {
+    cdp.close();
+  }
+}
+
 /** Kept as an async generator so cancellation only owns the active response, never ChatGPT's tools. */
 async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[0]): AsyncIterable<{
   conversationId: string;
   kind: "assistant" | "thinking";
   text: string;
+  replace?: boolean;
   conversationReplaced?: boolean;
 }> {
   const cdp = await openCdp(input.endpoint, input.signal);
@@ -1319,6 +1451,8 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
     let pendingReasoning: RendererReasoning | null = null;
     let latestDomAssistantText = "";
     let responseStarted = false;
+    let completionCandidateSince: number | null = null;
+    let completionCandidateSignature = "";
 
     // A ChatGPT Agent turn is intentionally unbounded. Long-running tasks may
     // take hours; cancellation, an explicit renderer failure, or a completed
@@ -1424,28 +1558,37 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
           : latestDomAssistantText;
       if (assistantText.length > 0) {
         responseStarted = true;
-        if (
-          assistantText.length > previousAssistantText.length &&
-          isBackendConversationId(conversationId)
-        ) {
+        const update = reconcileAssistantText(previousAssistantText, assistantText);
+        if (update.kind !== "none" && isBackendConversationId(conversationId)) {
           yield {
             conversationId,
             kind: "assistant",
-            text: assistantText.slice(previousAssistantText.length),
+            text: update.text,
+            ...(update.kind === "replace" ? { replace: true } : {}),
             ...(conversationReplaced ? { conversationReplaced: true } : {}),
           };
           previousAssistantText = assistantText;
         }
       }
 
-      if (
+      const completionEligible =
         responseStarted &&
         previousAssistantText.length > 0 &&
         isBackendConversationId(conversationId) &&
         !generating &&
-        (clientSnapshot?.complete === true || completedInDom)
-      )
-        return;
+        (clientSnapshot?.complete === true || completedInDom);
+      if (completionEligible) {
+        const signature = `${previousAssistantText}\u0000${reasoningText}`;
+        if (completionCandidateSince === null || completionCandidateSignature !== signature) {
+          completionCandidateSince = nowMs;
+          completionCandidateSignature = signature;
+        } else if (nowMs - completionCandidateSince >= RESPONSE_SETTLE_MS) {
+          return;
+        }
+      } else {
+        completionCandidateSince = null;
+        completionCandidateSignature = "";
+      }
       await abortableDelay(POLL_INTERVAL_MS, input.signal);
     }
   } finally {
@@ -1470,6 +1613,7 @@ export const ChatGPTDesktopBridgeLive = Layer.succeed(ChatGPTDesktopBridge, {
           ? cause
           : unavailable("Unable to inspect ChatGPT Desktop."),
     }),
+  watchCurrent: streamCurrentActivity,
   send: streamSend,
 });
 
@@ -1485,6 +1629,9 @@ export const ChatGPTDesktopBridgeTest = {
   findConversationHistoryEntry,
   openCdp,
   parseRoleUnits,
+  reconcileAssistantText,
+  latestConversationTexts,
+  streamCurrentActivity,
   streamSend,
   mutateEditor,
   submitMessage,
