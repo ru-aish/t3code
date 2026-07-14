@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 const RENDERER_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 10_000;
 const CLIENT_PROBE_TIMEOUT_MS = 4_000;
+const SAVED_CONVERSATION_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 const THOUGHT_STREAM_INTERVAL_MS = 2_000;
@@ -114,6 +115,14 @@ type ClientConversationSnapshot = {
   readonly complete: boolean;
 };
 type ClientConversationLookup = ClientConversationSnapshot | { readonly deleted: true };
+type SavedConversationResolution =
+  | { readonly kind: "current" }
+  | { readonly kind: "deleted" }
+  | {
+      readonly kind: "history";
+      readonly title: string;
+      readonly expected: ReadonlyArray<{ readonly role: string; readonly text: string }>;
+    };
 
 const unavailable = (detail: string) =>
   new ChatGPTDesktopBridgeError({ kind: "unavailable", detail });
@@ -486,6 +495,8 @@ const NEW_CHAT = `${QUICK_CHAT} button[aria-label="New chat"]`;
 const ADD_FILES = `${QUICK_CHAT} button[aria-label="Add files and more"]`;
 const rendererProbe = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); const editor = document.querySelector(${JSON.stringify(EDITOR)}); const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const turnCount = surface ? [...surface.querySelectorAll('[data-content-search-unit-key], [data-message-author-role]')].filter(visible).length : 0; return { composer: Boolean(surface && editor && visible(editor)), empty: Boolean(editor && !(editor.textContent || '').trim()), turnCount }; })()`;
 const quickChatButton = `[...document.querySelectorAll('button')].find((candidate) => { const text = (candidate.textContent || '').trim().replace(/\\s+/g, ' '); const rect = candidate.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 && (text === 'Chat' || text.startsWith('ChatCtrl+') || text.startsWith('Chat Ctrl+')); })`;
+const keepChattingHereControl = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return null; const visible = (element) => { if (!(element instanceof HTMLElement)) return false; const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' '); const buttons = [...surface.querySelectorAll('button')].filter(visible); const keep = buttons.find((button) => normalize(button.textContent) === 'Keep chatting here'); if (!keep) return null; const actions = keep.closest('form') || keep.parentElement; const continueWithTask = actions ? [...actions.querySelectorAll('button')].find((button) => visible(button) && normalize(button.textContent) === 'Continue with a task') : null; return continueWithTask ? keep : null; })()`;
+const taskHandoffPresent = `Boolean(${keepChattingHereControl})`;
 const mutateEditor = (text: string) =>
   `(() => { const editor = document.querySelector(${JSON.stringify(EDITOR)}); if (!(editor instanceof HTMLElement)) return { ok: false, reason: 'editor' }; editor.focus(); const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents(editor); range.collapse(true); selection?.removeAllRanges(); selection?.addRange(range); const inserted = document.execCommand('insertText', false, ${JSON.stringify(text)}); if (!inserted) editor.textContent = ${JSON.stringify(text)}; editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(text)} })); return { ok: true }; })()`;
 const sendEnabled = `(() => { const send = document.querySelector(${JSON.stringify(SEND)}); return Boolean(send && !send.disabled && send.getAttribute('aria-disabled') !== 'true'); })()`;
@@ -502,8 +513,8 @@ const injectImages = (
 const attachmentReady = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); return Boolean(surface?.querySelector('[data-testid*="attachment" i], [aria-label*="Remove" i]')); })()`;
 const readTurns = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return []; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; const text = (unit) => unit instanceof HTMLElement ? (unit.innerText || unit.textContent || '') : (unit.textContent || ''); const units = [...surface.querySelectorAll('[data-content-search-unit-key]')].filter(visible); const modern = units.map(unit => { const id = unit.getAttribute('data-content-search-unit-key') || ''; const match = id.match(/:(user|assistant)$/); return match ? { id, role: match[1], text: text(unit) } : null; }).filter(Boolean); if (modern.length) return modern; return [...surface.querySelectorAll('[data-message-author-role]')].filter(visible).map((unit, index) => ({ id: unit.getAttribute('data-message-id') || \`legacy:\${index}:\${unit.getAttribute('data-message-author-role') || ''}\`, role: unit.getAttribute('data-message-author-role') || '', text: text(unit) })); })()`;
 const readLatestReasoning = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return null; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1) || surface; const body = turn.querySelector('[data-testid="exploration-accordion-body"]'); if (!(body instanceof HTMLElement)) return null; const text = (body.innerText || body.textContent || '').replace(/\\n{3,}/g, '\\n\\n').trim(); const toggle = body.parentElement?.querySelector('button[aria-expanded]'); const label = (toggle?.textContent || '').trim(); return { id: turn.getAttribute('data-chatgpt-conversation-turn-id') || String(turns.length - 1), text, completed: /^Thought\\b/i.test(label) }; })()`;
-const isGenerating = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...surface.querySelectorAll('button[aria-label], [role="status"][aria-busy="true"]')].some((element) => visible(element) && ((element.getAttribute('aria-label') || '').toLowerCase().startsWith('stop') || element.getAttribute('aria-busy') === 'true')); })()`;
-const responseComplete = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1); if (!turn) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...turn.querySelectorAll('button[aria-label]')].some((button) => visible(button) && /^(Copy|Copy message|Good response|Bad response)$/i.test(button.getAttribute('aria-label') || '')); })()`;
+const isGenerating = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface) return false; if (${taskHandoffPresent}) return true; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...surface.querySelectorAll('button[aria-label], [role="status"][aria-busy="true"]')].some((element) => visible(element) && ((element.getAttribute('aria-label') || '').toLowerCase().startsWith('stop') || element.getAttribute('aria-busy') === 'true')); })()`;
+const responseComplete = `(() => { const surface = document.querySelector(${JSON.stringify(QUICK_CHAT)}); if (!surface || ${taskHandoffPresent}) return false; const turns = [...surface.querySelectorAll('[data-chatgpt-conversation-turn="true"]')]; const turn = turns.at(-1); if (!turn) return false; const visible = (element) => { const rect = element.getBoundingClientRect(); const style = getComputedStyle(element); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && !element.hidden && element.getAttribute('aria-hidden') !== 'true'; }; return [...turn.querySelectorAll('button[aria-label]')].some((button) => visible(button) && /^(Copy|Copy message|Good response|Bad response)$/i.test(button.getAttribute('aria-label') || '')); })()`;
 const queryCache = `(() => { const fibers = []; for (const node of [document.documentElement, ...[...document.querySelectorAll('*')].slice(0, 300)]) { for (const key of Object.keys(node)) if (key.startsWith('__reactFiber$')) fibers.push(node[key]); } const seen = new Set(), queue = fibers; const enqueue = (value) => { if (value && (typeof value === 'object' || typeof value === 'function') && !seen.has(value)) queue.push(value); }; while (queue.length && seen.size < 2_000) { const value = queue.shift(); if (!value || seen.has(value)) continue; seen.add(value); if (typeof value.getQueryCache === 'function') { try { return value.getQueryCache().getAll().map((query) => ({ key: query.queryKey, data: query.state?.data, updatedAt: query.state?.dataUpdatedAt })); } catch {} } for (const key of ['return', 'child', 'sibling', 'stateNode', 'memoizedState', 'memoizedProps', 'dependencies', 'next', 'context', '_currentValue', '_currentValue2']) { try { enqueue(value[key]); } catch {} } } return []; })()`;
 
 const conversationClientPrelude = `
@@ -953,6 +964,40 @@ const hoverRendererControlWhenReady = (
   signal?: AbortSignal,
 ) => interactWithRendererControlWhenReady(evaluate, hoverRendererControl, expression, signal);
 
+async function keepChattingHereIfPrompted(
+  cdp: Pick<
+    Awaited<ReturnType<typeof openCdp>>,
+    "evaluate" | "trustedClickExpression"
+  >,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (!(await evaluateWithRetry(cdp.evaluate, taskHandoffPresent, signal))) return false;
+
+  try {
+    await cdp.trustedClickExpression(keepChattingHereControl, signal);
+  } catch (error) {
+    // A user may click the same control between our presence probe and the
+    // trusted CDP click. Treat that race as handled only when the card is gone.
+    if (
+      !isChatGPTDesktopBridgeError(error) ||
+      error.kind !== "incompatible" ||
+      (await evaluateWithRetry(cdp.evaluate, taskHandoffPresent, signal))
+    )
+      throw error;
+    return true;
+  }
+
+  const deadline = Date.now() + COMMAND_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!(await evaluateWithRetry(cdp.evaluate, taskHandoffPresent, signal))) return true;
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
+  throw new ChatGPTDesktopBridgeError({
+    kind: "timeout",
+    detail: 'Timed out selecting "Keep chatting here" in ChatGPT Desktop.',
+  });
+}
+
 async function waitForModelMenuState(
   evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
   signal?: AbortSignal,
@@ -1025,6 +1070,72 @@ async function waitForConversation(
     kind: "incompatible",
     detail: "ChatGPT Desktop could not verify the requested saved conversation.",
   });
+}
+
+async function resolveSavedConversation(
+  evaluate: (expression: string, signal?: AbortSignal) => Promise<unknown>,
+  id: string,
+  signal?: AbortSignal,
+): Promise<SavedConversationResolution> {
+  const deadline = Date.now() + SAVED_CONVERSATION_TIMEOUT_MS;
+  let nextQueryCacheProbeAt = 0;
+  while (true) {
+    const lookup = (await evaluateWithRetry(
+      evaluate,
+      conversationSnapshotFromClient(id),
+      signal,
+    )) as ClientConversationLookup | null;
+    if (lookup && "deleted" in lookup) return { kind: "deleted" };
+
+    // `client.get()` can temporarily exceed its bounded probe on very large
+    // conversations. The lighter history-list lookup still identifies the
+    // exact conversation currently mounted in quick chat, so do not turn a
+    // transient metadata miss into a false "missing history" failure.
+    const currentId = await evaluateClientBestEffort(
+      evaluate,
+      discoverConversationIdFromClient(),
+      signal,
+    );
+    if (currentId === id) return { kind: "current" };
+
+    if (
+      lookup?.id === id &&
+      isBackendConversationId(lookup.id) &&
+      lookup.title &&
+      lookup.messages.length > 0
+    )
+      return {
+        kind: "history",
+        title: lookup.title,
+        expected: lookup.messages,
+      };
+
+    const nowMs = Date.now();
+    if (nowMs >= nextQueryCacheProbeAt) {
+      nextQueryCacheProbeAt = nowMs + 1_000;
+      const queries = (await evaluateWithRetry(evaluate, queryCache, signal)) as QueryRecord[];
+      const history = findConversationHistoryEntry(queries, id);
+      const query = queries.find(
+        (candidate) => candidate.key[0] === "chatgpt-conversation" && candidate.key[1] === id,
+      );
+      if (history && query) {
+        const expected = conversationMessages(query.data);
+        if (expected.length > 0)
+          return {
+            kind: "history",
+            title: history.title,
+            expected,
+          };
+      }
+    }
+
+    if (nowMs >= deadline)
+      throw new ChatGPTDesktopBridgeError({
+        kind: "timeout",
+        detail: "Timed out resolving the requested ChatGPT conversation.",
+      });
+    await abortableDelay(POLL_INTERVAL_MS, signal);
+  }
 }
 
 async function configureModel(
@@ -1116,59 +1227,30 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
     let conversationReplaced = false;
     let sentText = input.text;
     if (input.conversationId) {
-      let title = "";
-      let expected: ReadonlyArray<{ readonly role: string; readonly text: string }> = [];
-      const lookup = (await evaluateWithRetry(
+      const resolution = await resolveSavedConversation(
         evaluate,
-        conversationSnapshotFromClient(input.conversationId),
+        input.conversationId,
         input.signal,
-      )) as ClientConversationLookup | null;
-      if (lookup && "deleted" in lookup) {
+      );
+      if (resolution.kind === "deleted") {
         conversationReplaced = true;
         sentText = input.replacementText ?? input.text;
         await prepareNewConversation(cdp, input.signal);
-      } else {
-        const snapshot = lookup;
-        if (
-          snapshot?.id === input.conversationId &&
-          isBackendConversationId(snapshot.id) &&
-          snapshot.title &&
-          snapshot.messages.length > 0
-        ) {
-          title = snapshot.title;
-          expected = snapshot.messages;
-        } else {
-          const queries = (await evaluateWithRetry(
-            evaluate,
-            queryCache,
-            input.signal,
-          )) as QueryRecord[];
-          const history = findConversationHistoryEntry(queries, input.conversationId);
-          const query = queries.find(
-            (candidate) =>
-              candidate.key[0] === "chatgpt-conversation" &&
-              candidate.key[1] === input.conversationId,
-          );
-          if (history && query) {
-            title = history.title;
-            expected = conversationMessages(query.data);
-          }
-        }
-        if (!title || expected.length === 0)
-          throw new ChatGPTDesktopBridgeError({
-            kind: "incompatible",
-            detail: "The requested ChatGPT conversation was not present in quick-chat history.",
-          });
+      } else if (resolution.kind === "history") {
         const currentTurns = (await evaluateWithRetry(
           evaluate,
           readTurns,
           input.signal,
         )) as RendererTurn[];
-        if (!verifyOpenedMessages(expected, currentTurns)) {
+        if (!verifyOpenedMessages(resolution.expected, currentTurns)) {
           if (await evaluateWithRetry(evaluate, historyTriggerVisible, input.signal))
             await clickRendererControlWhenReady(evaluate, historyTrigger, input.signal);
-          await clickRendererControlWhenReady(evaluate, historyEntry(title), input.signal);
-          await waitForConversation(evaluate, expected, input.signal);
+          await clickRendererControlWhenReady(
+            evaluate,
+            historyEntry(resolution.title),
+            input.signal,
+          );
+          await waitForConversation(evaluate, resolution.expected, input.signal);
         }
       }
     } else {
@@ -1243,6 +1325,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
     // response ends the stream instead of an arbitrary wall-clock deadline.
     while (true) {
       if (input.signal?.aborted) throw interrupted();
+      await keepChattingHereIfPrompted(cdp, input.signal);
       const nowMs = Date.now();
 
       const currentReasoning = (await evaluateWithRetry(
@@ -1414,6 +1497,7 @@ export const ChatGPTDesktopBridgeTest = {
     hoverRendererControl,
     injectImages,
     isGenerating,
+    keepChattingHereControl,
     modelMenusClosed,
     modelMenuState,
     modelSubmenuTrigger,
@@ -1421,12 +1505,15 @@ export const ChatGPTDesktopBridgeTest = {
     readTurns,
     responseComplete,
     sendAcknowledged,
+    taskHandoffPresent,
     visibleMenuItem,
     warmConversationClient,
   },
   configureModel,
   ensureQuickChat,
+  keepChattingHereIfPrompted,
   prepareNewConversation,
+  resolveSavedConversation,
   selectDesktopTarget,
   validateEndpoint,
   validateWebSocketEndpoint,

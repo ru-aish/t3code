@@ -453,11 +453,13 @@ describe("ChatGPTDesktopBridge", () => {
       ChatGPTDesktopBridgeTest.expressions.historyEntry("Saved chat"),
       ChatGPTDesktopBridgeTest.expressions.hoverRendererControl("document.body"),
       ChatGPTDesktopBridgeTest.expressions.isGenerating,
+      ChatGPTDesktopBridgeTest.expressions.keepChattingHereControl,
       ChatGPTDesktopBridgeTest.expressions.modelMenusClosed,
       ChatGPTDesktopBridgeTest.expressions.modelMenuState,
       ChatGPTDesktopBridgeTest.expressions.modelSubmenuTrigger,
       ChatGPTDesktopBridgeTest.expressions.readLatestReasoning,
       ChatGPTDesktopBridgeTest.expressions.responseComplete,
+      ChatGPTDesktopBridgeTest.expressions.taskHandoffPresent,
       ChatGPTDesktopBridgeTest.expressions.visibleMenuItem("High"),
       ChatGPTDesktopBridgeTest.conversationSnapshotFromClient(conversationId),
     ])
@@ -472,6 +474,58 @@ describe("ChatGPTDesktopBridge", () => {
     );
     assert.match(ChatGPTDesktopBridgeTest.expressions.modelMenuState, /data-state/u);
     assert.match(ChatGPTDesktopBridgeTest.expressions.modelMenuState, /pointerEvents/u);
+  });
+
+  it("automatically keeps coding requests in the current chat through trusted CDP input", async () => {
+    let handoffVisible = true;
+    const probes: string[] = [];
+    const trustedClicks: string[] = [];
+    const handled = await ChatGPTDesktopBridgeTest.keepChattingHereIfPrompted({
+      evaluate: async (expression: string) => {
+        probes.push(expression);
+        assert.equal(expression, ChatGPTDesktopBridgeTest.expressions.taskHandoffPresent);
+        return handoffVisible;
+      },
+      trustedClickExpression: async (expression: string) => {
+        trustedClicks.push(expression);
+        handoffVisible = false;
+      },
+    } as never);
+
+    assert.equal(handled, true);
+    assert.equal(trustedClicks.length, 1);
+    assert.equal(
+      trustedClicks[0],
+      ChatGPTDesktopBridgeTest.expressions.keepChattingHereControl,
+    );
+    assert.match(trustedClicks[0]!, /Keep chatting here/u);
+    assert.match(trustedClicks[0]!, /Continue with a task/u);
+    assert.match(trustedClicks[0]!, /return continueWithTask \? keep : null/u);
+    assert.equal(probes.length, 2);
+  });
+
+  it("leaves ordinary quick-chat responses untouched when no task handoff is visible", async () => {
+    let clicked = false;
+    const handled = await ChatGPTDesktopBridgeTest.keepChattingHereIfPrompted({
+      evaluate: async () => false,
+      trustedClickExpression: async () => {
+        clicked = true;
+      },
+    } as never);
+
+    assert.equal(handled, false);
+    assert.equal(clicked, false);
+  });
+
+  it("treats the task handoff card as active work and never as response completion", () => {
+    const source = ChatGPTDesktopBridgeTest.streamSend.toString();
+    assert.ok(
+      source.indexOf("keepChattingHereIfPrompted") < source.indexOf("isGenerating"),
+    );
+    assert.match(ChatGPTDesktopBridgeTest.expressions.isGenerating, /Keep chatting here/u);
+    assert.match(ChatGPTDesktopBridgeTest.expressions.isGenerating, /return true/u);
+    assert.match(ChatGPTDesktopBridgeTest.expressions.responseComplete, /Keep chatting here/u);
+    assert.match(ChatGPTDesktopBridgeTest.expressions.responseComplete, /return false/u);
   });
 
   it("bounds optional Desktop client probes below the CDP command timeout", () => {
@@ -491,6 +545,63 @@ describe("ChatGPTDesktopBridge", () => {
     assert.match(snapshot, /4000/u);
     assert.match(snapshot, /conversation_deleted/u);
     assert.match(snapshot, /deleted: true/u);
+  });
+
+  it("continues the exact current chat when a large saved-conversation snapshot is temporarily unavailable", async () => {
+    const expressions: string[] = [];
+    const resolution = await ChatGPTDesktopBridgeTest.resolveSavedConversation(
+      async (expression: string) => {
+        expressions.push(expression);
+        if (/Promise\.resolve\(client\.get/u.test(expression)) return null;
+        if (/Promise\.resolve\(client\.list/u.test(expression)) return conversationId;
+        throw new Error("query-cache fallback must not run for the exact current conversation");
+      },
+      conversationId,
+    );
+
+    assert.deepEqual(resolution, { kind: "current" });
+    assert.equal(expressions.length, 2);
+  });
+
+  it("keeps deleted conversations distinct from transient metadata misses", async () => {
+    const expressions: string[] = [];
+    const resolution = await ChatGPTDesktopBridgeTest.resolveSavedConversation(
+      async (expression: string) => {
+        expressions.push(expression);
+        return { deleted: true };
+      },
+      conversationId,
+    );
+
+    assert.deepEqual(resolution, { kind: "deleted" });
+    assert.equal(expressions.length, 1);
+  });
+
+  it("retains strict saved-history verification when another conversation is current", async () => {
+    const snapshot = {
+      id: conversationId,
+      title: "Saved chat",
+      messages: [
+        { role: "user", text: "prompt" },
+        { role: "assistant", text: "answer" },
+      ],
+      complete: true,
+    };
+    const resolution = await ChatGPTDesktopBridgeTest.resolveSavedConversation(
+      async (expression: string) => {
+        if (/Promise\.resolve\(client\.get/u.test(expression)) return snapshot;
+        if (/Promise\.resolve\(client\.list/u.test(expression))
+          return "223e4567-e89b-42d3-a456-426614174000";
+        throw new Error("query-cache fallback must not run for a valid snapshot");
+      },
+      conversationId,
+    );
+
+    assert.deepEqual(resolution, {
+      kind: "history",
+      title: "Saved chat",
+      expected: snapshot.messages,
+    });
   });
 
   it("recovers a deleted saved conversation before editing and tags replacement chunks", () => {
