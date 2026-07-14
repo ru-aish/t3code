@@ -757,7 +757,16 @@ export const ChatGPTAgentReactorLive = Layer.effect(
 
     const start = Effect.fn("ChatGPTAgentReactor.start")(function* () {
       const watcherController = new AbortController();
-      yield* Effect.addFinalizer(() => Effect.sync(() => watcherController.abort()));
+      const abortWatcher = () => watcherController.abort();
+      process.once("SIGINT", abortWatcher);
+      process.once("SIGTERM", abortWatcher);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          process.removeListener("SIGINT", abortWatcher);
+          process.removeListener("SIGTERM", abortWatcher);
+          watcherController.abort();
+        }),
+      );
       yield* watchDesktopActivity(watcherController.signal).pipe(Effect.forkScoped);
       yield* Stream.runForEach(engine.streamDomainEvents, (event) => {
         switch (event.type) {
