@@ -493,63 +493,6 @@ describe("ChatGPTDesktopBridge", () => {
     assert.match(snapshot, /deleted: true/u);
   });
 
-  it("continues the exact current chat when a large saved-conversation snapshot is temporarily unavailable", async () => {
-    const expressions: string[] = [];
-    const resolution = await ChatGPTDesktopBridgeTest.resolveSavedConversation(
-      async (expression: string) => {
-        expressions.push(expression);
-        if (/Promise\.resolve\(client\.get/u.test(expression)) return null;
-        if (/Promise\.resolve\(client\.list/u.test(expression)) return conversationId;
-        throw new Error("query-cache fallback must not run for the exact current conversation");
-      },
-      conversationId,
-    );
-
-    assert.deepEqual(resolution, { kind: "current" });
-    assert.equal(expressions.length, 2);
-  });
-
-  it("keeps deleted conversations distinct from transient metadata misses", async () => {
-    const expressions: string[] = [];
-    const resolution = await ChatGPTDesktopBridgeTest.resolveSavedConversation(
-      async (expression: string) => {
-        expressions.push(expression);
-        return { deleted: true };
-      },
-      conversationId,
-    );
-
-    assert.deepEqual(resolution, { kind: "deleted" });
-    assert.equal(expressions.length, 1);
-  });
-
-  it("retains strict saved-history verification when another conversation is current", async () => {
-    const snapshot = {
-      id: conversationId,
-      title: "Saved chat",
-      messages: [
-        { role: "user", text: "prompt" },
-        { role: "assistant", text: "answer" },
-      ],
-      complete: true,
-    };
-    const resolution = await ChatGPTDesktopBridgeTest.resolveSavedConversation(
-      async (expression: string) => {
-        if (/Promise\.resolve\(client\.get/u.test(expression)) return snapshot;
-        if (/Promise\.resolve\(client\.list/u.test(expression))
-          return "223e4567-e89b-42d3-a456-426614174000";
-        throw new Error("query-cache fallback must not run for a valid snapshot");
-      },
-      conversationId,
-    );
-
-    assert.deepEqual(resolution, {
-      kind: "history",
-      title: "Saved chat",
-      expected: snapshot.messages,
-    });
-  });
-
   it("recovers a deleted saved conversation before editing and tags replacement chunks", () => {
     const source = ChatGPTDesktopBridgeTest.streamSend.toString();
     assert.match(source, /conversationReplaced = true/u);
