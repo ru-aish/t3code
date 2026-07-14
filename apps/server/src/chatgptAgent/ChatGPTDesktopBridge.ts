@@ -684,7 +684,9 @@ export function latestConversationTexts(turns: ReadonlyArray<RendererTurn>): {
   readonly userText: string;
   readonly assistantText: string;
 } {
-  const userIndex = turns.findLastIndex((turn) => turn.role === "user" && turn.text.trim().length > 0);
+  const userIndex = turns.findLastIndex(
+    (turn) => turn.role === "user" && turn.text.trim().length > 0,
+  );
   if (userIndex < 0) return { userText: "", assistantText: "" };
   const userText = turns[userIndex]?.text.trim() ?? "";
   const assistantText =
@@ -1007,10 +1009,7 @@ const hoverRendererControlWhenReady = (
 ) => interactWithRendererControlWhenReady(evaluate, hoverRendererControl, expression, signal);
 
 async function keepChattingHereIfPrompted(
-  cdp: Pick<
-    Awaited<ReturnType<typeof openCdp>>,
-    "evaluate" | "trustedClickExpression"
-  >,
+  cdp: Pick<Awaited<ReturnType<typeof openCdp>>, "evaluate" | "trustedClickExpression">,
   signal?: AbortSignal,
 ): Promise<boolean> {
   if (!(await evaluateWithRetry(cdp.evaluate, taskHandoffPresent, signal))) return false;
@@ -1270,7 +1269,11 @@ async function* streamCurrentActivity(input: {
     let previousActivity: ChatGPTDesktopActivity | null = null;
 
     while (!input.signal?.aborted) {
-      const probe = (await evaluateWithRetry(evaluate, rendererProbe, input.signal)) as RendererProbe;
+      const probe = (await evaluateWithRetry(
+        evaluate,
+        rendererProbe,
+        input.signal,
+      )) as RendererProbe;
       if (!probe?.composer) {
         if (previousActivity?.active) yield { ...previousActivity, active: false };
         conversationId = "";

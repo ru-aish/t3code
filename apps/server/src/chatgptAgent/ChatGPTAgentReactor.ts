@@ -335,7 +335,9 @@ export const ChatGPTAgentReactorLive = Layer.effect(
               return;
             }
 
-            const latestUser = thread.messages.toReversed().find((message) => message.role === "user");
+            const latestUser = thread.messages
+              .toReversed()
+              .find((message) => message.role === "user");
             if (
               !existingRecovery &&
               (!latestUser ||
@@ -351,8 +353,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
               const existingAssistant = thread.messages
                 .toReversed()
                 .find(
-                  (message) =>
-                    message.role === "assistant" && message.turnId === latestTurn.turnId,
+                  (message) => message.role === "assistant" && message.turnId === latestTurn.turnId,
                 );
               recovery = {
                 conversationId: desktopActivity.conversationId,
@@ -745,8 +746,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         const thread = yield* snapshots.getThreadDetailById(event.payload.threadId);
         if (Option.isNone(thread) || !isChatGPTAgentThread(thread.value)) return;
         const interruptedTurn = yield* coordinator.interrupt(event.payload.threadId, state);
-        if (interruptedTurn === undefined)
-          yield* settleLateRecovery(event.payload.threadId, state);
+        if (interruptedTurn === undefined) yield* settleLateRecovery(event.payload.threadId, state);
       });
 
     const start = Effect.fn("ChatGPTAgentReactor.start")(function* () {

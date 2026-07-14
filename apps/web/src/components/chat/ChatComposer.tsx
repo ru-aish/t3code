@@ -2749,7 +2749,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ) : null}
                     {!isChatGPTAgent ? (
                       <ComposerFooterModeControls
-                        showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                        showInteractionModeToggle={
+                          composerProviderControls.showInteractionModeToggle
+                        }
                         interactionMode={interactionMode}
                         runtimeMode={runtimeMode}
                         showPlanToggle={showPlanSidebarToggle}

@@ -494,13 +494,10 @@ describe("ChatGPTDesktopBridge", () => {
 
     assert.equal(handled, true);
     assert.equal(trustedClicks.length, 1);
-    assert.equal(
-      trustedClicks[0],
-      ChatGPTDesktopBridgeTest.expressions.keepChattingHereControl,
-    );
+    assert.equal(trustedClicks[0], ChatGPTDesktopBridgeTest.expressions.keepChattingHereControl);
     assert.match(trustedClicks[0]!, /Keep chatting here/u);
     assert.match(trustedClicks[0]!, /Continue with a task/u);
-    assert.match(trustedClicks[0]!, /aria-hidden=\"true\"/u);
+    assert.match(trustedClicks[0]!, /aria-hidden="true"/u);
     assert.match(trustedClicks[0]!, /hidden\.remove\(\)/u);
     assert.match(trustedClicks[0]!, /visibleText\(button\)/u);
     assert.match(trustedClicks[0]!, /return continueWithTask \? keep : null/u);
@@ -568,9 +565,7 @@ describe("ChatGPTDesktopBridge", () => {
 
   it("treats the task handoff card as active work and never as response completion", () => {
     const source = ChatGPTDesktopBridgeTest.streamSend.toString();
-    assert.ok(
-      source.indexOf("keepChattingHereIfPrompted") < source.indexOf("isGenerating"),
-    );
+    assert.ok(source.indexOf("keepChattingHereIfPrompted") < source.indexOf("isGenerating"));
     assert.match(ChatGPTDesktopBridgeTest.expressions.isGenerating, /Keep chatting here/u);
     assert.match(ChatGPTDesktopBridgeTest.expressions.isGenerating, /return true/u);
     assert.match(ChatGPTDesktopBridgeTest.expressions.responseComplete, /Keep chatting here/u);
