@@ -47,6 +47,8 @@ export interface ChatGPTDesktopBridgeShape {
     readonly endpoint: string;
     readonly conversationId?: string;
     readonly text: string;
+    /** Used only when ChatGPT reports that the saved conversation was deleted. */
+    readonly replacementText?: string;
     /** Desktop menu version id; `desktop` is normalized by the router. */
     readonly model?: "latest" | "5.5" | "5.4" | "5.3" | "o3";
     readonly reasoningEffort?: "instant" | "medium" | "high";
@@ -61,6 +63,7 @@ export interface ChatGPTDesktopBridgeShape {
     readonly conversationId: string;
     readonly kind: "assistant" | "thinking";
     readonly text: string;
+    readonly conversationReplaced?: boolean;
   }>;
 }
 
@@ -110,6 +113,7 @@ type ClientConversationSnapshot = {
   readonly messages: ReadonlyArray<{ readonly role: string; readonly text: string }>;
   readonly complete: boolean;
 };
+type ClientConversationLookup = ClientConversationSnapshot | { readonly deleted: true };
 
 const unavailable = (detail: string) =>
   new ChatGPTDesktopBridgeError({ kind: "unavailable", detail });
@@ -598,7 +602,12 @@ function conversationSnapshotFromClient(id: string): string {
         messages: orderedMessages(data),
         complete,
       };
-    } catch { return null; }
+    } catch (error) {
+      const detail = String(error?.stack || error?.message || error || '');
+      return /conversation_deleted|Conversation has been deleted/i.test(detail)
+        ? { deleted: true }
+        : null;
+    }
   `);
 }
 
@@ -1097,60 +1106,70 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
   conversationId: string;
   kind: "assistant" | "thinking";
   text: string;
+  conversationReplaced?: boolean;
 }> {
   const cdp = await openCdp(input.endpoint, input.signal);
   try {
     const { evaluate, trustedClick } = cdp;
     await ensureQuickChat(cdp, input.signal);
     await evaluateClientBestEffort(evaluate, warmConversationClient, input.signal);
+    let conversationReplaced = false;
+    let sentText = input.text;
     if (input.conversationId) {
       let title = "";
       let expected: ReadonlyArray<{ readonly role: string; readonly text: string }> = [];
-      const snapshot = (await evaluateWithRetry(
+      const lookup = (await evaluateWithRetry(
         evaluate,
         conversationSnapshotFromClient(input.conversationId),
         input.signal,
-      )) as ClientConversationSnapshot | null;
-      if (
-        snapshot?.id === input.conversationId &&
-        isBackendConversationId(snapshot.id) &&
-        snapshot.title &&
-        snapshot.messages.length > 0
-      ) {
-        title = snapshot.title;
-        expected = snapshot.messages;
+      )) as ClientConversationLookup | null;
+      if (lookup && "deleted" in lookup) {
+        conversationReplaced = true;
+        sentText = input.replacementText ?? input.text;
+        await prepareNewConversation(cdp, input.signal);
       } else {
-        const queries = (await evaluateWithRetry(
-          evaluate,
-          queryCache,
-          input.signal,
-        )) as QueryRecord[];
-        const history = findConversationHistoryEntry(queries, input.conversationId);
-        const query = queries.find(
-          (candidate) =>
-            candidate.key[0] === "chatgpt-conversation" &&
-            candidate.key[1] === input.conversationId,
-        );
-        if (history && query) {
-          title = history.title;
-          expected = conversationMessages(query.data);
+        const snapshot = lookup;
+        if (
+          snapshot?.id === input.conversationId &&
+          isBackendConversationId(snapshot.id) &&
+          snapshot.title &&
+          snapshot.messages.length > 0
+        ) {
+          title = snapshot.title;
+          expected = snapshot.messages;
+        } else {
+          const queries = (await evaluateWithRetry(
+            evaluate,
+            queryCache,
+            input.signal,
+          )) as QueryRecord[];
+          const history = findConversationHistoryEntry(queries, input.conversationId);
+          const query = queries.find(
+            (candidate) =>
+              candidate.key[0] === "chatgpt-conversation" &&
+              candidate.key[1] === input.conversationId,
+          );
+          if (history && query) {
+            title = history.title;
+            expected = conversationMessages(query.data);
+          }
         }
-      }
-      if (!title || expected.length === 0)
-        throw new ChatGPTDesktopBridgeError({
-          kind: "incompatible",
-          detail: "The requested ChatGPT conversation was not present in quick-chat history.",
-        });
-      const currentTurns = (await evaluateWithRetry(
-        evaluate,
-        readTurns,
-        input.signal,
-      )) as RendererTurn[];
-      if (!verifyOpenedMessages(expected, currentTurns)) {
-        if (await evaluateWithRetry(evaluate, historyTriggerVisible, input.signal))
-          await clickRendererControlWhenReady(evaluate, historyTrigger, input.signal);
-        await clickRendererControlWhenReady(evaluate, historyEntry(title), input.signal);
-        await waitForConversation(evaluate, expected, input.signal);
+        if (!title || expected.length === 0)
+          throw new ChatGPTDesktopBridgeError({
+            kind: "incompatible",
+            detail: "The requested ChatGPT conversation was not present in quick-chat history.",
+          });
+        const currentTurns = (await evaluateWithRetry(
+          evaluate,
+          readTurns,
+          input.signal,
+        )) as RendererTurn[];
+        if (!verifyOpenedMessages(expected, currentTurns)) {
+          if (await evaluateWithRetry(evaluate, historyTriggerVisible, input.signal))
+            await clickRendererControlWhenReady(evaluate, historyTrigger, input.signal);
+          await clickRendererControlWhenReady(evaluate, historyEntry(title), input.signal);
+          await waitForConversation(evaluate, expected, input.signal);
+        }
       }
     } else {
       await prepareNewConversation(cdp, input.signal);
@@ -1183,7 +1202,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
         await abortableDelay(POLL_INTERVAL_MS, input.signal);
       }
     }
-    const sent = (await evaluateWithRetry(evaluate, mutateEditor(input.text), input.signal)) as {
+    const sent = (await evaluateWithRetry(evaluate, mutateEditor(sentText), input.signal)) as {
       ok?: boolean;
       reason?: string;
     };
@@ -1207,7 +1226,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
       input.signal,
     )) as RendererReasoning | null;
     await submitMessage(evaluate, input.signal);
-    let conversationId = input.conversationId ?? "";
+    let conversationId = conversationReplaced ? "" : (input.conversationId ?? "");
     let previousAssistantText = "";
     const baselineReasoningText = reasoningBefore?.text ?? "";
     const baselineReasoningId = reasoningBefore?.id ?? "";
@@ -1268,7 +1287,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
             conversationId =
               discoverStableConversationId(
                 Array.isArray(queries) ? (queries as QueryRecord[]) : [],
-                input.text,
+                sentText,
               ) ?? "";
           }
         }
@@ -1278,7 +1297,8 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
             conversationSnapshotFromClient(conversationId),
             input.signal,
           );
-          if (snapshot) clientSnapshot = snapshot as ClientConversationSnapshot;
+          if (snapshot && !(typeof snapshot === "object" && "deleted" in snapshot))
+            clientSnapshot = snapshot as ClientConversationSnapshot;
         }
       }
 
@@ -1294,14 +1314,19 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
         isBackendConversationId(conversationId) &&
         (reasoning?.completed === true || nowMs - lastThoughtYieldAt >= THOUGHT_STREAM_INTERVAL_MS);
       if (shouldYieldThought) {
-        yield { conversationId, kind: "thinking", text: reasoningText };
+        yield {
+          conversationId,
+          kind: "thinking",
+          text: reasoningText,
+          ...(conversationReplaced ? { conversationReplaced: true } : {}),
+        };
         lastYieldedReasoningText = reasoningText;
         lastThoughtYieldAt = nowMs;
       }
 
       const snapshotMessages = clientSnapshot?.messages ?? [];
       const sentMessageIndex = snapshotMessages.findLastIndex(
-        (message) => message.role === "user" && message.text === input.text,
+        (message) => message.role === "user" && message.text === sentText,
       );
       const snapshotAssistantText =
         sentMessageIndex >= 0
@@ -1324,6 +1349,7 @@ async function* streamSend(input: Parameters<ChatGPTDesktopBridgeShape["send"]>[
             conversationId,
             kind: "assistant",
             text: assistantText.slice(previousAssistantText.length),
+            ...(conversationReplaced ? { conversationReplaced: true } : {}),
           };
           previousAssistantText = assistantText;
         }

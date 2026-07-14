@@ -489,6 +489,19 @@ describe("ChatGPTDesktopBridge", () => {
     assert.notMatch(discovery, /client\.get/u);
     assert.match(snapshot, /Promise\.race/u);
     assert.match(snapshot, /4000/u);
+    assert.match(snapshot, /conversation_deleted/u);
+    assert.match(snapshot, /deleted: true/u);
+  });
+
+  it("recovers a deleted saved conversation before editing and tags replacement chunks", () => {
+    const source = ChatGPTDesktopBridgeTest.streamSend.toString();
+    assert.match(source, /conversationReplaced = true/u);
+    assert.match(source, /sentText = input\.replacementText \?\? input\.text/u);
+    assert.match(source, /await prepareNewConversation\(cdp, input\.signal\)/u);
+    assert.match(source, /mutateEditor\(sentText\)/u);
+    assert.match(source, /conversationReplaced \? ""/u);
+    assert.match(source, /conversationReplaced: true/u);
+    assert.ok(source.indexOf("prepareNewConversation") < source.indexOf("mutateEditor(sentText)"));
   });
 
   it("treats optional client timeouts as missing metadata, not turn failures", async () => {

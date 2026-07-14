@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { shouldFinalizeChatGPTAssistantMessage } from "./ChatGPTAgentReactor.ts";
+import {
+  chatGPTBindingWorkspaceEnvelopeSentAt,
+  shouldFinalizeChatGPTAssistantMessage,
+  shouldUpdateChatGPTConversationBinding,
+} from "./ChatGPTAgentReactor.ts";
 
 describe("ChatGPTAgentReactor assistant settlement", () => {
   it("preserves successful-turn completion even before a visible delta", () => {
@@ -35,4 +39,39 @@ describe("ChatGPTAgentReactor assistant settlement", () => {
       ).toBe(false);
     },
   );
+
+  it("replaces a stale conversation binding only when a new stable id is available", () => {
+    expect(shouldUpdateChatGPTConversationBinding("old-id", "new-id")).toBe(true);
+    expect(shouldUpdateChatGPTConversationBinding("same-id", "same-id")).toBe(false);
+    expect(shouldUpdateChatGPTConversationBinding("old-id", undefined)).toBe(false);
+  });
+
+  it("requires a successful replacement turn before marking its workspace envelope sent", () => {
+    const previousSentAt = "2026-07-13T00:00:00.000Z";
+    const updatedAt = "2026-07-14T00:00:00.000Z";
+    expect(
+      chatGPTBindingWorkspaceEnvelopeSentAt({
+        initialSend: false,
+        conversationReplaced: true,
+        existingWorkspaceEnvelopeSentAt: previousSentAt,
+        updatedAt,
+      }),
+    ).toBeNull();
+    expect(
+      chatGPTBindingWorkspaceEnvelopeSentAt({
+        initialSend: false,
+        conversationReplaced: false,
+        existingWorkspaceEnvelopeSentAt: previousSentAt,
+        updatedAt,
+      }),
+    ).toBe(previousSentAt);
+    expect(
+      chatGPTBindingWorkspaceEnvelopeSentAt({
+        initialSend: true,
+        conversationReplaced: false,
+        existingWorkspaceEnvelopeSentAt: undefined,
+        updatedAt,
+      }),
+    ).toBeNull();
+  });
 });

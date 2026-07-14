@@ -78,6 +78,23 @@ export function shouldFinalizeChatGPTAssistantMessage(input: {
   return input.outcome === "succeeded" || input.assistantMessageStarted;
 }
 
+export function shouldUpdateChatGPTConversationBinding(
+  existingConversationId: string | undefined,
+  nextConversationId: string | undefined,
+): boolean {
+  return Boolean(nextConversationId && nextConversationId !== existingConversationId);
+}
+
+export function chatGPTBindingWorkspaceEnvelopeSentAt(input: {
+  readonly initialSend: boolean;
+  readonly conversationReplaced: boolean;
+  readonly existingWorkspaceEnvelopeSentAt: string | null | undefined;
+  readonly updatedAt: string;
+}): string | null {
+  if (input.initialSend || input.conversationReplaced) return null;
+  return input.existingWorkspaceEnvelopeSentAt ?? input.updatedAt;
+}
+
 export const ChatGPTAgentReactorLive = Layer.effect(
   ChatGPTAgentReactor,
   Effect.gen(function* () {
@@ -345,7 +362,8 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         }
       }
 
-      const text = initialSend ? `${envelope(workspace)}\n\n${user.text}` : user.text;
+      const replacementText = `${envelope(workspace)}\n\n${user.text}`;
+      const text = initialSend ? replacementText : user.text;
       const ensured = yield* desktopController
         .ensure(config.chatgptAgent.cdpEndpoint)
         .pipe(Effect.match({ onFailure: (error) => error, onSuccess: () => undefined }));
@@ -355,6 +373,9 @@ export const ChatGPTAgentReactorLive = Layer.effect(
         (option) => option.id === "reasoningEffort",
       )?.value;
       let conversationId = existing?.conversationId;
+      let boundConversationId = existing?.conversationId;
+      let conversationReplaced = false;
+      let recoveryActivityPublished = false;
       let latestReasoning = "";
       let reasoningActivityStarted = false;
       let assistantMessageStarted = false;
@@ -363,6 +384,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
           endpoint: config.chatgptAgent.cdpEndpoint,
           ...(conversationId ? { conversationId } : {}),
           text,
+          replacementText,
           model: normalizeChatGPTAgentModel(selection?.model),
           ...(reasoningEffort === "instant" ||
           reasoningEffort === "medium" ||
@@ -378,15 +400,32 @@ export const ChatGPTAgentReactorLive = Layer.effect(
           Effect.gen(function* () {
             if (task.controller.signal.aborted) return;
             conversationId = chunk.conversationId;
-            if (existing === undefined && conversationId) {
-              const createdAt = yield* now;
+            if (chunk.conversationReplaced) conversationReplaced = true;
+            if (shouldUpdateChatGPTConversationBinding(boundConversationId, conversationId)) {
+              const updatedAt = yield* now;
               yield* bindings.upsert({
                 threadId: thread.id,
                 conversationId,
-                workspaceEnvelopeSentAt: initialSend ? null : createdAt,
-                createdAt,
-                updatedAt: createdAt,
+                workspaceEnvelopeSentAt: chatGPTBindingWorkspaceEnvelopeSentAt({
+                  initialSend,
+                  conversationReplaced: chunk.conversationReplaced === true,
+                  existingWorkspaceEnvelopeSentAt: existing?.workspaceEnvelopeSentAt,
+                  updatedAt,
+                }),
+                createdAt: existing?.createdAt ?? updatedAt,
+                updatedAt,
               });
+              boundConversationId = conversationId;
+            }
+            if (chunk.conversationReplaced && !recoveryActivityPublished) {
+              recoveryActivityPublished = true;
+              yield* activity(
+                thread.id,
+                turnId,
+                "info",
+                "ChatGPT conversation recovered",
+                "The saved ChatGPT conversation had been deleted. T3 started a replacement conversation and updated the thread binding.",
+              );
             }
             if (chunk.text.length === 0 || task.controller.signal.aborted) return;
             if (chunk.kind === "thinking") {
@@ -453,7 +492,7 @@ export const ChatGPTAgentReactorLive = Layer.effect(
       if (streamOutcome === "failed" && streamed !== true) {
         return yield* terminalState(thread, turnId, "error", streamed.detail);
       }
-      if (initialSend && conversationId) {
+      if ((initialSend || conversationReplaced) && conversationId) {
         yield* bindings.markWorkspaceEnvelopeSent(thread.id, yield* now);
       }
       yield* terminalState(thread, turnId, "ready");
