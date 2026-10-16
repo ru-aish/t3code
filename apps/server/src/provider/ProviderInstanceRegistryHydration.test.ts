@@ -24,7 +24,10 @@ describe("deriveProviderInstanceConfigMap", () => {
     const merged = deriveProviderInstanceConfigMap(
       settingsWith({
         providerInstances: {
-          opencode: { driver: ProviderDriverKind.make("opencode"), enabled: true },
+          [ProviderInstanceId.make("opencode")]: {
+            driver: ProviderDriverKind.make("opencode"),
+            enabled: true,
+          },
         },
       }),
     );
