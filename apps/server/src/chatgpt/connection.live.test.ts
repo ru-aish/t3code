@@ -2,10 +2,10 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import { describe, expect, it } from "@effect/vitest";
-import { ChatGPTConnection, type TerminalBinding } from "./connection.ts";
+import { ChatGPTConnection, type ChatGPTUpdate, type TerminalBinding } from "./connection.ts";
 
 describe.skipIf(process.env.T3_CHATGPT_LIVE !== "1")("live ChatGPT → fedora_t3code → T3", () => {
-  it("streams a real response and receives authoritative Terminal MCP completion", async () => {
+  it("finishes a reply-only turn and a terminal-tool turn in the same ChatGPT conversation", async () => {
     const id = NodeCrypto.randomUUID();
     const cwd = `/work/tempwork/t3-chatgpt-live-${id}`;
     await NodeFSP.mkdir(cwd, { recursive: true });
@@ -21,53 +21,101 @@ describe.skipIf(process.env.T3_CHATGPT_LIVE !== "1")("live ChatGPT → fedora_t3
       cacheDir: cwd,
     });
     const signal = AbortSignal.timeout(180_000);
-    let bound = false;
-    let updateCount = 0;
-    let text = "";
-    const streamed = new Promise<void>((resolve) =>
-      connection.onUpdate((update) => {
-        updateCount++;
-        if (update.conversationId && !bound) {
-          bound = true;
-          void connection.control("bind", { conversationId: update.conversationId });
-        }
-        if (update.role === "assistant" && update.text) text = update.text;
-        if (update.kind === "complete") resolve();
-      }),
-    );
-    await connection.load();
-    await connection.control<TerminalBinding>("register", { cwd, model: "gpt-5-6-thinking" });
+    let bound: Promise<unknown> | undefined;
+    const updates: ChatGPTUpdate[] = [];
+    const completions = new Map<string, () => void>();
+    const streamed = (requestId: string) =>
+      new Promise<void>((resolve) => {
+        completions.set(requestId, resolve);
+      });
+    connection.onUpdate((update) => {
+      updates.push(update);
+      if (update.conversationId && !bound)
+        bound = connection.control("bind", { conversationId: update.conversationId });
+      if (update.kind === "complete" && update.requestId) completions.get(update.requestId)?.();
+    });
     const done = (async () => {
       for await (const event of connection.terminalEvents(signal)) {
         if (event.kind === "state" && event.payload.state === "done") return;
       }
     })();
-    try {
-      await connection.control("activate", { requestId: id });
-      await connection.send(
-        id,
-        `This is a user-authorized, read-only integration test. Use ONLY the connector named fedora_t3code for all tool calls. Do not use the old fedora connector or any other connector. Bootstrap with thread_id=${id} and cwd=${JSON.stringify(cwd)}. Run one command through fedora_t3code.run_command with session_id=${id}: printf 'T3_CONNECTOR_OK\\n'. Verify that output. Then call fedora_t3code.thread_task(action="complete",session_id="${id}",evidence=["The registered thread executed the command and returned T3_CONNECTOR_OK"]). End your response with T3_E2E_DONE. Do not create files, delegate, browse, or call any other tools.`,
-        "gpt-5-6-thinking",
-        cwd,
-      );
+    const withinDeadline = async (promise: Promise<unknown>) => {
       await Promise.race([
-        Promise.all([done, streamed]),
+        promise,
         new Promise((_, reject) =>
           signal.addEventListener("abort", () => reject(new Error("Live test deadline reached")), {
             once: true,
           }),
         ),
       ]);
-      expect(text).toContain("T3_E2E_DONE");
-      expect(updateCount).toBeGreaterThan(2);
+    };
+    try {
+      await connection.load();
+      await connection.control<TerminalBinding>("register", { cwd, model: "gpt-5-6-thinking" });
+
+      const replyRequest = id + "-reply";
+      const firstStream = streamed(replyRequest);
+      await connection.control("activate", { requestId: replyRequest });
+      await connection.send(
+        replyRequest,
+        "Reply with exactly Y and do not call any tools. This is an end-to-end response-only test.",
+        "gpt-5-6-thinking",
+        cwd,
+      );
+      await withinDeadline(firstStream);
+      if (bound) await bound;
+      expect(
+        updates.some(
+          (update) =>
+            update.requestId === replyRequest &&
+            update.channel === "final" &&
+            update.text?.includes("Y"),
+        ),
+      ).toBe(true);
+      const replyState = await connection.control<TerminalBinding>("get");
+      expect(replyState.state).not.toBe("done");
+
+      const toolRequest = id + "-tool";
+      const secondStream = streamed(toolRequest);
+      await connection.control("activate", { requestId: toolRequest });
+      await connection.send(
+        toolRequest,
+        `Run printf 'T3_CONNECTOR_OK\\n' using fedora_t3code.run_command (bootstrap first with thread_id=${id} and cwd=${JSON.stringify(cwd)}). Verify the result. Call fedora_t3code.thread_task(action="complete",session_id="${id}",evidence=["Confirmed T3_CONNECTOR_OK"]). Then reply exactly Y. Do not use other tools.`,
+        "gpt-5-6-thinking",
+        cwd,
+      );
+      await withinDeadline(Promise.all([secondStream, done]));
+      expect(
+        updates.some(
+          (update) =>
+            update.requestId === toolRequest &&
+            update.channel === "final" &&
+            update.text?.includes("Y"),
+        ),
+      ).toBe(true);
       const binding = await connection.control<TerminalBinding>("get");
       expect(binding.state).toBe("done");
       expect(binding.conversation_id).toBe(connection.conversationId);
       console.log(
         JSON.stringify({
-          threadId: id,
-          conversationId: connection.conversationId,
-          updateCount,
+          replyUpdates: updates.filter((update) => update.requestId === replyRequest).length,
+          toolUpdates: updates.filter((update) => update.requestId === toolRequest).length,
+          replyChannels: [
+            ...new Set(
+              updates
+                .filter((update) => update.requestId === replyRequest)
+                .map((update) => update.channel)
+                .filter(Boolean),
+            ),
+          ],
+          toolChannels: [
+            ...new Set(
+              updates
+                .filter((update) => update.requestId === toolRequest)
+                .map((update) => update.channel)
+                .filter(Boolean),
+            ),
+          ],
           terminalState: binding.state,
         }),
       );

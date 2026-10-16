@@ -225,7 +225,9 @@ export const makeChatGPTAdapter = (
         const outputTurns = new Map<string, ActiveTurn>();
         const messages = new Map<string, OrchestrationV2ConversationMessage>();
         const finalFragments = new Map<string, Map<string, string>>();
+        const reasoningKeys = new Set<string>();
         let streamComplete = false;
+        let usedTerminalTools = false;
         let generation = 0;
         let nextOrdinal = 0;
         const itemOrdinals = new Map<string, number>();
@@ -238,12 +240,45 @@ export const makeChatGPTAdapter = (
           nativeId: id,
           strength: "strong" as const,
         });
+        const settleReasoning = Effect.fnUntraced(function* (turn: ActiveTurn) {
+          const timestamp = yield* DateTime.now;
+          for (const key of reasoningKeys) {
+            if (!key.startsWith(`${turn.generation}:`)) continue;
+            const item = messages.get(key);
+            if (!item?.streaming) continue;
+            messages.set(key, { ...item, streaming: false, updatedAt: timestamp });
+            yield* emit({
+              type: "turn_item.updated",
+              driver: CHATGPT_DRIVER,
+              turnItem: {
+                id: TurnItemId.make(`chatgpt:${input.threadId}:${key}`),
+                threadId: input.threadId,
+                runId: turn.input.runId,
+                nodeId: turn.input.rootNodeId,
+                providerThreadId: turn.turn.providerThreadId,
+                providerTurnId: turn.turn.id,
+                nativeItemRef: ref(nativeMessageIds.get(key) ?? key),
+                parentItemId: null,
+                ordinal: itemOrdinals.get(key)!,
+                status: "completed",
+                title: null,
+                startedAt: item.createdAt,
+                completedAt: timestamp,
+                updatedAt: timestamp,
+                type: "reasoning",
+                text: item.text,
+                streaming: false,
+              },
+            });
+          }
+        });
         const finish = Effect.fnUntraced(function* (
           status: "completed" | "interrupted" | "cancelled",
         ) {
           if (!active || !thread) return;
           const completed = active;
           active = null;
+          yield* settleReasoning(completed);
           const timestamp = yield* DateTime.now;
           const finalKey = String(completed.generation) + ":final";
           const finalMessage = messages.get(finalKey);
@@ -294,6 +329,12 @@ export const makeChatGPTAdapter = (
           });
         });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
+          if (
+            update.role === "assistant" &&
+            (update.recipient?.includes("fedora_t3code") ||
+              (update.recipient === "api_tool.call_tool" && update.text?.includes("fedora_t3code")))
+          )
+            usedTerminalTools = true;
           if (update.conversationId && update.conversationId !== binding.conversation_id) {
             binding = yield* attempt(() =>
               connection.control<TerminalBinding>("bind", {
@@ -315,10 +356,19 @@ export const makeChatGPTAdapter = (
           }
           if (update.kind === "complete") {
             if (update.requestId === active?.requestId) {
+              yield* settleReasoning(active);
               streamComplete = true;
-              if (binding.state === "done") yield* finish("completed");
+              if (!usedTerminalTools && binding.state !== "done") {
+                // Stop Terminal MCP inactivity recovery for reply-only runs.
+                // The next turn reactivates the binding; no completion tool is needed.
+                yield* attempt(() =>
+                  connection.control("pause", { requestId: `reply-only-${update.requestId}` }),
+                ).pipe(Effect.ignore);
+              }
+              if (binding.state === "done" || !usedTerminalTools) yield* finish("completed");
             }
-            // Transport completion is advisory. Only Terminal MCP may complete the T3 run.
+            // Tool-using turns require Terminal MCP confirmation; reply-only turns
+            // finish on the normal ChatGPT stream completion.
             return;
           }
           const isFinalAnswer =
@@ -339,6 +389,7 @@ export const makeChatGPTAdapter = (
           // GenUI can replace an in-progress final message's native ID with a
           // canonical full-answer ID. Keep one final answer per submission.
           const key = `${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
+          if (isFinalAnswer) yield* settleReasoning(outputTurn);
           const id = MessageId.make(`chatgpt:${input.threadId}:${key}`);
           const existing = messages.get(key);
           let text = update.text;
@@ -389,6 +440,7 @@ export const makeChatGPTAdapter = (
             updatedAt: timestamp,
           };
           if (update.channel === "analysis") {
+            reasoningKeys.add(key);
             yield* emit({
               type: "turn_item.updated",
               driver: CHATGPT_DRIVER,
@@ -577,6 +629,7 @@ export const makeChatGPTAdapter = (
           };
           outputTurns.set(request.message.messageId, active);
           streamComplete = false;
+          usedTerminalTools = false;
           yield* emit({
             type: "provider_turn.updated",
             driver: CHATGPT_DRIVER,

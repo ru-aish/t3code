@@ -16,6 +16,9 @@ describe("ChatGPT protocol", () => {
     expect(mergeFinalAnswer(expanded, "## Download\nNew AppImage.")).toBe(
       expanded + "\n\n## Download\nNew AppImage.",
     );
+    expect(
+      mergeFinalAnswer("Paragraph one.\n\nParagraph two.", "Paragraph two.\n\nParagraph three."),
+    ).toBe("Paragraph one.\n\nParagraph two.\n\nParagraph three.");
   });
 
   it("retains the complete answer and recognizes the hidden ending copy", () => {
@@ -55,20 +58,24 @@ describe("ChatGPT protocol", () => {
   });
   it("uses a Markdown fallback instead of raw ChatGPT DIL when available", () => {
     const raw = `<box gap={2}><button onClick={()=>GenUI.openUrl("https://example.com/app")}>Download</button></box>`;
-    expect(normalizeStreamMessage({
-      message: {
-        id: "full-ui", author: { role: "assistant" }, channel: "final",
-        content: { parts: [raw] },
-        metadata: { model_dil_v2: { fallbackMarkdown: "[Download](https://example.com/app)" } },
-      },
-    }).text).toBe("[Download](https://example.com/app)");
+    expect(
+      normalizeStreamMessage({
+        message: {
+          id: "full-ui",
+          author: { role: "assistant" },
+          channel: "final",
+          content: { parts: [raw] },
+          metadata: { model_dil_v2: { fallbackMarkdown: "[Download](https://example.com/app)" } },
+        },
+      }).text,
+    ).toBe("[Download](https://example.com/app)");
   });
 
   it("degrades a final DIL component into readable Markdown when no fallback exists", () => {
     const rich = [
       "## Ready",
       "<box gap={2}>",
-      "<row gap={1}><icon name=\"check-circle\"/> **Build passed**</row>",
+      '<row gap={1}><icon name="check-circle"/> **Build passed**</row>',
       '<button block onClick={()=>GenUI.openUrl("https://example.com/artifact")}>Download AppImage</button>',
       "</box>",
     ].join("\n");
@@ -82,15 +89,26 @@ describe("ChatGPT protocol", () => {
     expect(normalized).not.toContain("GenUI.openUrl");
     const nestedButton = normalizeStreamMessage({
       message: {
-        author: { role: "assistant" }, channel: "final",
-        content: { parts: ['<box><button onClick={()=>GenUI.openUrl("https://example.com/archive")}><icon name="download" />Download ZIP</button></box>'] },
+        author: { role: "assistant" },
+        channel: "final",
+        content: {
+          parts: [
+            '<box><button onClick={()=>GenUI.openUrl("https://example.com/archive")}><icon name="download" />Download ZIP</button></box>',
+          ],
+        },
       },
     }).text;
     expect(nestedButton).toContain("[Download ZIP](https://example.com/archive)");
-    const codeSample = '```jsx\n<box gap={2}><row>Example</row></box>\n```';
-    expect(normalizeStreamMessage({
-      message: { author: { role: "assistant" }, channel: "final", content: { parts: [codeSample] } },
-    }).text).toBe(codeSample);
+    const codeSample = "```jsx\n<box gap={2}><row>Example</row></box>\n```";
+    expect(
+      normalizeStreamMessage({
+        message: {
+          author: { role: "assistant" },
+          channel: "final",
+          content: { parts: [codeSample] },
+        },
+      }).text,
+    ).toBe(codeSample);
   });
 
   it("lists cloud projects while excluding archived projects and custom GPTs", () => {
