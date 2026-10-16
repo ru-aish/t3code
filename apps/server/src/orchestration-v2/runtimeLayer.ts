@@ -1,3 +1,4 @@
+import * as ChatGPTActions from "../chatgpt/actions.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -368,6 +369,9 @@ export const layerProduction = Layer.mergeAll(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
   ),
   layerProviderContinuationWorkerProvided,
+  ChatGPTActions.layerWorker.pipe(
+    Layer.provide(Layer.merge(ChatGPTActions.layer, layerOrchestratorProvided)),
+  ),
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(Layer.provide(Scheduler.layer), Layer.provideMerge(layerEventInfrastructure));

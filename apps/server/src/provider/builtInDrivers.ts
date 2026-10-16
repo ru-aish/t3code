@@ -1,3 +1,4 @@
+import { ChatGPTDriver, type ChatGPTDriverEnv } from "../chatgpt/driver.ts";
 import {
   AcpRegistryDriver,
   type AcpRegistryDriverEnv,
@@ -16,6 +17,7 @@ import type {
 } from "@t3tools/provider-core/server/driver";
 
 export type BuiltInDriversEnv =
+  | ChatGPTDriverEnv
   | AcpRegistryDriverEnv
   | AntigravityDriverEnv
   | ClaudeDriverEnv
@@ -28,6 +30,7 @@ export type BuiltInDriversEnv =
 
 export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
   CodexDriver,
+  ChatGPTDriver,
   ClaudeDriver,
   CursorDriver,
   GrokDriver,

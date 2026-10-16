@@ -1,3 +1,4 @@
+import * as ChatGPTActions from "../chatgpt/actions.ts";
 import {
   defaultInstanceIdForDriver,
   providerInstanceConfigEnabledFlag,
@@ -111,6 +112,7 @@ export const layer: Layer.Layer<
       Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
       Layer.provide(AcpRegistrySupport.layerFromHost),
       Layer.provide(ProviderHostLive.layer),
+      Layer.provide(ChatGPTActions.layer),
     );
 
     return layerSettingsWatcher.pipe(Layer.provideMerge(layerMutable));

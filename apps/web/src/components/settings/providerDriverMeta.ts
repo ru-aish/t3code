@@ -1,3 +1,4 @@
+import { ChatGPTSettings } from "@t3tools/contracts";
 import {
   AntigravitySettings,
   ClaudeSettings,
@@ -33,5 +34,10 @@ export const providerClients = makeProviderClientRegistry([
   },
   museClient,
   piClient,
+  {
+    driverKind: ProviderDriverKind.make("chatgpt"),
+    label: "ChatGPT",
+    settingsSchema: ChatGPTSettings,
+  },
   acpRegistryClient,
 ]);

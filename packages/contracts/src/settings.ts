@@ -608,6 +608,23 @@ export type CodexSettings = typeof CodexSettings.Type;
 
 const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN = /^(?:|[1-9]\d{5}|1000000)$/;
 
+export const ChatGPTSettings = makeProviderSettingsSchema({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  cdpEndpoint: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("http://127.0.0.1:9234")),
+    Schema.annotateKey({ title: "ChatGPT renderer endpoint" }),
+  ),
+  terminalEndpoint: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("http://127.0.0.1:8022")),
+    Schema.annotateKey({ title: "Terminal MCP control endpoint" }),
+  ),
+  controlTokenFile: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("~/.config/terminal-mcp-t3/control-token")),
+    Schema.annotateKey({ title: "Terminal MCP control token file" }),
+  ),
+});
+export type ChatGPTSettings = typeof ChatGPTSettings.Type;
+
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -1232,7 +1249,7 @@ export const providerInstanceConfigEnabledFlag = (config: unknown): boolean | un
  * Matches the `enabled` decoding default of each driver's settings schema.
  */
 const DEFAULT_DISABLED_PROVIDER_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set(
-  ["cursor", "grok", "muse", "pi", "opencode", "antigravity"].map((driver) =>
+  ["cursor", "grok", "muse", "pi", "opencode", "antigravity", "chatgpt"].map((driver) =>
     ProviderDriverKind.make(driver),
   ),
 );

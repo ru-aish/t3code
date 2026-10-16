@@ -1,4 +1,5 @@
-import { isProviderDriverKind } from "@t3tools/contracts";
+import { ChatGPTSettings } from "@t3tools/contracts";
+import { ProviderDriverKind, isProviderDriverKind } from "@t3tools/contracts";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
 import { makeProviderClientRegistry } from "@t3tools/provider-core/client";
 import { cursorClient } from "@t3tools/provider-cursor/client";
@@ -13,6 +14,11 @@ const providerClients = makeProviderClientRegistry([
   museClient,
   openCodeClient,
   piClient,
+  {
+    driverKind: ProviderDriverKind.make("chatgpt"),
+    label: "ChatGPT",
+    settingsSchema: ChatGPTSettings,
+  },
   acpRegistryClient,
 ]);
 
