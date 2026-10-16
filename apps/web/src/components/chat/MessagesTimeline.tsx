@@ -116,6 +116,7 @@ import {
 } from "../../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
+import { formatDilMarkdown } from "./formatDilMarkdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Root, RootContent } from "mdast";
@@ -2754,7 +2755,9 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const messageText = formatDilMarkdown(
+    row.message.text || (row.message.streaming ? "" : "(empty response)"),
+  );
 
   return (
     <>
