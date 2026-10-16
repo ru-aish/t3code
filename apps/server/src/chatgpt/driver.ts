@@ -9,6 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -127,6 +128,7 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
       });
       let current = snapshotValue(models.length > 0);
       let forceModels = models.some((model) => model.thinking_efforts === undefined);
+      const refreshLock = yield* Semaphore.make(1);
       const refresh = Effect.gen(function* () {
         if (!input.enabled) return current;
         const result = yield* Effect.tryPromise({
@@ -170,7 +172,13 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
         current = snapshotValue(result._tag === "Success" && models.length > 0);
         yield* PubSub.publish(changes, current);
         return current;
-      }).pipe(Effect.orElseSucceed(() => current));
+      }).pipe(
+        refreshLock.withPermits(1),
+        Effect.orElseSucceed(() => current),
+      );
+      // The registry subscribes to driver changes; it does not initiate discovery.
+      // Probe once on activation so a cold cache needs no manual model refresh.
+      if (input.enabled) yield* refresh.pipe(Effect.forkScoped);
       const unsupported = () =>
         Effect.fail(
           new TextGenerationError({
