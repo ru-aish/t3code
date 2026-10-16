@@ -224,6 +224,7 @@ export const makeChatGPTAdapter = (
         let active: ActiveTurn | null = null;
         const outputTurns = new Map<string, ActiveTurn>();
         const messages = new Map<string, OrchestrationV2ConversationMessage>();
+        const finalFragments = new Map<string, Map<string, string>>();
         let streamComplete = false;
         let generation = 0;
         let nextOrdinal = 0;
@@ -340,7 +341,16 @@ export const makeChatGPTAdapter = (
           const key = `${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
           const id = MessageId.make(`chatgpt:${input.threadId}:${key}`);
           const existing = messages.get(key);
-          const text = isFinalAnswer ? mergeFinalAnswer(existing?.text, update.text) : update.text;
+          let text = update.text;
+          if (isFinalAnswer) {
+            const fragments = finalFragments.get(key) ?? new Map<string, string>();
+            fragments.set(update.messageId, update.text);
+            finalFragments.set(key, fragments);
+            text = [...fragments.values()].reduce<string>(
+              (merged, fragment) => mergeFinalAnswer(merged, fragment),
+              "",
+            );
+          }
           const streaming = update.status !== "finished_successfully";
           if (existing?.text === text && existing.streaming === streaming) return;
           const message: OrchestrationV2ConversationMessage = {

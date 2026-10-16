@@ -200,6 +200,44 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
+  it.live("replaces revisions of the same final message instead of duplicating them", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const base = {
+          kind: "update" as const,
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "progressive-final",
+          status: "in_progress",
+        };
+        fake.callback?.({ ...base, text: "The cause is a race." });
+        fake.callback?.({ ...base, text: "The cause is a scheduling race." });
+        fake.callback?.({
+          ...base,
+          messageId: "second-part",
+          text: "## Resolution\nApplied.",
+          status: "finished_successfully",
+          hidden: true,
+        });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const messages = recorded.filter((event) => event.type === "message.updated");
+        expect(messages.at(-1)?.message.text).toBe(
+          "The cause is a scheduling race.\n\n## Resolution\nApplied.",
+        );
+        expect(messages.at(-1)?.message.text.includes("The cause is a race.")).toBe(false);
+      }),
+    ),
+  );
+
   it.live(
     "renders previously hidden final-answer sections but not hidden tool or reasoning output",
     () =>
