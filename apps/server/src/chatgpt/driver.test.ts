@@ -45,6 +45,11 @@ const layer = TestProviderHost.layer().pipe(Layer.provideMerge(NodeServices.laye
 const decodeSettings = Schema.decodeSync(ChatGPTSettings);
 
 describe("ChatGPT initial discovery", () => {
+  it("is enabled by default in this integration build but respects manual disable", () => {
+    expect(decodeSettings({}).enabled).toBe(true);
+    expect(decodeSettings({ enabled: false }).enabled).toBe(false);
+  });
+
   it.effect("loads a cold model catalog and reasoning choices without a manual refresh", () =>
     Effect.scoped(
       Effect.gen(function* () {

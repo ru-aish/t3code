@@ -32,6 +32,8 @@ jobs:
             apps/server/src/chatgpt/adapter.test.ts \
             apps/server/src/chatgpt/protocol.test.ts \
             apps/server/src/chatgpt/driver.test.ts \
+            apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts \
+            packages/contracts/src/settings.test.ts \
             apps/web/src/components/chat/ModelPickerContent.test.ts
       - name: Typecheck server and web
         run: vp run --filter t3 --filter @t3tools/web typecheck
@@ -54,7 +56,7 @@ jobs:
           test -s "${appimages[0]}"
           file "${appimages[0]}"
           mkdir -p appimage-artifact
-          cp "${appimages[0]}" appimage-artifact/
+          cp "${appimages[0]}" "appimage-artifact/T3-Code-chatgpt-${GITHUB_SHA:0:12}-x86_64.AppImage"
           (
             cd appimage-artifact
             sha256sum -- *.AppImage > SHA256SUMS.txt

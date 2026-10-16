@@ -1,5 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  isUnconfiguredDefaultInstanceEnabled,
+  resolveProviderInstanceEnabled,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -17,6 +19,32 @@ function settingsWith(overrides: Partial<ServerSettings>): ServerSettings {
 }
 
 describe("deriveProviderInstanceConfigMap", () => {
+  it("activates the included ChatGPT provider for an existing installation without a saved entry", () => {
+    const chatgptId = ProviderInstanceId.make("chatgpt");
+    const merged = deriveProviderInstanceConfigMap(
+      settingsWith({
+        providerInstances: {
+          opencode: { driver: ProviderDriverKind.make("opencode"), enabled: true },
+        },
+      }),
+    );
+    expect(merged[chatgptId]).toEqual({ driver: ProviderDriverKind.make("chatgpt") });
+    expect(resolveProviderInstanceEnabled(merged[chatgptId]!)).toBe(true);
+    expect(isUnconfiguredDefaultInstanceEnabled(chatgptId)).toBe(true);
+  });
+
+  it("preserves an explicit ChatGPT opt-out", () => {
+    const chatgptId = ProviderInstanceId.make("chatgpt");
+    const merged = deriveProviderInstanceConfigMap(
+      settingsWith({
+        providerInstances: {
+          [chatgptId]: { driver: ProviderDriverKind.make("chatgpt"), enabled: false },
+        },
+      }),
+    );
+    expect(resolveProviderInstanceEnabled(merged[chatgptId]!)).toBe(false);
+  });
+
   it("turns a machine-disabled instance on when a project enables it", () => {
     const settings = settingsWith({
       providerInstances: {
