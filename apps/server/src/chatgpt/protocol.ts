@@ -24,17 +24,36 @@ export function normalizeStreamMessage(
   const candidate = value?.message || value?.data || value || {};
   const message = candidate.message || candidate;
   const metadata = message.metadata || {};
+  const originalText = Array.isArray(message.content?.parts)
+    ? message.content.parts.filter((part: unknown) => typeof part === "string").join("\n")
+    : message.content?.text || "";
+  const fallback = metadata.model_dil_v2?.fallbackMarkdown;
+  const isFinal = message.author?.role === "assistant" && message.channel === "final";
+  // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
+  // Markdown fallback even when content.parts contains rich UI source.
+  let displayText = (isFinal && fallback?.trim()) || originalText || fallback || "";
+  if (isFinal && !fallback?.trim() && /<(?:box|row|col|card|button|badge|icon|text|title)\b/.test(displayText)) {
+    // Some ChatGPT surfaces omit the fallback. Turn its presentation-only DIL
+    // into readable Markdown without altering fenced source-code examples.
+    displayText = displayText.split(/(```[\s\S]*?```)/g).map((section, index) => {
+      if (index % 2 === 1) return section;
+      const buttons = section.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
+        const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
+        const openEnd = button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
+        const label = button.slice(openEnd, button.lastIndexOf("</button>"))
+          .replace(/<[^>]+>/g, "").trim();
+        return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
+      });
+      return buttons.replace(/<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g, "");
+    }).join("").replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
+  }
   return {
     messageId: message.id,
     role: message.author?.role,
     channel: message.channel,
     recipient: message.recipient,
     hidden: metadata.is_visually_hidden_from_conversation === true,
-    text: Array.isArray(message.content?.parts)
-      ? message.content.parts.filter((part: unknown) => typeof part === "string").join("\n") ||
-        metadata.model_dil_v2?.fallbackMarkdown ||
-        ""
-      : message.content?.text || metadata.model_dil_v2?.fallbackMarkdown || "",
+    text: displayText,
     status: message.status,
     endTurn: message.end_turn,
   };
