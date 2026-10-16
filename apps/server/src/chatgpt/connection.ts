@@ -2,19 +2,21 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import { imageUploadDestination, normalizeProjects, normalizeStreamMessage } from "./protocol.ts";
 import { rendererDiscovery } from "./rendererDiscovery.ts";
 
 export type ChatGPTUpdate = {
   kind: "update" | "complete" | "error";
-  requestId?: string;
+  requestId?: string | undefined;
   conversationId: string | null;
-  messageId?: string;
-  role?: string;
-  channel?: string;
-  recipient?: string;
-  text?: string;
-  status?: string;
-  endTurn?: boolean;
+  messageId?: string | undefined;
+  role?: string | undefined;
+  channel?: string | undefined;
+  recipient?: string | undefined;
+  text?: string | undefined;
+  status?: string | undefined;
+  endTurn?: boolean | undefined;
+  hidden?: boolean | undefined;
 };
 export type TerminalBinding = {
   thread_id: string;
@@ -32,12 +34,34 @@ export type TerminalEvent = {
   thread_id: string;
   kind: string;
   epoch: number;
-  payload: { state?: string; paused?: boolean; prompt?: string; url?: string };
+  payload: {
+    state?: string | undefined;
+    paused?: boolean | undefined;
+    prompt?: string | undefined;
+    url?: string;
+  };
 };
-export type ChatGPTModel = { slug: string; is_default: boolean; is_available: boolean };
+export type ChatGPTModel = {
+  slug: string;
+  name?: string | undefined;
+  is_default: boolean;
+  is_available: boolean;
+  thinking_efforts?: ReadonlyArray<string> | undefined;
+};
+export type ChatGPTImage = { id: string; name: string; mimeType: string; path: string };
+type UploadedImage = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  width: number;
+  height: number;
+};
 export type CachedMessage = ChatGPTUpdate & { messageId: string; text: string };
 type Cache = {
   conversationId: string | null;
+  projectId?: string | null;
+  uploads?: Record<string, UploadedImage>;
   messages: Record<string, CachedMessage>;
   dispatches: Record<
     string,
@@ -92,7 +116,7 @@ class Cdp {
     const targets = (await response.json()) as Array<{
       type: string;
       url: string;
-      webSocketDebuggerUrl?: string;
+      webSocketDebuggerUrl?: string | undefined;
     }>;
     const target =
       targets.find(
@@ -147,7 +171,11 @@ class Cdp {
       exceptionDetails?: unknown;
       result?: { value?: T; subtype?: string };
     };
-    if (result.exceptionDetails || result.result?.subtype === "error")
+    if (
+      (result as { error?: unknown }).error ||
+      result.exceptionDetails ||
+      result.result?.subtype === "error"
+    )
       throw new Error("ChatGPT client operation failed");
     return result.result?.value as T;
   }
@@ -266,6 +294,66 @@ export class ChatGPTConnection {
     );
     return models.filter((m) => m.is_available);
   }
+  async projects() {
+    const cdp = await this.renderer();
+    return cdp.evaluate<{ id: string; name: string }[]>(`(async()=>{${rendererDiscovery}
+      const r=await resolveClient();const all=[];let cursor=null;const seen=new Set();
+      do{const page=await r.client.listProjects({limit:20,cursor,ownedOnly:false});all.push(...(${normalizeProjects.toString()})(page));const next=page.cursor||null;if(next&&seen.has(next))throw new Error('Repeated project cursor');if(next)seen.add(next);cursor=next;}while(cursor);
+      return all;
+    })()`);
+  }
+  async createProject(name: string) {
+    if (!name.trim() || name.length > 200)
+      throw new Error("Enter a project name of 1–200 characters");
+    const cdp = await this.renderer();
+    return cdp.evaluate<{ id: string; name: string }>(`(async()=>{${rendererDiscovery}
+      const r=await resolveClient();const response=await r.client.createProject(${JSON.stringify(name.trim())});
+      if(response.error||!response.resource)throw new Error('ChatGPT project creation failed');
+      const resource=response.resource;const project=resource.gizmo?.gizmo||resource.gizmo||resource;
+      const id=project.id;if(!id?.startsWith('g-p-'))throw new Error('Missing ChatGPT project identity');
+      return {id,name:project.display?.name||project.name||${JSON.stringify(name.trim())}};
+    })()`);
+  }
+  private async uploadImage(image: ChatGPTImage): Promise<UploadedImage> {
+    const cached = this.cache.uploads?.[image.id];
+    if (cached) return cached;
+    const bytes = await NodeFSP.readFile(image.path);
+    if (
+      !bytes.length ||
+      bytes.length > 20 * 1024 * 1024 ||
+      !/^image\/(png|jpeg|webp|gif)$/.test(image.mimeType)
+    )
+      throw new Error("ChatGPT images must be PNG, JPEG, WebP, or GIF up to 20 MiB");
+    const cdp = await this.renderer();
+    const file = { name: image.name, size: bytes.length, mimeType: image.mimeType };
+    const dimensions = await cdp.evaluate<{ width: number; height: number }>(
+      `new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve({width:image.naturalWidth,height:image.naturalHeight});image.onerror=()=>reject(new Error('Invalid image'));image.src=${JSON.stringify("data:" + image.mimeType + ";base64," + bytes.toString("base64"))};})`,
+    );
+    const grant = await cdp.evaluate<{
+      file_id: string;
+      upload_url: string;
+      upload_headers?: Record<string, string>;
+    }>(
+      `(async()=>{${rendererDiscovery}const r=await resolveClient();return r.client.createUpload(${JSON.stringify(file)});})()`,
+    );
+    if (!grant.file_id || !grant.upload_url)
+      throw new Error("ChatGPT did not provide an image upload destination");
+    const destination = imageUploadDestination(grant.upload_url, image.mimeType);
+    const response = await fetch(destination.url, {
+      method: "PUT",
+      body: bytes,
+      headers: { ...destination.headers, ...grant.upload_headers },
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (!response.ok) throw new Error(`ChatGPT image upload failed (${response.status})`);
+    await cdp.evaluate(
+      `(async()=>{${rendererDiscovery}const r=await resolveClient();await r.client.finishUpload(${JSON.stringify({ ...file, id: grant.file_id })});return true;})()`,
+    );
+    const uploaded = { ...file, ...dimensions, id: grant.file_id };
+    (this.cache.uploads ||= {})[image.id] = uploaded;
+    await this.persist();
+    return uploaded;
+  }
   async adoptConversation(conversationId: string) {
     if (this.cache.conversationId && this.cache.conversationId !== conversationId)
       throw new Error("Conversation identity is immutable");
@@ -284,7 +372,15 @@ export class ChatGPTConnection {
   onUpdate(callback: (update: ChatGPTUpdate) => void) {
     this.callback = callback;
   }
-  async send(requestId: string, text: string, model: string, cwd: string, effort?: string) {
+  async send(
+    requestId: string,
+    text: string,
+    model: string,
+    cwd: string,
+    effort?: string,
+    images: ChatGPTImage[] = [],
+    projectId?: string | null,
+  ) {
     let dispatch = this.cache.dispatches[requestId];
     if (dispatch?.state === "submitted") return;
     if (dispatch?.state === "dispatching")
@@ -294,20 +390,45 @@ export class ChatGPTConnection {
     await this.persist();
     const cdp = await this.renderer();
     const existing = this.cache.conversationId;
+    if (projectId && !/^g-p-[a-zA-Z0-9-]+$/.test(projectId))
+      throw new Error("Invalid ChatGPT project identity");
+    if (
+      this.cache.projectId !== undefined &&
+      projectId !== undefined &&
+      this.cache.projectId !== projectId
+    )
+      throw new Error(
+        "This conversation is bound to another ChatGPT project. Start a new thread to change it.",
+      );
+    if (!existing && this.cache.projectId === undefined) this.cache.projectId = projectId ?? null;
+    const uploaded = [];
+    for (const image of images) uploaded.push(await this.uploadImage(image));
     // A continuation reads its canonical parent once. No transcript or stream-status polling.
     let parent: string | undefined;
     if (existing) {
-      const snapshot = await cdp.evaluate<{ current_node: string }>(
-        `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();const raw=await r.client.get(${JSON.stringify(existing)});return raw.conversation||raw.data||raw;})()`,
+      const snapshot = await cdp.evaluate<{ current_node: string; gizmo_id?: string }>(
+        `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();const raw=await r.client.get(${JSON.stringify(existing)});const c=raw.conversation||raw.data||raw;return {current_node:c.current_node,gizmo_id:c.gizmo_id};})()`,
       );
       if (!snapshot.current_node) throw new Error("Conversation parent could not be reconciled");
       parent = snapshot.current_node;
+      const upstreamProject = snapshot.gizmo_id ?? null;
+      if (this.cache.projectId !== undefined && this.cache.projectId !== upstreamProject)
+        throw new Error("ChatGPT conversation project changed outside T3");
+      if (projectId !== undefined && projectId !== upstreamProject)
+        throw new Error("This conversation is bound to another ChatGPT project");
+      this.cache.projectId = upstreamProject;
     }
     const request = {
       action: "next",
       model,
       ...(existing ? { conversation_id: existing, parent_message_id: parent } : {}),
       ...(effort ? { thinking_effort: effort } : {}),
+      ...(this.cache.projectId
+        ? {
+            gizmo_id: this.cache.projectId,
+            conversation_mode: { kind: "gizmo_interaction", gizmo_id: this.cache.projectId },
+          }
+        : {}),
       supported_encodings: ["v1"],
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       timezone_offset_min: -new Date().getTimezoneOffset(),
@@ -316,12 +437,33 @@ export class ChatGPTConnection {
           id: dispatch.messageId,
           author: { role: "user" },
           content: {
-            content_type: "text",
-            parts: [executionPrompt(this.options.threadId, cwd, text)],
+            content_type: uploaded.length ? "multimodal_text" : "text",
+            parts: [
+              ...uploaded.map((image) => ({
+                content_type: "image_asset_pointer",
+                asset_pointer:
+                  (image.id.startsWith("file_") ? "sediment://" : "file-service://") + image.id,
+                width: image.width,
+                height: image.height,
+                size_bytes: image.size,
+              })),
+              executionPrompt(this.options.threadId, cwd, text),
+            ],
           },
           create_time: Date.now() / 1000,
           end_turn: null,
-          metadata: {},
+          metadata: uploaded.length
+            ? {
+                attachments: uploaded.map((image) => ({
+                  id: image.id,
+                  name: image.name,
+                  mimeType: image.mimeType,
+                  size: image.size,
+                  width: image.width,
+                  height: image.height,
+                })),
+              }
+            : {},
           recipient: "all",
           status: "finished_successfully",
           weight: 1,
@@ -338,9 +480,9 @@ export class ChatGPTConnection {
       const emit=(kind,value)=>{
         const v=value&&typeof value==='object'?value:{};const candidate=v.message||v.data||v;const m=candidate.message||candidate;
         state.conversationId=v.conversation_id||v.conversationId||candidate.conversation_id||candidate.conversationId||state.conversationId;
-        const text=Array.isArray(m.content?.parts)?m.content.parts.filter(p=>typeof p==='string').join('\\n'):(m.content?.text||'');
+        const normalized=(${normalizeStreamMessage.toString()})(value);
         if(kind==='complete'||kind==='error')state.active=false;
-        const update={kind,requestId:state.requestId,conversationId:state.conversationId,messageId:m.id,role:m.author?.role,channel:m.channel,recipient:m.recipient,text,status:m.status,endTurn:m.end_turn};
+        const update={kind,requestId:state.requestId,conversationId:state.conversationId,...normalized};
         state.lastUpdate=update;
         if(typeof window[state.binding]==='function')window[state.binding](JSON.stringify(update));
       };

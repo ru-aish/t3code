@@ -19,11 +19,13 @@ import {
 import type { ChatGPTUpdate, TerminalEvent } from "./connection.ts";
 
 const fakes = vi.hoisted(() => ({
+  failNextSend: false,
   connections: [] as Array<{
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
     sent: string[];
     stops: number;
+    controls: string[];
   }>,
 }));
 vi.mock("./connection.ts", () => ({
@@ -33,6 +35,7 @@ vi.mock("./connection.ts", () => ({
     callback?: (update: ChatGPTUpdate) => void;
     sent: string[] = [];
     stops = 0;
+    controls: string[] = [];
     epoch = 0;
     pending: Array<TerminalEvent> = [];
     wake?: () => void;
@@ -46,6 +49,7 @@ vi.mock("./connection.ts", () => ({
       this.callback = callback;
     }
     async control(action: string) {
+      this.controls.push(action);
       if (action === "activate") this.epoch++;
       if (action === "claim") return { valid: true };
       return {
@@ -61,6 +65,10 @@ vi.mock("./connection.ts", () => ({
     }
     async send(id: string) {
       this.sent.push(id);
+      if (fakes.failNextSend) {
+        fakes.failNextSend = false;
+        throw new Error("Image upload failed");
+      }
     }
     async stop() {
       this.stops++;
@@ -181,6 +189,68 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("pauses recovery when a submission fails before the generation starts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        fakes.failNextSend = true;
+        const result = yield* Effect.result(fixture);
+        expect(result._tag).toBe("Failure");
+        expect(fakes.connections.at(-1)?.controls).toEqual(["register", "activate", "pause"]);
+      }),
+    ),
+  );
+
+  it.live(
+    "keeps the whole canonical answer once when GenUI replaces its draft and emits a hidden ending",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId } = yield* fixture;
+          yield* Queue.take(events);
+          const base = {
+            kind: "update" as const,
+            requestId,
+            conversationId: null,
+            role: "assistant",
+            channel: "final",
+            recipient: "all",
+          };
+          fake.callback?.({
+            ...base,
+            messageId: "draft",
+            text: "First paragraph",
+            status: "in_progress",
+          });
+          const full =
+            "First paragraph\n\n## Findings\nAll the evidence.\n\n## Conclusion\nComplete.";
+          fake.callback?.({
+            ...base,
+            messageId: "canonical",
+            text: full,
+            status: "finished_successfully",
+          });
+          fake.callback?.({
+            ...base,
+            messageId: "hidden-ending",
+            text: "## Conclusion\nComplete.",
+            status: "finished_successfully",
+            hidden: true,
+          });
+          fake.publish(terminal("state", "done"));
+          fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          const recorded = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          const messages = recorded.filter((event) => event.type === "message.updated");
+          expect(new Set(messages.map((event) => event.message.id)).size).toBe(1);
+          expect(messages.at(-1)?.message.text).toBe(full);
+          expect(
+            recorded.filter((event) => event.type === "turn_item.updated").at(-1)?.turnItem.status,
+          ).toBe("completed");
+        }),
+      ),
+  );
   it.live("keeps the run active after stream completion until Terminal MCP marks done", () =>
     Effect.scoped(
       Effect.gen(function* () {

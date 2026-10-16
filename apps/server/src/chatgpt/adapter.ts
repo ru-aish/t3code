@@ -7,6 +7,7 @@ import {
   ProviderTurnId,
   TurnItemId,
   type ThreadId,
+  type ChatAttachment,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderThread,
@@ -22,6 +23,7 @@ import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/se
 import {
   ChatGPTConnection,
   type ChatGPTUpdate,
+  type ChatGPTImage,
   type TerminalBinding,
   type TerminalEvent,
 } from "./connection.ts";
@@ -138,6 +140,7 @@ export const makeChatGPTAdapter = (
     readonly token: string;
     readonly environmentId: string;
     readonly cacheDir: string;
+    readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
     readonly linkPullRequest?: (
       threadId: ThreadId,
       url: string,
@@ -287,7 +290,7 @@ export const makeChatGPTAdapter = (
             // Transport completion is advisory. Only Terminal MCP may complete the T3 run.
             return;
           }
-          if (update.kind === "error") return;
+          if (update.kind === "error" || update.hidden) return;
           const outputTurn = update.requestId ? outputTurns.get(update.requestId) : undefined;
           if (
             !outputTurn ||
@@ -298,7 +301,9 @@ export const makeChatGPTAdapter = (
           )
             return;
           const timestamp = yield* DateTime.now;
-          const key = `${outputTurn.generation}:${update.messageId}`;
+          // GenUI can replace an in-progress final message's native ID with a
+          // canonical full-answer ID. Keep one final answer per submission.
+          const key = `${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
           const id = MessageId.make(`chatgpt:${input.threadId}:${key}`);
           const existing = messages.get(key);
           const streaming = update.status !== "finished_successfully";
@@ -432,6 +437,9 @@ export const makeChatGPTAdapter = (
                       control.payload.prompt ?? "continue",
                       active!.input.modelSelection.model,
                       cwd,
+                      active!.input.modelSelection.options?.find(
+                        (option) => option.id === "reasoningEffort",
+                      )?.value as string | undefined,
                     ),
                   );
                 }
@@ -502,11 +510,21 @@ export const makeChatGPTAdapter = (
               providerThreadId: request.providerThread.id,
               runId: request.runId,
             });
-          if (request.message.attachments.length)
-            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-              driver: CHATGPT_DRIVER,
-              detail: "ChatGPT attachments are not supported yet",
+          const images: ChatGPTImage[] = [];
+          for (const attachment of request.message.attachments) {
+            const path = transport.resolveAttachmentPath?.(attachment);
+            if (attachment.type !== "image" || !path)
+              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: CHATGPT_DRIVER,
+                detail: "ChatGPT requires an available image attachment",
+              });
+            images.push({
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              path,
             });
+          }
           thread = request.providerThread;
           binding = yield* attempt(() =>
             connection.control<TerminalBinding>("activate", {
@@ -545,6 +563,24 @@ export const makeChatGPTAdapter = (
               request.message.text,
               request.modelSelection.model,
               cwd,
+              request.modelSelection.options?.find((option) => option.id === "reasoningEffort")
+                ?.value as string | undefined,
+              images,
+              request.modelSelection.options?.find((option) => option.id === "chatgptProjectId")
+                ?.value === "general"
+                ? null
+                : (request.modelSelection.options?.find(
+                    (option) => option.id === "chatgptProjectId",
+                  )?.value as string | undefined),
+            ),
+          ).pipe(
+            Effect.tapError(() =>
+              Effect.gen(function* () {
+                yield* attempt(() =>
+                  connection.control("pause", { requestId: `failed-${request.message.messageId}` }),
+                ).pipe(Effect.ignore);
+                active = null;
+              }),
             ),
           );
         });

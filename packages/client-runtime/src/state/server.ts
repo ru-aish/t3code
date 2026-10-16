@@ -1150,6 +1150,22 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input]),
       },
     }),
+    listProviderCloudProjects: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:cloud-projects:list",
+      tag: WS_METHODS.serverListProviderCloudProjects,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}`,
+      },
+    }),
+    createProviderCloudProject: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:cloud-projects:create",
+      tag: WS_METHODS.serverCreateProviderCloudProject,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.instanceId}:${input.name}`,
+      },
+    }),
     refreshProviders: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-providers",
       tag: WS_METHODS.serverRefreshProviders,

@@ -275,6 +275,7 @@ import {
 } from "~/state/pullRequests";
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
+import { ChatGPTProjectPicker } from "./ChatGPTProjectPicker";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import {
@@ -1940,6 +1941,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             environmentId,
           })
       : null);
+  const setChatGPTOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
@@ -2282,7 +2284,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const selectedPromptEffort = composerProviderState.promptEffort;
-  const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
+  const chatgptProjectOption =
+    selectedProvider === "chatgpt"
+      ? (composerModelOptions?.[selectedInstanceId]?.find(
+          (option) => option.id === "chatgptProjectId",
+        ) ??
+        (activeThreadModelSelection?.instanceId === selectedInstanceId
+          ? activeThreadModelSelection.options?.find((option) => option.id === "chatgptProjectId")
+          : undefined))
+      : undefined;
+  const selectedModelOptionsForDispatch = useMemo(
+    () =>
+      chatgptProjectOption
+        ? [...(composerProviderState.modelOptionsForDispatch ?? []), chatgptProjectOption]
+        : composerProviderState.modelOptionsForDispatch,
+    [chatgptProjectOption, composerProviderState.modelOptionsForDispatch],
+  );
   const { enabled: planModeUiEnabled, interactionMode } = resolveComposerInteractionMode({
     planModeEnabled: settings.planModeEnabled,
     provider: selectedProviderStatus,
@@ -5203,10 +5220,51 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onInstanceModelChange={(instanceId, model) => {
           setMultipleModelSelections(null);
           onProviderModelSelect(instanceId, model);
+          if (chatgptProjectOption && instanceId === selectedInstanceId) {
+            const options =
+              getComposerDraft(composerDraftTarget)?.modelSelectionByProvider[instanceId]?.options;
+            setChatGPTOptions(
+              composerDraftTarget,
+              selectedProvider,
+              [
+                ...(options ?? []).filter((option) => option.id !== "chatgptProjectId"),
+                chatgptProjectOption,
+              ],
+              { instanceId, model, persistSticky: false },
+            );
+          }
         }}
         onOpenProviderSetup={onOpenProviderSetup}
       />
 
+      {selectedProvider === "chatgpt" ? (
+        <ChatGPTProjectPicker
+          key={`${environmentId}:${selectedInstanceId}`}
+          environmentId={environmentId}
+          instanceId={selectedInstanceId}
+          projectId={
+            typeof chatgptProjectOption?.value === "string" &&
+            chatgptProjectOption.value !== "general"
+              ? chatgptProjectOption.value
+              : null
+          }
+          locked={threadShellHasStarted(props.activeThreadShell)}
+          disabled={isSendBusy}
+          onChange={(projectId) =>
+            setChatGPTOptions(
+              composerDraftTarget,
+              selectedProvider,
+              [
+                ...(composerModelOptions?.[selectedInstanceId] ?? []).filter(
+                  (option) => option.id !== "chatgptProjectId",
+                ),
+                { id: "chatgptProjectId", value: projectId ?? "general" },
+              ],
+              { instanceId: selectedInstanceId, model: selectedModel, persistSticky: false },
+            )
+          }
+        />
+      ) : null}
       <>
         {restingBlockDefs.map((def, index) => {
           const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
@@ -6192,7 +6250,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 selection.instanceId === selectedModelSelection.instanceId &&
                 selection.model === selectedModelSelection.model
                   ? selectedModelSelection
-                  : selection,
+                  : selectedProvider === "chatgpt" &&
+                      selection.instanceId === selectedInstanceId &&
+                      chatgptProjectOption
+                    ? {
+                        ...selection,
+                        options: [
+                          ...(selection.options ?? []).filter(
+                            (option) => option.id !== "chatgptProjectId",
+                          ),
+                          chatgptProjectOption,
+                        ],
+                      }
+                    : selection,
               )
             : null,
         providerAvailable:

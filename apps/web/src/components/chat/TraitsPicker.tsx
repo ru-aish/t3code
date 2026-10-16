@@ -306,13 +306,24 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
       if (!threadTarget) {
         return;
       }
+      const project =
+        provider === "chatgpt"
+          ? modelOptions?.find((option) => option.id === "chatgptProjectId")
+          : undefined;
+      const optionsWithProject = project ? [...(nextOptions ?? []), project] : nextOptions;
       setProviderModelOptions(threadTarget, provider, nextOptions, {
         ...(instanceId ? { instanceId } : {}),
         model,
         persistSticky: true,
       });
+      if (project)
+        setProviderModelOptions(threadTarget, provider, optionsWithProject, {
+          ...(instanceId ? { instanceId } : {}),
+          model,
+          persistSticky: false,
+        });
     },
-    [instanceId, model, persistence, provider, setProviderModelOptions],
+    [instanceId, model, modelOptions, persistence, provider, setProviderModelOptions],
   );
   const {
     descriptors,

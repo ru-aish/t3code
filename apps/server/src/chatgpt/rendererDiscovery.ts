@@ -1,7 +1,7 @@
 // Renderer discovery extracted from the tested Terminal MCP chat client.
 // Keep this protocol boundary versioned: it targets the consumer ChatGPT app.
 export const rendererDiscovery = String.raw`
-const clientKey = Symbol.for('terminal-mcp.chat-runtime.client.v4');
+const clientKey = Symbol.for('terminal-mcp.chat-runtime.client.v5');
 const streamsKey = Symbol.for('terminal-mcp.chat-runtime.streams.v4');
 const handlesKey = Symbol.for('terminal-mcp.chat-runtime.handles.v4');
 window[streamsKey] ||= new Map();
@@ -136,6 +136,17 @@ const modernClient = (requestClient, completionClient) => ({
       query:{limit,owned_only:ownedOnly,...(cursor?{cursor}:{})},
     },
   }),
+  createProject: (name) => requestClient.safePost('/projects', {requestBody:{name,instructions:'',emoji:null,theme:null,memory_scope:'global'}}),
+  createUpload: (file) => requestClient.safePost('/files', {requestBody:{file_name:file.name,file_size:file.size,mime_type:file.mimeType,use_case:'multimodal',entry_surface:'chat_composer',store_in_library:false,reset_rate_limits:false,timezone_offset_min:new Date().getTimezoneOffset()}}),
+  finishUpload: (file) => new Promise((resolve,reject)=>{
+    let ready=false,completed=false;
+    requestClient.streamPost('/files/process_upload_stream',{
+      body:JSON.stringify({file_id:file.id,file_name:file.name,mime_type:file.mimeType,use_case:'multimodal',entry_surface:'chat_composer',index_for_retrieval:false,metadata:{store_in_library:false}}),format:'ndjson',
+      onEvent:event=>{const data=event.data||{};const name=data.event||event.event||'';if(name==='file.processing.file_ready')ready=true;if(name==='file.processing.completed')completed=true;if(/\.(error|failed|cancelled|unknown)$/.test(name))reject(new Error('ChatGPT image processing failed: '+name));},
+      onComplete:()=>ready&&completed?resolve(true):reject(new Error('ChatGPT image processing did not complete')),
+      onError:()=>reject(new Error('ChatGPT image processing failed')),
+    });
+  }),
   startCompletionStream: (options) => completionClient.startCompletionStream(options),
   stopCompletion: (options) => completionClient.stopCompletion(options),
   cancelStream: (requestId) => completionClient.cancelStream(requestId),
@@ -226,7 +237,7 @@ const resolveClient = async () => {
 };
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const collectModels = (raw) => {
-  const queue = [raw];
+  const queue = Array.isArray(raw?.models) ? [...raw.models] : [raw];
   const seen = new WeakSet();
   const bySlug = new Map();
   const defaultSlug = String(raw && (raw.default_model_slug || raw.defaultModelSlug || raw.default_model) || '');
@@ -249,7 +260,7 @@ const collectModels = (raw) => {
       const available = !(value.disabled === true || value.enabled === false || value.available === false || value.is_available === false);
       let entry = bySlug.get(slug);
       if (!entry) {
-        entry = {slug, is_default:false, is_available:false, efforts:new Set()};
+        entry = {slug, name:value.title||value.name||slug, is_default:false, is_available:false, efforts:new Set()};
         bySlug.set(slug, entry);
       }
       entry.is_default ||= !!(value.is_default || value.isDefault || value.default || slug === defaultSlug);
@@ -267,6 +278,7 @@ const collectModels = (raw) => {
     const thinkingEfforts = [...entry.efforts];
     return {
       slug:entry.slug,
+      name:entry.name + (entry.slug.endsWith('-wm') ? ' (Work)' : entry.slug.endsWith('-thinking') ? ' Thinking' : entry.slug.endsWith('-instant') ? ' Instant' : entry.slug.endsWith('-t-mini') ? ' Thinking Mini' : entry.slug.endsWith('-mini') && !/mini/i.test(entry.name) ? ' Mini' : ''),
       is_default:entry.is_default,
       is_available:entry.is_available,
       thinking_efforts:thinkingEfforts,

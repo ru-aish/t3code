@@ -25,8 +25,8 @@ jobs:
           run-install: false
       - run: vp install --frozen-lockfile --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
       - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
-      - run: vp test run apps/server/src/chatgpt/connection.test.ts apps/server/src/chatgpt/adapter.test.ts
-      - run: vp run --filter t3 typecheck
+      - run: vp test run apps/server/src/chatgpt/connection.test.ts apps/server/src/chatgpt/adapter.test.ts apps/server/src/chatgpt/protocol.test.ts apps/web/src/components/chat/ModelPickerContent.test.ts
+      - run: vp run --filter t3 --filter @t3tools/web typecheck
       - run: vp run build:desktop
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

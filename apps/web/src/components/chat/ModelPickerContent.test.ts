@@ -33,6 +33,31 @@ function entry(status: ServerProvider["status"], driver = "opencode") {
 }
 
 describe("shouldIncludeModelPickerOption", () => {
+  it("keeps ChatGPT's cached models selectable while its renderer reconnects", () => {
+    const option = {
+      slug: "gpt-6-thinking",
+      name: "GPT-6 Thinking",
+      isCustom: false,
+      capabilities: null,
+    };
+    const cached = { ...entry("warning", "chatgpt"), models: [option] };
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: cached,
+        option,
+        activeInstanceId: cached.instanceId,
+        activeModel: option.slug,
+      }),
+    ).toBe(true);
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: { ...cached, enabled: false },
+        option,
+        activeInstanceId: cached.instanceId,
+        activeModel: option.slug,
+      }),
+    ).toBe(false);
+  });
   it.each(["ready", "error"] as const)(
     "never offers the internal Antigravity default marker as a model when %s",
     (status) => {

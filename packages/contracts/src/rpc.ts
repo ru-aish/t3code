@@ -465,6 +465,8 @@ export const WS_METHODS = {
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
+  serverListProviderCloudProjects: "server.listProviderCloudProjects",
+  serverCreateProviderCloudProject: "server.createProviderCloudProject",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
@@ -595,6 +597,27 @@ const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   success: ServerConfig,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError, EnvironmentAuthorizationError]),
 });
+
+const ProviderCloudProject = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+});
+const WsServerListProviderCloudProjectsRpc = Rpc.make(WS_METHODS.serverListProviderCloudProjects, {
+  payload: Schema.Struct({ instanceId: ProviderInstanceId }),
+  success: Schema.Struct({ projects: Schema.Array(ProviderCloudProject) }),
+  error: Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]),
+});
+const WsServerCreateProviderCloudProjectRpc = Rpc.make(
+  WS_METHODS.serverCreateProviderCloudProject,
+  {
+    payload: Schema.Struct({
+      instanceId: ProviderInstanceId,
+      name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+    }),
+    success: ProviderCloudProject,
+    error: Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]),
+  },
+);
 
 const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
@@ -1853,6 +1876,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
+  WsServerListProviderCloudProjectsRpc,
+  WsServerCreateProviderCloudProjectRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,
   WsProviderAuthStartRpc,

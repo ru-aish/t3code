@@ -2159,6 +2159,49 @@ const layerWsRpc = (
               }),
             ),
           ),
+        [WS_METHODS.serverListProviderCloudProjects]: (input) =>
+          Effect.gen(function* () {
+            const instance = yield* providerInstances.getInstance(input.instanceId);
+            if (!instance?.enabled || !instance.cloudProjects)
+              return yield* new ProviderSetupError({
+                instanceId: input.instanceId,
+                operation: "list-cloud-projects",
+                detail: "This provider does not expose cloud projects",
+              });
+            const projects = yield* instance.cloudProjects.list().pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderSetupError({
+                    instanceId: input.instanceId,
+                    operation: "list-cloud-projects",
+                    detail: cause.detail,
+                    cause,
+                  }),
+              ),
+            );
+            return { projects };
+          }),
+        [WS_METHODS.serverCreateProviderCloudProject]: (input) =>
+          Effect.gen(function* () {
+            const instance = yield* providerInstances.getInstance(input.instanceId);
+            if (!instance?.enabled || !instance.cloudProjects)
+              return yield* new ProviderSetupError({
+                instanceId: input.instanceId,
+                operation: "create-cloud-project",
+                detail: "This provider does not expose cloud projects",
+              });
+            return yield* instance.cloudProjects.create(input.name).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderSetupError({
+                    instanceId: input.instanceId,
+                    operation: "create-cloud-project",
+                    detail: cause.detail,
+                    cause,
+                  }),
+              ),
+            );
+          }),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           Effect.gen(function* () {
             if (input.refreshModels) {

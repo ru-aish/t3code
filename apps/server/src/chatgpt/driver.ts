@@ -66,6 +66,8 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
         models: Schema.Array(
           Schema.Struct({
             slug: Schema.String,
+            name: Schema.optional(Schema.String),
+            thinking_efforts: Schema.optional(Schema.Array(Schema.String)),
             is_default: Schema.Boolean,
             is_available: Schema.Boolean,
           }),
@@ -92,10 +94,25 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
         checkedAt,
         models: models.map((m) => ({
           slug: m.slug,
-          name: m.slug,
+          name: m.name ?? m.slug,
           isCustom: false,
           isDefault: m.is_default,
-          capabilities: null,
+          capabilities: {
+            optionDescriptors: (m.thinking_efforts ?? []).length
+              ? [
+                  {
+                    id: "reasoningEffort",
+                    label: "Reasoning",
+                    type: "select",
+                    options: m.thinking_efforts!.map((id) => ({
+                      id,
+                      label: id[0]!.toUpperCase() + id.slice(1),
+                    })),
+                    currentValue: m.thinking_efforts![0],
+                  },
+                ]
+              : [],
+          },
         })),
         slashCommands: [],
         skills: [],
@@ -108,7 +125,8 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           : "Enable to connect ChatGPT and Terminal MCP.",
         continuation: { groupKey: `chatgpt:${input.instanceId}` },
       });
-      let current = snapshotValue(false);
+      let current = snapshotValue(models.length > 0);
+      let forceModels = models.some((model) => model.thinking_efforts === undefined);
       const refresh = Effect.gen(function* () {
         if (!input.enabled) return current;
         const result = yield* Effect.tryPromise({
@@ -123,7 +141,10 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
         }).pipe(Effect.result);
         const timestamp = yield* Clock.currentTimeMillis;
         checkedAt = DateTime.formatIso(yield* DateTime.now);
-        if (result._tag === "Success" && (!models.length || timestamp - fetchedAt > 86_400_000)) {
+        if (
+          result._tag === "Success" &&
+          (forceModels || !models.length || timestamp - fetchedAt > 86_400_000)
+        ) {
           const loaded = yield* Effect.tryPromise({
             try: () => control.models(),
             catch: (cause) =>
@@ -136,6 +157,7 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           }).pipe(Effect.result);
           if (loaded._tag === "Success") {
             models = loaded.success;
+            forceModels = false;
             fetchedAt = timestamp;
             yield* fs.makeDirectory(cacheDir, { recursive: true });
             const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(ModelCache))({
@@ -166,6 +188,34 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           driverKind: CHATGPT_DRIVER,
           instanceId: input.instanceId,
         }),
+        cloudProjects: {
+          list: () =>
+            Effect.tryPromise({
+              try: () => control.projects(),
+              catch: (cause) =>
+                new ProviderDriverError({
+                  driver: CHATGPT_DRIVER,
+                  instanceId: input.instanceId,
+                  detail: "Could not load ChatGPT projects",
+                  cause,
+                }),
+            }),
+          create: (name: string) =>
+            Effect.tryPromise({
+              try: () => control.createProject(name),
+              catch: (cause) =>
+                new ProviderDriverError({
+                  driver: CHATGPT_DRIVER,
+                  instanceId: input.instanceId,
+                  detail: "Could not create ChatGPT project",
+                  cause,
+                }),
+            }),
+        },
+        refreshModels: () =>
+          Effect.sync(() => {
+            forceModels = true;
+          }).pipe(Effect.andThen(refresh), Effect.asVoid),
         snapshot: {
           getSnapshot: Effect.sync(() => current),
           refresh,
@@ -178,6 +228,7 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           token,
           environmentId,
           cacheDir,
+          resolveAttachmentPath: host.resolveAttachmentPath,
           linkPullRequest: actions.linkPullRequest,
         }),
         textGeneration: {

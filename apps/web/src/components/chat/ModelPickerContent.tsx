@@ -97,6 +97,9 @@ export function shouldIncludeModelPickerOption(input: {
     return false;
   }
   if (isProviderInstancePickerReady(input.entry)) return true;
+  // A reconnect must not erase the authenticated ChatGPT catalog from its picker.
+  if (input.entry.driverKind === "chatgpt" && input.entry.enabled && input.entry.models.length > 0)
+    return true;
   return (
     input.entry.enabled &&
     (input.entry.driverKind === "opencode" || input.entry.driverKind === "antigravity") &&

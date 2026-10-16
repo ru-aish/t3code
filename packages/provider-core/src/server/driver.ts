@@ -58,6 +58,15 @@ export interface ProviderInstance {
   >;
   readonly orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly textGeneration: ProviderTextGeneration;
+  readonly cloudProjects?: {
+    readonly list: () => Effect.Effect<
+      ReadonlyArray<{ id: string; name: string }>,
+      ProviderDriverError
+    >;
+    readonly create: (
+      name: string,
+    ) => Effect.Effect<{ id: string; name: string }, ProviderDriverError>;
+  };
   readonly auth?: ProviderAuthController;
   readonly acpSessionManagement?: {
     readonly listSessions: (input: {
