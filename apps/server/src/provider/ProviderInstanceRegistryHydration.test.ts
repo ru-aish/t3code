@@ -33,6 +33,37 @@ describe("deriveProviderInstanceConfigMap", () => {
     expect(isUnconfiguredDefaultInstanceEnabled(chatgptId)).toBe(true);
   });
 
+  it("retains all existing built-in providers and their saved enablement when adding ChatGPT", () => {
+    const enabled = ["opencode", "antigravity"] as const;
+    const merged = deriveProviderInstanceConfigMap(
+      settingsWith({
+        providerInstances: {
+          opencode: { driver: ProviderDriverKind.make("opencode"), enabled: true },
+          antigravity: { driver: ProviderDriverKind.make("antigravity"), enabled: true },
+        },
+      }),
+    );
+    for (const driver of [
+      "codex",
+      "chatgpt",
+      "claudeAgent",
+      "cursor",
+      "grok",
+      "opencode",
+      "antigravity",
+      "pi",
+      "muse",
+    ]) {
+      expect(merged[ProviderInstanceId.make(driver)]?.driver).toBe(ProviderDriverKind.make(driver));
+    }
+    // ACP Registry is an optional adapter with no automatic default instance.
+    for (const driver of enabled) {
+      const saved = merged[ProviderInstanceId.make(driver)]!;
+      expect(saved.enabled).toBe(true);
+      expect(resolveProviderInstanceEnabled(saved)).toBe(true);
+    }
+  });
+
   it("preserves an explicit ChatGPT opt-out", () => {
     const chatgptId = ProviderInstanceId.make("chatgpt");
     const merged = deriveProviderInstanceConfigMap(
