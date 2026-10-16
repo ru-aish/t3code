@@ -41,8 +41,14 @@ describe("deriveProviderInstanceConfigMap", () => {
     const merged = deriveProviderInstanceConfigMap(
       settingsWith({
         providerInstances: {
-          opencode: { driver: ProviderDriverKind.make("opencode"), enabled: true },
-          antigravity: { driver: ProviderDriverKind.make("antigravity"), enabled: true },
+          [ProviderInstanceId.make("opencode")]: {
+            driver: ProviderDriverKind.make("opencode"),
+            enabled: true,
+          },
+          [ProviderInstanceId.make("antigravity")]: {
+            driver: ProviderDriverKind.make("antigravity"),
+            enabled: true,
+          },
         },
       }),
     );
