@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/server/adapterDriver";
+import { mergeFinalAnswer } from "./protocol.ts";
 import {
   ChatGPTConnection,
   type ChatGPTUpdate,
@@ -129,10 +130,7 @@ type ActiveTurn = {
   requestId: string;
 };
 
-type Update =
-  | { kind: "chat"; update: ChatGPTUpdate }
-  | { kind: "terminal"; event: TerminalEvent }
-  | { kind: "drained"; epoch: number; requestId: string };
+type Update = { kind: "chat"; update: ChatGPTUpdate } | { kind: "terminal"; event: TerminalEvent };
 
 export const makeChatGPTAdapter = (
   options: ProviderAdapterDriverCreateInput<ChatGPTSettings>,
@@ -230,6 +228,7 @@ export const makeChatGPTAdapter = (
         let generation = 0;
         let nextOrdinal = 0;
         const itemOrdinals = new Map<string, number>();
+        const nativeMessageIds = new Map<string, string>();
         connection.onUpdate((update) => {
           Queue.offerUnsafe(incoming, { kind: "chat", update });
         });
@@ -245,6 +244,37 @@ export const makeChatGPTAdapter = (
           const completed = active;
           active = null;
           const timestamp = yield* DateTime.now;
+          const finalKey = String(completed.generation) + ":final";
+          const finalMessage = messages.get(finalKey);
+          if (finalMessage?.streaming) {
+            const message = { ...finalMessage, streaming: false, updatedAt: timestamp };
+            messages.set(finalKey, message);
+            yield* emit({ type: "message.updated", driver: CHATGPT_DRIVER, message });
+            yield* emit({
+              type: "turn_item.updated",
+              driver: CHATGPT_DRIVER,
+              turnItem: {
+                id: TurnItemId.make("chatgpt:" + input.threadId + ":" + finalKey),
+                threadId: input.threadId,
+                runId: completed.input.runId,
+                nodeId: completed.input.rootNodeId,
+                providerThreadId: thread.id,
+                providerTurnId: completed.turn.id,
+                nativeItemRef: ref(nativeMessageIds.get(finalKey) ?? "final"),
+                parentItemId: null,
+                ordinal: itemOrdinals.get(finalKey)!,
+                status: "completed",
+                title: null,
+                startedAt: message.createdAt,
+                completedAt: timestamp,
+                updatedAt: timestamp,
+                type: "assistant_message",
+                messageId: message.id,
+                text: message.text,
+                streaming: false,
+              },
+            });
+          }
           yield* emit({
             type: "provider_turn.updated",
             driver: CHATGPT_DRIVER,
@@ -290,7 +320,11 @@ export const makeChatGPTAdapter = (
             // Transport completion is advisory. Only Terminal MCP may complete the T3 run.
             return;
           }
-          if (update.kind === "error" || update.hidden) return;
+          const isFinalAnswer =
+            update.role === "assistant" &&
+            (!update.channel || update.channel === "final") &&
+            (!update.recipient || update.recipient === "all");
+          if (update.kind === "error" || (update.hidden && !isFinalAnswer)) return;
           const outputTurn = update.requestId ? outputTurns.get(update.requestId) : undefined;
           if (
             !outputTurn ||
@@ -306,15 +340,16 @@ export const makeChatGPTAdapter = (
           const key = `${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
           const id = MessageId.make(`chatgpt:${input.threadId}:${key}`);
           const existing = messages.get(key);
+          const text = isFinalAnswer ? mergeFinalAnswer(existing?.text, update.text) : update.text;
           const streaming = update.status !== "finished_successfully";
-          if (existing?.text === update.text && existing.streaming === streaming) return;
+          if (existing?.text === text && existing.streaming === streaming) return;
           const message: OrchestrationV2ConversationMessage = {
             id,
             threadId: input.threadId,
             runId: outputTurn.input.runId,
             nodeId: outputTurn.input.rootNodeId,
             role: "assistant",
-            text: update.text,
+            text,
             attachments: [],
             streaming,
             createdBy: "agent",
@@ -323,6 +358,7 @@ export const makeChatGPTAdapter = (
             updatedAt: timestamp,
           };
           messages.set(key, message);
+          nativeMessageIds.set(key, update.messageId);
           const ordinal = itemOrdinals.get(key) ?? ++nextOrdinal;
           itemOrdinals.set(key, ordinal);
 
@@ -357,7 +393,7 @@ export const makeChatGPTAdapter = (
                 ...base,
                 type: "assistant_message",
                 messageId: id,
-                text: update.text,
+                text,
                 streaming,
               },
             });
@@ -387,15 +423,6 @@ export const makeChatGPTAdapter = (
                 yield* acceptUpdate(event.update);
                 return;
               }
-              if (event.kind === "drained") {
-                if (
-                  active?.requestId === event.requestId &&
-                  binding.epoch === event.epoch &&
-                  binding.state === "done"
-                )
-                  yield* finish("completed");
-                return;
-              }
               const control = event.event;
               if (control.epoch !== binding.epoch) {
                 yield* attempt(() => connection.acknowledge(control));
@@ -410,17 +437,6 @@ export const makeChatGPTAdapter = (
               } else if (control.kind === "state" && control.payload.state === "done") {
                 binding = { ...binding, state: "done" };
                 if (streamComplete) yield* finish("completed");
-                else if (active)
-                  yield* Effect.sleep("5 seconds").pipe(
-                    Effect.andThen(
-                      Queue.offer(incoming, {
-                        kind: "drained",
-                        epoch: binding.epoch,
-                        requestId: active.requestId,
-                      }),
-                    ),
-                    Effect.forkScoped,
-                  );
               } else if (control.kind === "continue" && active) {
                 const claim = yield* attempt(() =>
                   connection.control<{ valid: boolean }>("claim", { eventId: control.event_id }),

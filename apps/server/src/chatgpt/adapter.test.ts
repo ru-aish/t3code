@@ -201,6 +201,72 @@ describe("ChatGPT task authority", () => {
   );
 
   it.live(
+    "renders previously hidden final-answer sections but not hidden tool or reasoning output",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId } = yield* fixture;
+          yield* Queue.take(events);
+          const base = {
+            kind: "update" as const,
+            requestId,
+            conversationId: null,
+            role: "assistant",
+            channel: "final",
+            recipient: "all",
+          };
+          fake.callback?.({
+            ...base,
+            messageId: "draft-one",
+            text: "Intro\n\n## Findings\nEvidence.",
+            status: "in_progress",
+          });
+          fake.callback?.({
+            ...base,
+            messageId: "canonical-one",
+            text: "Intro\n\n## Findings\nEvidence.",
+            status: "finished_successfully",
+            hidden: true,
+          });
+          fake.callback?.({
+            ...base,
+            messageId: "final-second-section",
+            text: "## Download\nThe verified AppImage.",
+            status: "finished_successfully",
+            hidden: true,
+          });
+          fake.callback?.({
+            ...base,
+            channel: "analysis",
+            messageId: "private-reasoning",
+            text: "Hidden analysis must never appear",
+            hidden: true,
+          });
+          fake.publish(terminal("state", "done"));
+          fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          const recorded = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          const messages = recorded.filter((event) => event.type === "message.updated");
+          expect(new Set(messages.map((event) => event.message.id)).size).toBe(1);
+          expect(messages.at(-1)?.message.text).toBe(
+            "Intro\n\n## Findings\nEvidence.\n\n## Download\nThe verified AppImage.",
+          );
+          expect(messages.at(-1)?.message.streaming).toBe(false);
+          expect(
+            recorded.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "reasoning" &&
+                event.turnItem.text.includes("Hidden analysis"),
+            ),
+          ).toBe(false);
+        }),
+      ),
+  );
+
+  it.live(
     "keeps the whole canonical answer once when GenUI replaces its draft and emits a hidden ending",
     () =>
       Effect.scoped(
@@ -251,6 +317,65 @@ describe("ChatGPT task authority", () => {
         }),
       ),
   );
+  it.live("finishes an incomplete final message only after both stream and task are done", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "streaming-final",
+          text: "Incomplete final text",
+          status: "in_progress",
+        });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const messages = recorded.filter((event) => event.type === "message.updated");
+        expect(messages.at(-1)?.message.text).toBe("Incomplete final text");
+        expect(messages.at(-1)?.message.streaming).toBe(false);
+        const items = recorded.filter(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+        );
+        const lastItem = items.at(-1);
+        if (
+          lastItem?.type !== "turn_item.updated" ||
+          lastItem.turnItem.type !== "assistant_message"
+        )
+          throw new Error("Missing final assistant turn item");
+        expect(lastItem.turnItem.status).toBe("completed");
+        expect(lastItem.turnItem.streaming).toBe(false);
+      }),
+    ),
+  );
+
+  it.live("does not cut off an unfinished stream five seconds after task completion", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        fake.publish(terminal("state", "done"));
+        yield* Effect.sleep("5.2 seconds");
+        expect(yield* Queue.size(events)).toBe(0);
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const terminalEvents = yield* Stream.fromQueue(events).pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        expect(terminalEvents[0]?.status).toBe("completed");
+      }),
+    ),
+  );
+
   it.live("keeps the run active after stream completion until Terminal MCP marks done", () =>
     Effect.scoped(
       Effect.gen(function* () {

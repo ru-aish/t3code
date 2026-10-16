@@ -1,7 +1,23 @@
 import { describe, expect, it } from "@effect/vitest";
-import { imageUploadDestination, normalizeProjects, normalizeStreamMessage } from "./protocol.ts";
+import {
+  imageUploadDestination,
+  mergeFinalAnswer,
+  normalizeProjects,
+  normalizeStreamMessage,
+} from "./protocol.ts";
 
 describe("ChatGPT protocol", () => {
+  it("keeps the complete final answer when hidden stream copies overlap", () => {
+    const draft = "Introduction\n\n## Findings\nPart one.";
+    const expanded = draft + "\n\n## Root cause\nFixed.";
+    expect(mergeFinalAnswer(undefined, draft)).toBe(draft);
+    expect(mergeFinalAnswer(draft, expanded)).toBe(expanded);
+    expect(mergeFinalAnswer(expanded, "## Root cause\nFixed.")).toBe(expanded);
+    expect(mergeFinalAnswer(expanded, "## Download\nNew AppImage.")).toBe(
+      expanded + "\n\n## Download\nNew AppImage.",
+    );
+  });
+
   it("retains the complete answer and recognizes the hidden ending copy", () => {
     const full =
       "First paragraph\n\n## Evidence\nThe findings are here.\n\n## Conclusion\nComplete.";

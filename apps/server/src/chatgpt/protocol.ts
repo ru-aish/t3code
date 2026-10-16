@@ -40,6 +40,15 @@ export function normalizeStreamMessage(
   };
 }
 
+// ChatGPT can complete its streamed final answer in multiple message blocks.
+// It also sends invisible copies of earlier blocks. Keep new blocks without
+// repeating text that is already present in the accumulated answer.
+export function mergeFinalAnswer(previous: string | undefined, incoming: string): string {
+  if (!previous || incoming.includes(previous)) return incoming;
+  if (previous.includes(incoming)) return previous;
+  return previous.trimEnd() + "\n\n" + incoming.trimStart();
+}
+
 export function normalizeProjects(raw: unknown): { id: string; name: string }[] {
   const value = raw as {
     items?: Array<{
