@@ -774,7 +774,8 @@ function deriveSupersededAttemptFolds(
       entry.kind === "mcp-app" ||
       timelineEntryIsPersistentResourceCard(entry) ||
       liveSubagentEntryIds.has(entry.id) ||
-      (entry.kind === "work" && entry.entry.itemType === "system_notice")
+      (entry.kind === "work" &&
+        (entry.entry.itemType === "system_notice" || entry.entry.itemType === "reasoning"))
     ) {
       continue;
     }

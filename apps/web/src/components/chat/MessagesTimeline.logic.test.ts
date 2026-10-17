@@ -3862,6 +3862,21 @@ describe("v2 run and attempt history", () => {
         },
       },
       {
+        id: "superseded-reasoning-entry",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:01Z",
+        attempt: supersededAttempt,
+        entry: {
+          id: "superseded-reasoning",
+          createdAt: "2026-01-01T00:00:01Z",
+          runId,
+          label: "Working",
+          detail: "I’ll trace the existing implementation first.",
+          tone: "thinking" as const,
+          itemType: "reasoning" as const,
+        },
+      },
+      {
         id: "superseded-assistant-entry",
         kind: "message" as const,
         createdAt: "2026-01-01T00:00:02Z",
@@ -3948,6 +3963,7 @@ describe("v2 run and attempt history", () => {
     const collapsedRows = deriveMessagesTimelineRows(common);
     expect(collapsedRows.map((row) => row.id)).toEqual([
       "initial-user-entry",
+      "superseded-reasoning-entry",
       `attempt-fold:${supersededAttemptId}`,
       "superseded-thread-created-entry",
       "steer-user-entry",
@@ -3966,6 +3982,7 @@ describe("v2 run and attempt history", () => {
     });
     expect(expandedRows.map((row) => row.id)).toEqual([
       "initial-user-entry",
+      "superseded-reasoning-entry",
       `attempt-fold:${supersededAttemptId}`,
       "superseded-assistant-entry",
       "superseded-work-entry",
