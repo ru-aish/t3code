@@ -67,7 +67,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            set -euo pipefail
+            set -eu
             mkdir -p smoke
             adb wait-for-device
             adb install -r T3-Code-ChatGPT-Mobile-production.apk | tee smoke/install.txt
@@ -103,6 +103,7 @@ jobs:
           retention-days: 14
           compression-level: 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
           name: t3-chatgpt-mobile-production-apk
           path: |
