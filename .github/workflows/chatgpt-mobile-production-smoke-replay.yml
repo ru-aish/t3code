@@ -1,0 +1,80 @@
+name: ChatGPT Mobile Production Smoke Replay
+on:
+  push:
+    branches: [build/chatgpt-production-apk-5a773cce3]
+    paths:
+      - '.github/workflows/chatgpt-mobile-production-smoke-replay.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download freshly built production APK
+        uses: actions/download-artifact@v4
+        with:
+          name: t3-chatgpt-mobile-production-apk
+          path: artifact
+          run-id: 39028784011
+          github-token: ${{ github.token }}
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Enable KVM hardware acceleration
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Replay install and launch with crash capture
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -eu
+            mkdir -p smoke-replay
+            apk=artifact/T3-Code-ChatGPT-Mobile-production.apk
+            test -s "$apk"
+            adb wait-for-device
+            adb install -r "$apk" | tee smoke-replay/install.txt
+            adb shell pm path com.t3tools.t3code | tee smoke-replay/package-path.txt
+            adb logcat -c
+            adb shell am force-stop com.t3tools.t3code
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-replay/start.txt || true
+            sleep 15
+            adb shell dumpsys activity activities > smoke-replay/activities.txt || true
+            adb shell dumpsys window windows > smoke-replay/windows.txt || true
+            adb shell dumpsys package com.t3tools.t3code > smoke-replay/package.txt || true
+            adb shell dumpsys dropbox --print data_app_crash > smoke-replay/dropbox-data-app-crash.txt || true
+            adb logcat -d -v threadtime > smoke-replay/logcat.txt || true
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml smoke-replay/window.xml || true
+            adb exec-out screencap -p > smoke-replay/screenshot.png || true
+            pid="$(adb shell pidof com.t3tools.t3code | tr -d '\r' || true)"
+            printf 'pid=%s\n' "$pid" | tee smoke-replay/process.txt
+            if [ -z "$pid" ]; then
+              echo 'Production app process exited after launch' >&2
+              grep -E -i 'AndroidRuntime|FATAL EXCEPTION|com\.t3tools\.t3code|ReactNativeJS|SoLoader|UnsatisfiedLinkError|Exception|Error' smoke-replay/logcat.txt | tail -250 || true
+              exit 1
+            fi
+            resumed="$(grep -m1 'mResumedActivity' smoke-replay/activities.txt || true)"
+            printf '%s\n' "$resumed" | tee smoke-replay/resumed-activity.txt
+            printf '%s\n' "$resumed" | grep -F 'com.t3tools.t3code'
+            if grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError' smoke-replay/logcat.txt; then
+              echo 'Production APK emitted a fatal startup error' >&2
+              exit 1
+            fi
+      - name: Upload replay evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-production-smoke-replay
+          path: smoke-replay/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
