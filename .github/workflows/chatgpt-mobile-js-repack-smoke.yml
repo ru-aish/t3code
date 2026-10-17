@@ -13,6 +13,7 @@ jobs:
   repack:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[full-apk]')
     steps:
       - uses: actions/checkout@v6
         with:
