@@ -1,0 +1,30 @@
+name: React Navigation Contract Diagnostic
+on:
+  push:
+    branches: [diag/core-7.24-contract]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --no-frozen-lockfile --filter=@t3tools/mobile...
+      - name: Inspect resolved builder contract
+        working-directory: apps/mobile
+        run: |
+          set -euxo pipefail
+          find ../../node_modules/.pnpm -maxdepth 1 -type d -name '@react-navigation+core@*' -print
+          find ../../node_modules/.pnpm -path '*react-navigation+core@7.24.0*' -type f -name 'useNavigationBuilder.js' -print -exec sed -n '560,720p' {} \; | head -1000
+          find ../../node_modules/.pnpm -path '*react-navigation+native-stack@7.21.0*' -type f -name 'createNativeStackNavigator.js' -print -exec sed -n '1,180p' {} \; | head -500
