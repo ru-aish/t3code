@@ -26,6 +26,8 @@ const fakes = vi.hoisted(() => ({
     sent: string[];
     stops: number;
     controls: string[];
+    idle: boolean;
+    idleChecks: number;
   }>,
 }));
 vi.mock("./connection.ts", () => ({
@@ -36,6 +38,8 @@ vi.mock("./connection.ts", () => ({
     sent: string[] = [];
     stops = 0;
     controls: string[] = [];
+    idle = false;
+    idleChecks = 0;
     epoch = 0;
     pending: Array<TerminalEvent> = [];
     wake?: () => void;
@@ -72,6 +76,10 @@ vi.mock("./connection.ts", () => ({
     }
     async stop() {
       this.stops++;
+    }
+    async isConversationIdle() {
+      this.idleChecks++;
+      return this.idle;
     }
     async acknowledge() {}
     publish(event: TerminalEvent) {
@@ -218,7 +226,7 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
-  it.live("settles reasoning before showing one canonical final answer", () =>
+  it.live("routes commentary through reasoning before showing one canonical final answer", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { events, fake, requestId } = yield* fixture;
@@ -232,6 +240,17 @@ describe("ChatGPT task authority", () => {
           messageId: "thinking",
           text: "Checking the request",
           status: "in_progress",
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "commentary",
+          recipient: "all",
+          messageId: "progress",
+          text: "Still checking",
+          status: "finished_successfully",
         });
         fake.callback?.({
           kind: "update",
@@ -263,9 +282,12 @@ describe("ChatGPT task authority", () => {
           event.type === "turn_item.updated" ? [event.turnItem] : [],
         );
         const reasoning = items.filter((item) => item.type === "reasoning");
-        expect(reasoning.map((item) => item.status)).toEqual(["running", "completed"]);
-        expect(reasoning.at(-1)?.streaming).toBe(false);
+        expect(reasoning.map((item) => item.text)).toContain("Still checking");
+        expect(reasoning.findLast((item) => item.text === "Checking the request")?.streaming).toBe(
+          false,
+        );
         const finalMessages = recorded.filter((event) => event.type === "message.updated");
+        expect(finalMessages.some((event) => event.message.text === "Still checking")).toBe(false);
         expect(new Set(finalMessages.map((event) => event.message.id)).size).toBe(1);
         expect(finalMessages.at(-1)?.message.text).toBe("The result is Y.");
         expect(items.at(-1)?.type).toBe("assistant_message");
@@ -284,7 +306,7 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
-  it.live("replaces revisions of the same final message instead of duplicating them", () =>
+  it.live("replaces revisions of the same visible final message and ignores hidden copies", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { events, fake, requestId } = yield* fixture;
@@ -314,78 +336,72 @@ describe("ChatGPT task authority", () => {
           Stream.runCollect,
         );
         const messages = recorded.filter((event) => event.type === "message.updated");
-        expect(messages.at(-1)?.message.text).toBe(
-          "The cause is a scheduling race.\n\n## Resolution\nApplied.",
-        );
+        expect(messages.at(-1)?.message.text).toBe("The cause is a scheduling race.");
         expect(messages.at(-1)?.message.text.includes("The cause is a race.")).toBe(false);
       }),
     ),
   );
 
-  it.live(
-    "renders previously hidden final-answer sections but not hidden tool or reasoning output",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const { events, fake, requestId } = yield* fixture;
-          yield* Queue.take(events);
-          const base = {
-            kind: "update" as const,
-            requestId,
-            conversationId: null,
-            role: "assistant",
-            channel: "final",
-            recipient: "all",
-          };
-          fake.callback?.({
-            ...base,
-            messageId: "draft-one",
-            text: "Intro\n\n## Findings\nEvidence.",
-            status: "in_progress",
-          });
-          fake.callback?.({
-            ...base,
-            messageId: "canonical-one",
-            text: "Intro\n\n## Findings\nEvidence.",
-            status: "finished_successfully",
-            hidden: true,
-          });
-          fake.callback?.({
-            ...base,
-            messageId: "final-second-section",
-            text: "## Download\nThe verified AppImage.",
-            status: "finished_successfully",
-            hidden: true,
-          });
-          fake.callback?.({
-            ...base,
-            channel: "analysis",
-            messageId: "private-reasoning",
-            text: "Hidden analysis must never appear",
-            hidden: true,
-          });
-          fake.publish(terminal("state", "done"));
-          fake.callback?.({ kind: "complete", requestId, conversationId: null });
-          const recorded = yield* Stream.fromQueue(events).pipe(
-            Stream.takeUntil((event) => event.type === "turn.terminal"),
-            Stream.runCollect,
-          );
-          const messages = recorded.filter((event) => event.type === "message.updated");
-          expect(new Set(messages.map((event) => event.message.id)).size).toBe(1);
-          expect(messages.at(-1)?.message.text).toBe(
-            "Intro\n\n## Findings\nEvidence.\n\n## Download\nThe verified AppImage.",
-          );
-          expect(messages.at(-1)?.message.streaming).toBe(false);
-          expect(
-            recorded.some(
-              (event) =>
-                event.type === "turn_item.updated" &&
-                event.turnItem.type === "reasoning" &&
-                event.turnItem.text.includes("Hidden analysis"),
-            ),
-          ).toBe(false);
-        }),
-      ),
+  it.live("ignores hidden final-answer copies as well as hidden tool and reasoning output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const base = {
+          kind: "update" as const,
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          recipient: "all",
+        };
+        fake.callback?.({
+          ...base,
+          messageId: "draft-one",
+          text: "Intro\n\n## Findings\nEvidence.",
+          status: "in_progress",
+        });
+        fake.callback?.({
+          ...base,
+          messageId: "canonical-one",
+          text: "Intro\n\n## Findings\nEvidence.",
+          status: "finished_successfully",
+          hidden: true,
+        });
+        fake.callback?.({
+          ...base,
+          messageId: "final-second-section",
+          text: "## Download\nThe verified AppImage.",
+          status: "finished_successfully",
+          hidden: true,
+        });
+        fake.callback?.({
+          ...base,
+          channel: "analysis",
+          messageId: "private-reasoning",
+          text: "Hidden analysis must never appear",
+          hidden: true,
+        });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const messages = recorded.filter((event) => event.type === "message.updated");
+        expect(new Set(messages.map((event) => event.message.id)).size).toBe(1);
+        expect(messages.at(-1)?.message.text).toBe("Intro\n\n## Findings\nEvidence.");
+        expect(messages.at(-1)?.message.streaming).toBe(false);
+        expect(
+          recorded.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "reasoning" &&
+              event.turnItem.text.includes("Hidden analysis"),
+          ),
+        ).toBe(false);
+      }),
+    ),
   );
 
   it.live(
@@ -496,6 +512,34 @@ describe("ChatGPT task authority", () => {
         expect(terminalEvents[0]?.status).toBe("completed");
       }),
     ),
+  );
+
+  it.live(
+    "recovers a missing stream-complete callback once Terminal MCP is done and ChatGPT is idle",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId } = yield* fixture;
+          yield* Queue.take(events);
+          fake.callback?.({
+            kind: "update",
+            requestId,
+            conversationId: null,
+            role: "assistant",
+            recipient: "api_tool.call_tool",
+            text: "fedora_t3code.thread_task",
+          });
+          fake.idle = true;
+          fake.publish(terminal("state", "done"));
+          const ended = yield* Stream.fromQueue(events).pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          expect(ended[0]?.status).toBe("completed");
+          expect(fake.idleChecks).toBeGreaterThan(0);
+        }),
+      ),
   );
 
   it.live(
