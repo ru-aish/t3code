@@ -79,6 +79,23 @@ export function normalizeStreamMessage(
 export function mergeFinalAnswer(previous: string | undefined, incoming: string): string {
   if (!previous || incoming.includes(previous)) return incoming;
   if (previous.includes(incoming)) return previous;
+  // ChatGPT can emit the same final answer twice with presentation-only Markdown
+  // escaping changed between the visible draft and its canonical/hidden copy.
+  // Compare those copies after removing escapes outside code, but keep the
+  // original text untouched for rendering.
+  const comparable = (value: string) =>
+    value
+      .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g)
+      .map((section, index) =>
+        index % 2 === 1
+          ? section
+          : section.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\]^_`{|}~])/g, "$1"),
+      )
+      .join("");
+  const previousComparable = comparable(previous);
+  const incomingComparable = comparable(incoming);
+  if (incomingComparable.includes(previousComparable)) return incoming;
+  if (previousComparable.includes(incomingComparable)) return previous;
   // Continuation blocks sometimes repeat only the tail of an earlier block.
   for (let length = Math.min(previous.length, incoming.length); length >= 8; length--) {
     if (previous.endsWith(incoming.slice(0, length))) return previous + incoming.slice(length);
