@@ -207,7 +207,6 @@ index 690d069..ffab6f3 100644
    /**
     * Whether the activity is displayed in a context with reduced luminance.
     * @platform iOS 16+
-
 diff --git a/android/src/main/java/expo/modules/widgets/WidgetsModule.kt b/android/src/main/java/expo/modules/widgets/WidgetsModule.kt
 --- a/android/src/main/java/expo/modules/widgets/WidgetsModule.kt
 +++ b/android/src/main/java/expo/modules/widgets/WidgetsModule.kt
