@@ -27,13 +27,17 @@ jobs:
           packages: 'platform-tools'
       - name: Install Android SDK components
         run: |
-          sdkmanager --install 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006'
+          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
       - name: Generate Android native project
         working-directory: apps/mobile
         env:
           APP_VARIANT: preview
           EXPO_NO_GIT_STATUS: '1'
         run: pnpm exec expo prebuild --platform android --clean --no-install
+      - name: Use stable Android compile SDK
+        run: |
+          echo 'android.compileSdkVersion=36' >> apps/mobile/android/gradle.properties
+          echo 'android.buildToolsVersion=36.0.0' >> apps/mobile/android/gradle.properties
       - name: Assemble standalone APK
         working-directory: apps/mobile/android
         env:
