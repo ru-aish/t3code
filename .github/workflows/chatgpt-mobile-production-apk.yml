@@ -21,7 +21,7 @@ jobs:
           node-version-file: package.json
           run-install: false
       - name: Install mobile dependencies
-        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+        run: vp install --no-frozen-lockfile --filter=@t3tools/mobile...
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools'
