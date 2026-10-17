@@ -1,0 +1,52 @@
+name: Mobile Navigation Diagnostic
+on:
+  push:
+    branches: [diag/mobile-native-stack-64c91df]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - name: Inspect navigation dependency graph and exports
+        working-directory: apps/mobile
+        run: |
+          set -euxo pipefail
+          node --input-type=module <<'NODE'
+          import * as native from '@react-navigation/native';
+          import * as nativeStack from '@react-navigation/native-stack';
+          import fs from 'node:fs';
+          const readVersion = (name) => JSON.parse(fs.readFileSync(require.resolve(name + '/package.json'), 'utf8')).version;
+          console.log('native exports', {
+            useNavigationBuilder: typeof native.useNavigationBuilder,
+            createNavigatorFactory: typeof native.createNavigatorFactory,
+            StackRouter: typeof native.StackRouter,
+          });
+          console.log('native-stack exports', {
+            createNativeStackNavigator: typeof nativeStack.createNativeStackNavigator,
+            createNativeStackScreen: typeof nativeStack.createNativeStackScreen,
+          });
+          NODE
+      - name: Print package versions and native stack implementation
+        working-directory: apps/mobile
+        run: |
+          set -euxo pipefail
+          for p in @react-navigation/native @react-navigation/core @react-navigation/routers @react-navigation/native-stack react-native-screens; do
+            node -e "console.log('$p', require('$p/package.json').version)"
+          done
+          node -p "require.resolve('@react-navigation/native-stack')"
+          find ../../node_modules/.pnpm -path '*react-navigation+native-stack*' -type f -name 'createNativeStackNavigator.*' -print -exec sed -n '1,220p' {} \; | head -600
+          find ../../node_modules/.pnpm -path '*react-navigation+native*' -type f -name 'useNavigationBuilder.*' -print | head -20
