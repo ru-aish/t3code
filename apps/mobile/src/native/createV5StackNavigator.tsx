@@ -60,6 +60,7 @@ function V5StackNavigator({
   useEffect(() => {
     let handle: ReturnType<typeof requestAnimationFrame> | undefined;
 
+    // @ts-expect-error: there may not be a tab navigator in parent
     const unsubscribe = navigation.addListener?.("tabPress", (event) => {
       const isFocused = navigation.isFocused();
       cancelAnimationFrame(handle);
