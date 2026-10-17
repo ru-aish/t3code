@@ -1,0 +1,188 @@
+name: ChatGPT Mobile JS Repack Smoke
+on:
+  push:
+    branches: [build/chatgpt-production-apk-5a773cce3]
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+concurrency:
+  group: chatgpt-mobile-js-repack-smoke
+  cancel-in-progress: true
+jobs:
+  repack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - name: Guard JS-only/native-compatible delta
+        run: |
+          set -euo pipefail
+          base=64c91dfca80b5a4f41ea2292e38e2b1fc624ea49
+          git diff --name-only "$base"...HEAD | tee js-repack-changes.txt
+          bad="$(grep -Ev '^(\.github/workflows/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|apps/mobile/src/|apps/mobile/package\.json$|patches/@react-navigation%2Fnative-stack@7\.21\.0\.patch$)' js-repack-changes.txt || true)"
+          if [ -n "$bad" ]; then
+            echo "JS repack is unsafe because native-relevant files changed:"
+            echo "$bad"
+            exit 1
+          fi
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - name: Align React Navigation native-stack runtime API
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          matches = list(Path("node_modules/.pnpm").glob("@react-navigation+native-stack@7.21.0*/node_modules/@react-navigation/native-stack/lib/module/navigators/createNativeStackNavigator.js"))
+          if len(matches) != 1:
+              raise SystemExit(f"expected exactly one native-stack runtime file, found {len(matches)}: {matches}")
+          path = matches[0]
+          source = path.read_text()
+          old_binding = "const { state, describe, descriptors, navigation, render } ="
+          new_binding = "const { state, describe, descriptors, navigation, NavigationContent } ="
+          if source.count(old_binding) != 1:
+              raise SystemExit("native-stack render binding shape changed")
+          source = source.replace(old_binding, new_binding, 1)
+          start_marker = "  return render("
+          start = source.find(start_marker)
+          if start < 0:
+              raise SystemExit("native-stack render call not found")
+          body_start = start + len(start_marker)
+          function_end = source.find("\n}", body_start)
+          if function_end < 0:
+              raise SystemExit("native-stack navigator function end not found")
+          wrapped = source[body_start:function_end]
+          if not wrapped.endswith(");"):
+              raise SystemExit(f"unexpected native-stack render tail: {wrapped[-80:]!r}")
+          child = wrapped[:-2]
+          replacement = "  return /*#__PURE__*/_jsx(NavigationContent, {\n    children: " + child + "\n  });"
+          source = source[:start] + replacement + source[function_end:]
+          path.write_text(source)
+          PY
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Install Android build tools
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
+      - name: Generate Android project
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+      - name: Configure stable Android SDK
+        run: |
+          echo 'android.compileSdkVersion=36' >> apps/mobile/android/gradle.properties
+          echo 'android.buildToolsVersion=36.0.0' >> apps/mobile/android/gradle.properties
+      - name: Build production JS bundle only
+        working-directory: apps/mobile/android
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+        run: ./gradlew :app:createBundleReleaseJsAndAssets --no-daemon --build-cache
+      - name: Download native-compatible base APK
+        uses: actions/download-artifact@v4
+        with:
+          name: t3-chatgpt-mobile-production-apk
+          path: base
+          run-id: 39033226092
+          github-token: ${{ github.token }}
+      - name: Replace bundled JS without rebuilding native code
+        run: |
+          set -euo pipefail
+          bundle=apps/mobile/android/app/build/generated/assets/react/release/index.android.bundle
+          base=base/T3-Code-ChatGPT-Mobile-production.apk
+          test -s "$bundle"
+          test -s "$base"
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          base = Path("base/T3-Code-ChatGPT-Mobile-production.apk")
+          bundle = Path("apps/mobile/android/app/build/generated/assets/react/release/index.android.bundle").read_bytes()
+          out = Path("T3-Code-ChatGPT-Mobile-js-repack-unsigned.apk")
+          replaced = False
+          with ZipFile(base, "r") as zin, ZipFile(out, "w", allowZip64=True) as zout:
+              for info in zin.infolist():
+                  if info.filename.startswith("META-INF/"):
+                      continue
+                  data = zin.read(info.filename)
+                  if info.filename == "assets/index.android.bundle":
+                      data = bundle
+                      replaced = True
+                  zout.writestr(info, data)
+          if not replaced:
+              raise SystemExit("base APK has no assets/index.android.bundle")
+          PY
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -p 4 T3-Code-ChatGPT-Mobile-js-repack-unsigned.apk T3-Code-ChatGPT-Mobile-js-repack-aligned.apk
+          keytool -genkeypair -noprompt -keystore smoke.keystore -storepass android -keypass android -alias smoke -dname 'CN=T3 JS Repack Smoke' -keyalg RSA -keysize 2048 -validity 3650
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks smoke.keystore --ks-pass pass:android --key-pass pass:android --out T3-Code-ChatGPT-Mobile-js-repack.apk T3-Code-ChatGPT-Mobile-js-repack-aligned.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-js-repack.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-js-repack.apk | tee apk-badging.txt
+          grep -F "package: name='com.t3tools.t3code'" apk-badging.txt
+          sha256sum T3-Code-ChatGPT-Mobile-js-repack.apk > SHA256SUMS.txt
+          git rev-parse HEAD > source-commit.txt
+      - name: Enable KVM
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+      - name: Smoke-test repacked APK
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -euo pipefail
+            mkdir -p smoke-js-repack
+            adb install T3-Code-ChatGPT-Mobile-js-repack.apk | tee smoke-js-repack/install.txt
+            adb logcat -c
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-js-repack/start.txt
+            sleep 8
+            adb shell dumpsys activity activities > smoke-js-repack/activities.txt
+            adb shell dumpsys dropbox --print data_app_crash > smoke-js-repack/dropbox-data-app-crash.txt || true
+            adb logcat -d -v threadtime > smoke-js-repack/logcat.txt
+            adb exec-out screencap -p > smoke-js-repack/screenshot.png
+            adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-js-repack/process.txt
+            test -s smoke-js-repack/process.txt
+            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke-js-repack/activities.txt | tee smoke-js-repack/resumed-activity.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke-js-repack/logcat.txt
+      - name: Upload JS-repack evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-js-repack-smoke
+          path: |
+            smoke-js-repack/
+            js-repack-changes.txt
+            apk-badging.txt
+            SHA256SUMS.txt
+            source-commit.txt
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+      - name: Upload JS-repacked APK
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-js-repack-apk
+          path: |
+            T3-Code-ChatGPT-Mobile-js-repack.apk
+            SHA256SUMS.txt
+            apk-badging.txt
+            source-commit.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
