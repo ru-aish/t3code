@@ -44,17 +44,71 @@ jobs:
           APP_VARIANT: production
           NODE_ENV: production
         run: ./gradlew :app:assembleRelease --no-daemon
-      - name: Verify APK
+      - name: Verify APK identity and signature
         run: |
+          set -euo pipefail
           test -s apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk T3-Code-ChatGPT-Mobile-production.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-production.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-production.apk | tee apk-badging.txt
+          grep -F "package: name='com.t3tools.t3code'" apk-badging.txt
           sha256sum T3-Code-ChatGPT-Mobile-production.apk > SHA256SUMS.txt
+      - name: Enable KVM hardware acceleration
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Install and launch production APK on Android emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -euo pipefail
+            mkdir -p smoke
+            adb wait-for-device
+            adb install -r T3-Code-ChatGPT-Mobile-production.apk | tee smoke/install.txt
+            adb shell pm path com.t3tools.t3code | tee smoke/package-path.txt
+            adb logcat -c
+            adb shell am force-stop com.t3tools.t3code
+            adb shell monkey -p com.t3tools.t3code -c android.intent.category.LAUNCHER 1 | tee smoke/launch.txt
+            sleep 20
+            pid="$(adb shell pidof com.t3tools.t3code | tr -d '\r')"
+            test -n "$pid"
+            printf 'pid=%s\n' "$pid" | tee smoke/process.txt
+            resumed="$(adb shell dumpsys activity activities | grep -m1 'mResumedActivity' || true)"
+            printf '%s\n' "$resumed" | tee smoke/resumed-activity.txt
+            printf '%s\n' "$resumed" | grep -F 'com.t3tools.t3code'
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml smoke/window.xml || true
+            adb exec-out screencap -p > smoke/screenshot.png
+            adb logcat -d --pid="$pid" > smoke/logcat.txt
+            if grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server' smoke/logcat.txt; then
+              echo 'Production APK emitted a fatal startup error' >&2
+              exit 1
+            fi
+      - name: Upload emulator smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-production-smoke
+          path: |
+            smoke/
+            apk-badging.txt
+            SHA256SUMS.txt
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: t3-chatgpt-mobile-production-apk
           path: |
             T3-Code-ChatGPT-Mobile-production.apk
             SHA256SUMS.txt
+            apk-badging.txt
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
