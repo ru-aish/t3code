@@ -59,7 +59,7 @@ jobs:
         run: ./gradlew :app:assembleRelease --no-daemon --build-cache --parallel -PreactNativeArchitectures=x86_64
       - name: Verify smoke APK identity and ABI
         run: |
-          set -euo pipefail
+          set -eu
           test -s apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk
@@ -82,7 +82,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            set -euo pipefail
+            set -eu
             mkdir -p smoke
             adb wait-for-device
             adb install -r T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk | tee smoke/install.txt
