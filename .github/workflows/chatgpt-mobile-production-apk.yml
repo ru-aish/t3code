@@ -9,6 +9,7 @@ jobs:
   apk:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[full-apk]')
     steps:
       - uses: actions/checkout@v6
         with:
@@ -63,6 +64,15 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools'
+      - name: Restore Gradle build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: mobile-gradle-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/mobile/package.json', 'apps/mobile/app.config.*', 'patches/**') }}
+          restore-keys: |
+            mobile-gradle-${{ runner.os }}-
       - name: Install Android SDK components
         run: |
           sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
@@ -81,7 +91,7 @@ jobs:
         env:
           APP_VARIANT: production
           NODE_ENV: production
-        run: ./gradlew :app:assembleRelease --no-daemon
+        run: ./gradlew :app:assembleRelease --no-daemon --build-cache --parallel
       - name: Verify APK identity and signature
         run: |
           set -euo pipefail
