@@ -99,7 +99,7 @@ jobs:
             test -s smoke/process.txt
             grep -m1 -E '(topResumedActivity|ResumedActivity|mResumedActivity).*com.t3tools.t3code' smoke/activities.txt > smoke/resumed-activity.txt
             cat smoke/resumed-activity.txt
-            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null' smoke/logcat.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke/logcat.txt
       - name: Upload emulator smoke evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
