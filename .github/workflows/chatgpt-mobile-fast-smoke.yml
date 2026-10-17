@@ -1,0 +1,127 @@
+name: ChatGPT Mobile Fast Smoke APK
+on:
+  push:
+    branches: [build/chatgpt-production-apk-5a773cce3]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Restore Gradle build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: mobile-gradle-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/mobile/package.json', 'apps/mobile/app.config.*', 'patches/**') }}
+          restore-keys: |
+            mobile-gradle-${{ runner.os }}-
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
+      - name: Generate Android native project
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+      - name: Use stable Android compile SDK
+        run: |
+          echo 'android.compileSdkVersion=36' >> apps/mobile/android/gradle.properties
+          echo 'android.buildToolsVersion=36.0.0' >> apps/mobile/android/gradle.properties
+      - name: Assemble x86_64 release smoke APK
+        working-directory: apps/mobile/android
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+        run: ./gradlew :app:assembleRelease --no-daemon --build-cache --parallel -PreactNativeArchitectures=x86_64
+      - name: Verify smoke APK identity and ABI
+        run: |
+          set -euo pipefail
+          test -s apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk | tee apk-badging.txt
+          grep -F "package: name='com.t3tools.t3code'" apk-badging.txt
+          grep -F "native-code: 'x86_64'" apk-badging.txt
+          sha256sum T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk > SHA256SUMS.txt
+          git rev-parse HEAD > source-commit.txt
+      - name: Enable KVM hardware acceleration
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Install and launch fast smoke APK on Android emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -euo pipefail
+            mkdir -p smoke
+            adb wait-for-device
+            adb install -r T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk | tee smoke/install.txt
+            adb shell pm path com.t3tools.t3code | tee smoke/package-path.txt
+            adb logcat -c
+            adb shell am force-stop com.t3tools.t3code
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke/start.txt
+            sleep 8
+            adb shell dumpsys activity activities > smoke/activities.txt
+            adb shell dumpsys window windows > smoke/windows.txt
+            adb shell dumpsys package com.t3tools.t3code > smoke/package.txt
+            adb shell dumpsys dropbox --print data_app_crash > smoke/dropbox-data-app-crash.txt || true
+            adb logcat -d -v threadtime > smoke/logcat.txt
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml smoke/window.xml || true
+            adb exec-out screencap -p > smoke/screenshot.png
+            adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke/process.txt
+            test -s smoke/process.txt
+            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke/activities.txt | tee smoke/resumed-activity.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke/logcat.txt
+      - name: Upload fast smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-fast-smoke
+          path: |
+            smoke/
+            apk-badging.txt
+            SHA256SUMS.txt
+            source-commit.txt
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+      - name: Upload fast smoke APK
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-fast-smoke-apk
+          path: |
+            T3-Code-ChatGPT-Mobile-fast-smoke-x86_64.apk
+            SHA256SUMS.txt
+            apk-badging.txt
+            source-commit.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
