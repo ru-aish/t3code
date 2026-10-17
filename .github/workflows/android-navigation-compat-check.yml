@@ -1,0 +1,41 @@
+name: Android Navigation Compatibility Check
+on:
+  push:
+    branches: [fix/android-nav-core-compat-64c91df]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - name: Typecheck mobile
+        run: pnpm --filter @t3tools/mobile typecheck
+      - name: Bundle production Android JavaScript
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: |
+          mkdir -p ../../compat-bundle/assets
+          pnpm exec expo export:embed \
+            --entry-file index.ts \
+            --platform android \
+            --dev false \
+            --minify true \
+            --bundle-output ../../compat-bundle/index.android.bundle \
+            --assets-dest ../../compat-bundle/assets
+          test -s ../../compat-bundle/index.android.bundle
