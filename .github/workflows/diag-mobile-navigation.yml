@@ -1,0 +1,48 @@
+name: Diagnose Mobile Navigation Runtime
+on:
+  push:
+    branches: [diag/mobile-nav-runtime-a472fa2]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --no-frozen-lockfile --filter=@t3tools/mobile...
+      - name: Print resolved navigation packages
+        run: |
+          set -eu
+          node - <<'NODE'
+          const fs=require('fs');
+          const paths=[
+            'node_modules/@react-navigation/native/package.json',
+            'node_modules/@react-navigation/core/package.json',
+            'node_modules/@react-navigation/native-stack/package.json'
+          ];
+          for (const p of paths) {
+            const j=JSON.parse(fs.readFileSync(p,'utf8'));
+            console.log(p, j.version);
+          }
+          NODE
+          echo '--- native-stack navigator ---'
+          sed -n '1,220p' node_modules/@react-navigation/native-stack/lib/module/navigators/createNativeStackNavigator.js
+          echo '--- native index exports ---'
+          grep -R -n "useNavigationBuilder" node_modules/@react-navigation/native/lib/module node_modules/@react-navigation/core/lib/module | head -40 || true
+          echo '--- core useNavigationBuilder ---'
+          f=$(grep -R -l "function useNavigationBuilder" node_modules/@react-navigation/core/lib/module | head -1)
+          echo "file=$f"
+          sed -n '1,280p' "$f"
+          echo '--- lock entries ---'
+          grep -n -A25 -B5 "'@react-navigation/core@" pnpm-lock.yaml | head -160
