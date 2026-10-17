@@ -1,4 +1,5 @@
 name: ChatGPT Mobile Production APK
+# Final verified universal build trigger
 on:
   push:
     branches: [build/chatgpt-production-apk-5a773cce3]
