@@ -1,4 +1,4 @@
-name: Diagnose Mobile JS Stack
+name: Diagnose Mobile Navigation Core Alignment
 on:
   push:
     branches: [diag/mobile-js-stack-64c91df]
@@ -7,7 +7,7 @@ permissions:
 jobs:
   bundle:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -19,9 +19,38 @@ jobs:
         with:
           node-version-file: package.json
           run-install: false
+      - name: Align React Navigation core with current release set
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("pnpm-workspace.yaml")
+          s=p.read_text()
+          old='"@react-navigation/core": 7.21.13'
+          new='"@react-navigation/core": 7.24.0'
+          if old not in s:
+              raise SystemExit("expected core override not found")
+          p.write_text(s.replace(old,new,1))
+          PY
+          pnpm install --lockfile-only
       - name: Install mobile dependencies
         run: vp install --frozen-lockfile --filter=@t3tools/mobile...
-      - name: Generate production JS bundle and source map
+      - name: Report navigation versions
+        run: |
+          pnpm --filter @t3tools/mobile list @react-navigation/core @react-navigation/native @react-navigation/native-stack @react-navigation/elements --depth 2
+          node - <<'NODE'
+          const fs=require('fs');
+          for (const p of [
+            'node_modules/.pnpm/@react-navigation+core@7.24.0_react@19.3.0/node_modules/@react-navigation/core/package.json',
+            'apps/mobile/node_modules/@react-navigation/native/package.json',
+            'apps/mobile/node_modules/@react-navigation/native-stack/package.json',
+            'apps/mobile/node_modules/@react-navigation/elements/package.json'
+          ]) {
+            try { const j=JSON.parse(fs.readFileSync(p,'utf8')); console.log(p,j.version); } catch(e) {}
+          }
+          NODE
+      - name: Mobile typecheck
+        run: vp run --filter @t3tools/mobile typecheck
+      - name: Generate production JS bundle
         working-directory: apps/mobile
         env:
           APP_VARIANT: production
@@ -35,33 +64,32 @@ jobs:
             --bundle-output "$RUNNER_TEMP/index.android.bundle" \
             --sourcemap-output "$RUNNER_TEMP/index.android.bundle.map" \
             --minify true
-      - name: Inspect failing bundle offsets
+      - name: Assert navigator has compatible builder API
         run: |
           python3 - <<'PY'
-          import os
+          import os,re
           from pathlib import Path
-          p=Path(os.environ["RUNNER_TEMP"])/"index.android.bundle"
-          text=p.read_text(errors="replace")
-          print("bundle_bytes", p.stat().st_size)
-          for pos in (4821106,4821376,6937365):
-              print("\n=== OFFSET",pos,"===")
-              lo=max(0,pos-1200); hi=min(len(text),pos+1200)
-              print(text[lo:hi])
+          s=(Path(os.environ["RUNNER_TEMP"])/"index.android.bundle").read_text(errors="replace")
+          nav=s.find("_e.createNativeStackNavigator=function")
+          if nav < 0:
+              raise SystemExit("native stack module not found")
+          mod=s[s.rfind("__d(function",0,nav):s.find("\n__d(function",nav)]
+          print(mod[:2500])
+          if "render:L" in mod and "L(" in mod:
+              core=s.find("_e.useNavigationBuilder=function")
+              coremod=s[s.rfind("__d(function",0,core):s.find("\n__d(function",core)]
+              if "render:" not in coremod and "render," not in coremod:
+                  raise SystemExit("native-stack expects render but core bundle still lacks it")
+          print("NAVIGATION_CORE_ALIGNMENT_OK")
           PY
-      - name: Symbolicate captured stack
-        working-directory: apps/mobile
-        run: |
-          printf '%s\n' \
-            'at NativeStackNavigator (index.android.bundle:1:4821376)' \
-            'at NativeStackNavigator (index.android.bundle:1:6937365)' \
-            'at AdaptiveRootStack (index.android.bundle:1:4616427)' \
-            | pnpm exec metro-symbolicate "$RUNNER_TEMP/index.android.bundle.map" || true
-      - name: Upload diagnostic bundle
+      - name: Upload aligned lock and diagnostic bundle
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mobile-js-bundle-diagnostic
+          name: mobile-navigation-core-alignment
           path: |
+            pnpm-workspace.yaml
+            pnpm-lock.yaml
             ${{ runner.temp }}/index.android.bundle
             ${{ runner.temp }}/index.android.bundle.map
           if-no-files-found: warn
