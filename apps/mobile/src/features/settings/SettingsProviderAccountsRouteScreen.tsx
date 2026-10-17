@@ -10,6 +10,7 @@ import { Linking, Pressable, ScrollView, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/ui/AppText";
+import { chatGPTConnectionMessage, shouldShowProviderAccount } from "../../lib/providerAccounts";
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
@@ -42,23 +43,19 @@ export function SettingsProviderAccountsRouteScreen() {
             selectedTargets.map((environment) => (
               <SettingsSection key={environment.environmentId} title={environment.label}>
                 {environment.serverConfig.providers
-                  .filter(
-                    (provider) =>
-                      provider.setup?.canAuthenticate ||
-                      (provider.driver === "acpRegistry" && provider.installed),
-                  )
-                  .map((provider) => (
-                    <ProviderAccount
-                      key={provider.instanceId}
-                      environment={environment}
-                      provider={provider}
-                    />
-                  ))}
-                {!environment.serverConfig.providers.some(
-                  (provider) =>
-                    provider.setup?.canAuthenticate ||
-                    (provider.driver === "acpRegistry" && provider.installed),
-                ) ? (
+                  .filter(shouldShowProviderAccount)
+                  .map((provider) =>
+                    provider.driver === "chatgpt" ? (
+                      <ChatGPTProviderStatus key={provider.instanceId} provider={provider} />
+                    ) : (
+                      <ProviderAccount
+                        key={provider.instanceId}
+                        environment={environment}
+                        provider={provider}
+                      />
+                    ),
+                  )}
+                {!environment.serverConfig.providers.some(shouldShowProviderAccount) ? (
                   <Text className="p-4 text-foreground-muted">
                     Configure a provider with in-app sign-in in web or desktop Settings.
                   </Text>
@@ -69,6 +66,19 @@ export function SettingsProviderAccountsRouteScreen() {
         </ScreenScrollView>
       </SettingsScreen>
     </>
+  );
+}
+
+function ChatGPTProviderStatus({ provider }: { readonly provider: ServerProvider }) {
+  return (
+    <View className="gap-2 border-b border-border-subtle p-4">
+      <Text className="text-lg font-semibold text-foreground">
+        {provider.displayName ?? "ChatGPT"}
+      </Text>
+      <Text accessibilityLiveRegion="polite" className="text-sm text-foreground-muted">
+        {chatGPTConnectionMessage(provider)}
+      </Text>
+    </View>
   );
 }
 
