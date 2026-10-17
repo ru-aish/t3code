@@ -53,6 +53,7 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-production.apk | tee apk-badging.txt
           grep -F "package: name='com.t3tools.t3code'" apk-badging.txt
           sha256sum T3-Code-ChatGPT-Mobile-production.apk > SHA256SUMS.txt
+          git rev-parse HEAD > source-commit.txt
       - name: Enable KVM hardware acceleration
         run: |
           test -c /dev/kvm
@@ -67,29 +68,27 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            set -eu
             mkdir -p smoke
+            test -s T3-Code-ChatGPT-Mobile-production.apk
             adb wait-for-device
             adb install -r T3-Code-ChatGPT-Mobile-production.apk | tee smoke/install.txt
             adb shell pm path com.t3tools.t3code | tee smoke/package-path.txt
             adb logcat -c
             adb shell am force-stop com.t3tools.t3code
-            adb shell monkey -p com.t3tools.t3code -c android.intent.category.LAUNCHER 1 | tee smoke/launch.txt
-            sleep 20
-            pid="$(adb shell pidof com.t3tools.t3code | tr -d '\r')"
-            test -n "$pid"
-            printf 'pid=%s\n' "$pid" | tee smoke/process.txt
-            resumed="$(adb shell dumpsys activity activities | grep -m1 'mResumedActivity' || true)"
-            printf '%s\n' "$resumed" | tee smoke/resumed-activity.txt
-            printf '%s\n' "$resumed" | grep -F 'com.t3tools.t3code'
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke/start.txt
+            sleep 15
+            adb shell dumpsys activity activities > smoke/activities.txt
+            adb shell dumpsys window windows > smoke/windows.txt
+            adb shell dumpsys package com.t3tools.t3code > smoke/package.txt
+            adb shell dumpsys dropbox --print data_app_crash > smoke/dropbox-data-app-crash.txt || true
+            adb logcat -d -v threadtime > smoke/logcat.txt
             adb shell uiautomator dump /sdcard/window.xml || true
             adb pull /sdcard/window.xml smoke/window.xml || true
             adb exec-out screencap -p > smoke/screenshot.png
-            adb logcat -d --pid="$pid" > smoke/logcat.txt
-            if grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server' smoke/logcat.txt; then
-              echo 'Production APK emitted a fatal startup error' >&2
-              exit 1
-            fi
+            adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke/process.txt
+            test -s smoke/process.txt
+            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke/activities.txt | tee smoke/resumed-activity.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null' smoke/logcat.txt
       - name: Upload emulator smoke evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -99,6 +98,7 @@ jobs:
             smoke/
             apk-badging.txt
             SHA256SUMS.txt
+            source-commit.txt
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
@@ -110,6 +110,7 @@ jobs:
             T3-Code-ChatGPT-Mobile-production.apk
             SHA256SUMS.txt
             apk-badging.txt
+            source-commit.txt
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
