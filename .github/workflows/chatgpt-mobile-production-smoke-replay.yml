@@ -1,9 +1,11 @@
 name: ChatGPT Mobile Production Smoke Replay
 on:
-  push:
-    branches: [build/chatgpt-production-apk-5a773cce3]
-    paths:
-      - '.github/workflows/chatgpt-mobile-production-smoke-replay.yml'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: GitHub Actions run ID containing t3-chatgpt-mobile-production-apk
+        required: true
+        type: string
 permissions:
   actions: read
   contents: read
@@ -17,7 +19,7 @@ jobs:
         with:
           name: t3-chatgpt-mobile-production-apk
           path: artifact
-          run-id: 39028784011
+          run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
       - uses: android-actions/setup-android@v3
         with:
@@ -44,7 +46,7 @@ jobs:
             adb logcat -c
             adb shell am force-stop com.t3tools.t3code
             adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-replay/start.txt
-            sleep 15
+            sleep 8
             adb shell dumpsys activity activities > smoke-replay/activities.txt
             adb shell dumpsys window windows > smoke-replay/windows.txt
             adb shell dumpsys package com.t3tools.t3code > smoke-replay/package.txt
@@ -56,7 +58,7 @@ jobs:
             adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-replay/process.txt
             test -s smoke-replay/process.txt
             grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke-replay/activities.txt | tee smoke-replay/resumed-activity.txt
-            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError' smoke-replay/logcat.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke-replay/logcat.txt
       - name: Upload replay evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
