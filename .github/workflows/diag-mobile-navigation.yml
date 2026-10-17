@@ -24,25 +24,21 @@ jobs:
       - name: Print resolved navigation packages
         run: |
           set -eu
-          node - <<'NODE'
-          const fs=require('fs');
-          const paths=[
-            'node_modules/@react-navigation/native/package.json',
-            'node_modules/@react-navigation/core/package.json',
-            'node_modules/@react-navigation/native-stack/package.json'
-          ];
-          for (const p of paths) {
-            const j=JSON.parse(fs.readFileSync(p,'utf8'));
-            console.log(p, j.version);
-          }
-          NODE
+          echo '--- resolved package.json files ---'
+          find node_modules/.pnpm -path '*/node_modules/@react-navigation/*/package.json' -type f | sort | while read p; do
+            node -e "const j=require('./' + process.argv[1]); console.log(process.argv[1], j.version)" "$p"
+          done
           echo '--- native-stack navigator ---'
-          sed -n '1,220p' node_modules/@react-navigation/native-stack/lib/module/navigators/createNativeStackNavigator.js
-          echo '--- native index exports ---'
-          grep -R -n "useNavigationBuilder" node_modules/@react-navigation/native/lib/module node_modules/@react-navigation/core/lib/module | head -40 || true
+          ns=$(find node_modules/.pnpm -path '*/node_modules/@react-navigation/native-stack/lib/module/navigators/createNativeStackNavigator.js' -type f | head -1)
+          echo "native_stack_file=$ns"
+          sed -n '1,220p' "$ns"
           echo '--- core useNavigationBuilder ---'
-          f=$(grep -R -l "function useNavigationBuilder" node_modules/@react-navigation/core/lib/module | head -1)
-          echo "file=$f"
-          sed -n '1,280p' "$f"
-          echo '--- lock entries ---'
-          grep -n -A25 -B5 "'@react-navigation/core@" pnpm-lock.yaml | head -160
+          core=$(find node_modules/.pnpm -path '*/node_modules/@react-navigation/core/lib/module/useNavigationBuilder.js' -type f | head -1)
+          echo "core_file=$core"
+          sed -n '1,320p' "$core"
+          echo '--- native index export ---'
+          nat=$(find node_modules/.pnpm -path '*/node_modules/@react-navigation/native/lib/module/index.js' -type f | head -1)
+          echo "native_index=$nat"
+          grep -n "useNavigationBuilder" "$nat" || true
+          echo '--- lock navigation entries ---'
+          grep -n -A30 -B5 "'@react-navigation/core@" pnpm-lock.yaml | head -200
