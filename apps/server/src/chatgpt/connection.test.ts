@@ -21,6 +21,9 @@ describe("ChatGPT submission identity", () => {
       expect(compiled).toContain("permanent Terminal MCP thread ID is: registered-id");
       expect(compiled).toContain('Workspace: "/work/project"');
       expect(compiled.endsWith(`\n\n${text}`)).toBe(true);
+      expect(compiled).toContain(
+        "Without fedora_t3code tool use, simply end your response normally.",
+      );
     }
   });
 });

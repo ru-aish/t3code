@@ -32,20 +32,34 @@ export function normalizeStreamMessage(
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
   let displayText = (isFinal && fallback?.trim()) || originalText || fallback || "";
-  if (isFinal && !fallback?.trim() && /<(?:box|row|col|card|button|badge|icon|text|title)\b/.test(displayText)) {
+  if (
+    isFinal &&
+    !fallback?.trim() &&
+    /<(?:box|row|col|card|button|badge|icon|text|title)\b/.test(displayText)
+  ) {
     // Some ChatGPT surfaces omit the fallback. Turn its presentation-only DIL
     // into readable Markdown without altering fenced source-code examples.
-    displayText = displayText.split(/(```[\s\S]*?```)/g).map((section, index) => {
-      if (index % 2 === 1) return section;
-      const buttons = section.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
-        const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
-        const openEnd = button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
-        const label = button.slice(openEnd, button.lastIndexOf("</button>"))
-          .replace(/<[^>]+>/g, "").trim();
-        return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
-      });
-      return buttons.replace(/<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g, "");
-    }).join("").replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
+    displayText = displayText
+      .split(/(```[\s\S]*?```)/g)
+      .map((section, index) => {
+        if (index % 2 === 1) return section;
+        const buttons = section.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
+          const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
+          const openEnd =
+            button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
+          const label = button
+            .slice(openEnd, button.lastIndexOf("</button>"))
+            .replace(/<[^>]+>/g, "")
+            .trim();
+          return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
+        });
+        return buttons.replace(
+          /<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g,
+          "",
+        );
+      })
+      .join("")
+      .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
   }
   return {
     messageId: message.id,
@@ -65,6 +79,10 @@ export function normalizeStreamMessage(
 export function mergeFinalAnswer(previous: string | undefined, incoming: string): string {
   if (!previous || incoming.includes(previous)) return incoming;
   if (previous.includes(incoming)) return previous;
+  // Continuation blocks sometimes repeat only the tail of an earlier block.
+  for (let length = Math.min(previous.length, incoming.length); length >= 8; length--) {
+    if (previous.endsWith(incoming.slice(0, length))) return previous + incoming.slice(length);
+  }
   return previous.trimEnd() + "\n\n" + incoming.trimStart();
 }
 

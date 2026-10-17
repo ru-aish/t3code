@@ -189,6 +189,90 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("finishes a reply-only stream with no Terminal MCP done event", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "answer",
+          text: "Y",
+          status: "in_progress",
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const finalMessages = recorded.filter((event) => event.type === "message.updated");
+        expect(finalMessages.at(-1)?.message.text).toBe("Y");
+        expect(finalMessages.at(-1)?.message.streaming).toBe(false);
+        expect(recorded.at(-1)?.type).toBe("turn.terminal");
+        expect(fake.controls).toEqual(["register", "activate", "pause"]);
+      }),
+    ),
+  );
+
+  it.live("settles reasoning before showing one canonical final answer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "analysis",
+          messageId: "thinking",
+          text: "Checking the request",
+          status: "in_progress",
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "final-draft",
+          text: "The result is Y.",
+          status: "in_progress",
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "final-canonical",
+          text: "The result is Y.",
+          status: "finished_successfully",
+          hidden: true,
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const items = recorded.flatMap((event) =>
+          event.type === "turn_item.updated" ? [event.turnItem] : [],
+        );
+        const reasoning = items.filter((item) => item.type === "reasoning");
+        expect(reasoning.map((item) => item.status)).toEqual(["running", "completed"]);
+        expect(reasoning.at(-1)?.streaming).toBe(false);
+        const finalMessages = recorded.filter((event) => event.type === "message.updated");
+        expect(new Set(finalMessages.map((event) => event.message.id)).size).toBe(1);
+        expect(finalMessages.at(-1)?.message.text).toBe("The result is Y.");
+        expect(items.at(-1)?.type).toBe("assistant_message");
+      }),
+    ),
+  );
+
   it.live("pauses recovery when a submission fails before the generation starts", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -414,26 +498,36 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
-  it.live("keeps the run active after stream completion until Terminal MCP marks done", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const { events, fake, requestId } = yield* fixture;
-        yield* Queue.take(events);
-        fake.callback?.({ kind: "complete", requestId, conversationId: null });
-        fake.publish(terminal("continue"));
-        yield* Effect.sleep("15 millis");
-        expect(fake.sent).toEqual([requestId, "continue-1"]);
-        expect(fake.stops).toBe(0);
-        fake.publish(terminal("state", "done"));
-        fake.callback?.({ kind: "complete", requestId: "continue-1", conversationId: null });
-        const ended = yield* Stream.fromQueue(events).pipe(
-          Stream.filter((e) => e.type === "turn.terminal"),
-          Stream.take(1),
-          Stream.runCollect,
-        );
-        expect(ended[0]?.status).toBe("completed");
-      }),
-    ),
+  it.live(
+    "keeps tool-using runs active after stream completion until Terminal MCP marks done",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId } = yield* fixture;
+          yield* Queue.take(events);
+          fake.callback?.({
+            kind: "update",
+            requestId,
+            conversationId: null,
+            role: "assistant",
+            recipient: "api_tool.call_tool",
+            text: "fedora_t3code.run_command",
+          });
+          fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          fake.publish(terminal("continue"));
+          yield* Effect.sleep("15 millis");
+          expect(fake.sent).toEqual([requestId, "continue-1"]);
+          expect(fake.stops).toBe(0);
+          fake.publish(terminal("state", "done"));
+          fake.callback?.({ kind: "complete", requestId: "continue-1", conversationId: null });
+          const ended = yield* Stream.fromQueue(events).pipe(
+            Stream.filter((e) => e.type === "turn.terminal"),
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          expect(ended[0]?.status).toBe("completed");
+        }),
+      ),
   );
   it.live("ignores old task completion and stops an unfinished generation before recovery", () =>
     Effect.scoped(

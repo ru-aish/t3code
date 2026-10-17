@@ -22,6 +22,34 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("shows cached ChatGPT models as unavailable until the desktop connection is ready", () => {
+    const chatgpt = {
+      instanceId: "chatgpt",
+      driver: "chatgpt",
+      displayName: "ChatGPT",
+      enabled: true,
+      installed: false,
+      auth: { status: "unknown" },
+      models: [{ slug: "gpt-6", name: "GPT-6", capabilities: null }],
+    };
+    const disconnected = { providers: [chatgpt] } as unknown as ServerConfig;
+    const [option] = buildModelOptions(disconnected, null, undefined, null);
+    expect(option).toMatchObject({ providerLabel: "ChatGPT", isUnavailable: true });
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: null,
+        modelOptions: [option!],
+      }),
+    ).toBeNull();
+
+    const ready = {
+      providers: [{ ...chatgpt, installed: true, auth: { status: "authenticated" } }],
+    } as unknown as ServerConfig;
+    expect(buildModelOptions(ready, null, undefined, null)[0]?.isUnavailable).toBeUndefined();
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [

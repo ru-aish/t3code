@@ -237,10 +237,13 @@ export function buildModelOptions(
   const options = new Map<string, ModelOption>();
 
   for (const provider of config?.providers ?? []) {
+    // A temporarily disconnected ChatGPT browser may still have a cached model catalog.
+    // Keep those models visible but disabled so the user can diagnose the connection.
+    const disconnectedChatGPT = provider.driver === "chatgpt" && !provider.installed;
     if (
       (providerInstanceId !== undefined && provider.instanceId !== providerInstanceId) ||
       !isProviderEnabledForProject(config, provider, projectId) ||
-      !provider.installed ||
+      (!provider.installed && !disconnectedChatGPT) ||
       provider.auth.status === "unauthenticated" ||
       (provider.driver === "antigravity" && provider.availability === "unavailable")
     ) {
@@ -276,6 +279,7 @@ export function buildModelOptions(
         canHide: !model.isCustom,
         isDefault: model.isDefault === true,
         isLegacy: model.isLegacy === true,
+        ...(disconnectedChatGPT ? { isUnavailable: true } : {}),
         ...(updateRequired ? { providerUpdateRequired: updateRequired } : {}),
         capabilities: model.capabilities,
         selection: normalizeSelectionOptions(
