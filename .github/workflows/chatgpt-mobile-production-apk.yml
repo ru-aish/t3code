@@ -97,7 +97,8 @@ jobs:
             adb exec-out screencap -p > smoke/screenshot.png
             adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke/process.txt
             test -s smoke/process.txt
-            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke/activities.txt | tee smoke/resumed-activity.txt
+            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke/activities.txt > smoke/resumed-activity.txt
+            cat smoke/resumed-activity.txt
             ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null' smoke/logcat.txt
       - name: Upload emulator smoke evidence
         if: always()
