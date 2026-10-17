@@ -21,32 +21,58 @@ jobs:
           run-install: false
       - name: Install mobile dependencies
         run: vp install --frozen-lockfile --filter=@t3tools/mobile...
-      - name: Inspect navigation dependency graph and exports
+      - name: Inspect native stack implementation
         working-directory: apps/mobile
         run: |
           set -euxo pipefail
-          node --input-type=module <<'NODE'
-          import * as native from '@react-navigation/native';
-          import * as nativeStack from '@react-navigation/native-stack';
-          import fs from 'node:fs';
-          const readVersion = (name) => JSON.parse(fs.readFileSync(require.resolve(name + '/package.json'), 'utf8')).version;
-          console.log('native exports', {
-            useNavigationBuilder: typeof native.useNavigationBuilder,
-            createNavigatorFactory: typeof native.createNavigatorFactory,
-            StackRouter: typeof native.StackRouter,
-          });
-          console.log('native-stack exports', {
-            createNativeStackNavigator: typeof nativeStack.createNativeStackNavigator,
-            createNativeStackScreen: typeof nativeStack.createNativeStackScreen,
-          });
-          NODE
-      - name: Print package versions and native stack implementation
+          echo '--- native-stack package ---'
+          find ../../node_modules/.pnpm -path '*react-navigation+native-stack@7.21.0*' -type f -name 'package.json' -print -exec sed -n '1,120p' {} \; | head -220
+          echo '--- createNativeStackNavigator ---'
+          find ../../node_modules/.pnpm -path '*react-navigation+native-stack@7.21.0*' -type f \( -name 'createNativeStackNavigator.js' -o -name 'createNativeStackNavigator.tsx' -o -name 'createNativeStackNavigator.ts' \) -print -exec sed -n '1,260p' {} \; | head -900
+      - name: Generate production Metro bundle and sourcemap
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: |
+          set -euxo pipefail
+          mkdir -p ../../diagnostic/assets
+          pnpm exec expo export:embed \
+            --entry-file index.ts \
+            --platform android \
+            --dev false \
+            --minify true \
+            --bundle-output ../../diagnostic/index.android.bundle \
+            --sourcemap-output ../../diagnostic/index.android.bundle.map \
+            --assets-dest ../../diagnostic/assets
+          wc -c ../../diagnostic/index.android.bundle ../../diagnostic/index.android.bundle.map
+      - name: Symbolicate observed crash offsets
         working-directory: apps/mobile
         run: |
           set -euxo pipefail
-          for p in @react-navigation/native @react-navigation/core @react-navigation/routers @react-navigation/native-stack react-native-screens; do
-            node -e "console.log('$p', require('$p/package.json').version)"
-          done
-          node -p "require.resolve('@react-navigation/native-stack')"
-          find ../../node_modules/.pnpm -path '*react-navigation+native-stack*' -type f -name 'createNativeStackNavigator.*' -print -exec sed -n '1,220p' {} \; | head -600
-          find ../../node_modules/.pnpm -path '*react-navigation+native*' -type f -name 'useNavigationBuilder.*' -print | head -20
+          cat > ../../diagnostic/stack.txt <<'EOF'
+          NativeStackNavigator@index.android.bundle:1:4821376
+          NativeStackNavigator@index.android.bundle:1:4821106
+          AdaptiveRootStack@index.android.bundle:1:4616427
+          EOF
+          (pnpm exec metro-symbolicate ../../diagnostic/index.android.bundle.map < ../../diagnostic/stack.txt || true) | tee ../../diagnostic/symbolicated.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('../../diagnostic/index.android.bundle')
+          data=p.read_bytes()
+          for off in (4821376,4821106,4616427):
+              lo=max(0,off-500)
+              hi=min(len(data),off+500)
+              print(f'--- bundle bytes around {off} ---')
+              print(data[lo:hi].decode('utf-8','replace'))
+          PY
+      - name: Upload diagnostic bundle
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mobile-navigation-diagnostic
+          path: diagnostic/
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
