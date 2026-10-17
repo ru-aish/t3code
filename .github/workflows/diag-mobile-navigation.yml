@@ -35,7 +35,9 @@ jobs:
           echo '--- core useNavigationBuilder ---'
           core=$(find node_modules/.pnpm -path '*/node_modules/@react-navigation/core/lib/module/useNavigationBuilder.js' -type f | head -1)
           echo "core_file=$core"
-          sed -n '1,320p' "$core"
+          grep -n -E 'NavigationContent|render|return \\{' "$core" | tail -80 || true
+          echo '--- core tail ---'
+          tail -220 "$core"
           echo '--- native index export ---'
           nat=$(find node_modules/.pnpm -path '*/node_modules/@react-navigation/native/lib/module/index.js' -type f | head -1)
           echo "native_index=$nat"
