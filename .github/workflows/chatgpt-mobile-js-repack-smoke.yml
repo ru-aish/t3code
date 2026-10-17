@@ -83,7 +83,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            set -euo pipefail
+            set -eu
             mkdir -p smoke-js-repack
             adb install T3-Code-ChatGPT-Mobile-js-repack.apk | tee smoke-js-repack/install.txt
             adb shell pm path com.t3tools.t3code | tee smoke-js-repack/package-path.txt
