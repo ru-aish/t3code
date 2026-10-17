@@ -36,39 +36,27 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            set -eu
             mkdir -p smoke-replay
-            apk=artifact/T3-Code-ChatGPT-Mobile-production.apk
-            test -s "$apk"
+            test -s artifact/T3-Code-ChatGPT-Mobile-production.apk
             adb wait-for-device
-            adb install -r "$apk" | tee smoke-replay/install.txt
+            adb install -r artifact/T3-Code-ChatGPT-Mobile-production.apk | tee smoke-replay/install.txt
             adb shell pm path com.t3tools.t3code | tee smoke-replay/package-path.txt
             adb logcat -c
             adb shell am force-stop com.t3tools.t3code
-            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-replay/start.txt || true
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-replay/start.txt
             sleep 15
-            adb shell dumpsys activity activities > smoke-replay/activities.txt || true
-            adb shell dumpsys window windows > smoke-replay/windows.txt || true
-            adb shell dumpsys package com.t3tools.t3code > smoke-replay/package.txt || true
+            adb shell dumpsys activity activities > smoke-replay/activities.txt
+            adb shell dumpsys window windows > smoke-replay/windows.txt
+            adb shell dumpsys package com.t3tools.t3code > smoke-replay/package.txt
             adb shell dumpsys dropbox --print data_app_crash > smoke-replay/dropbox-data-app-crash.txt || true
-            adb logcat -d -v threadtime > smoke-replay/logcat.txt || true
+            adb logcat -d -v threadtime > smoke-replay/logcat.txt
             adb shell uiautomator dump /sdcard/window.xml || true
             adb pull /sdcard/window.xml smoke-replay/window.xml || true
-            adb exec-out screencap -p > smoke-replay/screenshot.png || true
-            pid="$(adb shell pidof com.t3tools.t3code | tr -d '\r' || true)"
-            printf 'pid=%s\n' "$pid" | tee smoke-replay/process.txt
-            if [ -z "$pid" ]; then
-              echo 'Production app process exited after launch' >&2
-              grep -E -i 'AndroidRuntime|FATAL EXCEPTION|com\.t3tools\.t3code|ReactNativeJS|SoLoader|UnsatisfiedLinkError|Exception|Error' smoke-replay/logcat.txt | tail -250 || true
-              exit 1
-            fi
-            resumed="$(grep -m1 'mResumedActivity' smoke-replay/activities.txt || true)"
-            printf '%s\n' "$resumed" | tee smoke-replay/resumed-activity.txt
-            printf '%s\n' "$resumed" | grep -F 'com.t3tools.t3code'
-            if grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError' smoke-replay/logcat.txt; then
-              echo 'Production APK emitted a fatal startup error' >&2
-              exit 1
-            fi
+            adb exec-out screencap -p > smoke-replay/screenshot.png
+            adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-replay/process.txt
+            test -s smoke-replay/process.txt
+            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke-replay/activities.txt | tee smoke-replay/resumed-activity.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError' smoke-replay/logcat.txt
       - name: Upload replay evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
