@@ -355,7 +355,7 @@ export const makeChatGPTAdapter = (
             }
           }
           if (update.kind === "complete") {
-            if (update.requestId === active?.requestId) {
+            if (active && update.requestId === active.requestId) {
               yield* settleReasoning(active);
               streamComplete = true;
               if (!usedTerminalTools && binding.state !== "done") {
