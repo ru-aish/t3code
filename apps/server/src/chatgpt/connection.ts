@@ -190,6 +190,7 @@ export class ChatGPTConnection {
   private writes = Promise.resolve();
   private binding = "__t3_chatgpt_" + NodeCrypto.randomUUID().replaceAll("-", "");
   private callback: ((update: ChatGPTUpdate) => void) | undefined;
+  private deliveryBarrier = Promise.resolve();
   private closed = false;
   readonly cachePath: string;
   readonly options: {
@@ -270,22 +271,38 @@ export class ChatGPTConnection {
       const params = raw as { name: string; payload: string };
       if (method !== "Runtime.bindingCalled" || params.name !== this.binding) return;
       const update = JSON.parse(params.payload) as ChatGPTUpdate;
-      if (update.conversationId) this.cache.conversationId = update.conversationId;
-      if (update.messageId && update.text !== undefined)
-        this.cache.messages[update.messageId] = {
-          ...update,
-          messageId: update.messageId,
-          text: update.text,
-        };
-      // Persist before exposing identity: tool calls must resolve to the same durable binding.
-      void this.persist()
-        .then(() => this.callback?.(update))
-        .catch(() => {
-          this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
-        });
+      this.acceptRendererUpdate(update);
     });
     await this.cdp.call("Runtime.addBinding", { name: this.binding });
     return this.cdp;
+  }
+  private acceptRendererUpdate(update: ChatGPTUpdate) {
+    const conversationChanged =
+      update.conversationId !== null && update.conversationId !== this.cache.conversationId;
+    if (update.conversationId) this.cache.conversationId = update.conversationId;
+    if (update.messageId && update.text !== undefined)
+      this.cache.messages[update.messageId] = {
+        ...update,
+        messageId: update.messageId,
+        text: update.text,
+      };
+
+    // Only conversation identity is a delivery durability barrier. Waiting for
+    // a full cache write on every token can leave completion queued long after
+    // Terminal MCP has already reported the task done.
+    if (conversationChanged) this.deliveryBarrier = this.persist().then(() => undefined);
+    const delivery = this.deliveryBarrier.then(() => this.callback?.(update));
+    void delivery.catch(() => {
+      this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
+    });
+
+    // Keep the diagnostic cache durable at stream boundaries without putting
+    // ordinary token updates on the delivery critical path.
+    if (!conversationChanged && (update.kind === "complete" || update.kind === "error")) {
+      void this.persist().catch(() => {
+        this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
+      });
+    }
   }
   async models(): Promise<ChatGPTModel[]> {
     const cdp = await this.renderer();

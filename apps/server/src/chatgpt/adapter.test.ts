@@ -322,6 +322,50 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
+  it.live("deduplicates escaped and canonical copies of the same streamed final answer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const escaped =
+          "## Result\n\nAt **11:58:03 AM**, the task was done\\.\n\nAt **11:58:36 AM\\:** it resumed.";
+        const canonical =
+          "## Result\n\nAt **11:58:03 AM**, the task was done.\n\nAt **11:58:36 AM:** it resumed.";
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "visible-final",
+          text: escaped,
+          status: "in_progress",
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "canonical-final",
+          text: canonical,
+          status: "finished_successfully",
+          hidden: true,
+        });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const messages = recorded.filter((event) => event.type === "message.updated");
+        expect(new Set(messages.map((event) => event.message.id)).size).toBe(1);
+        expect(messages.at(-1)?.message.text).toBe(canonical);
+        expect(messages.at(-1)?.message.text).not.toContain(escaped + "\n\n");
+      }),
+    ),
+  );
+
   it.live(
     "renders previously hidden final-answer sections but not hidden tool or reasoning output",
     () =>

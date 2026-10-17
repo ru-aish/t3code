@@ -21,6 +21,26 @@ describe("ChatGPT protocol", () => {
     ).toBe("Paragraph one.\n\nParagraph two.\n\nParagraph three.");
   });
 
+  it("deduplicates canonical copies that only change Markdown escaping", () => {
+    const escaped = [
+      "## What actually went wrong",
+      "At **11:58:03 AM**, the task was `done`\\.",
+      "The event was marked **acknowledged**\\.",
+      "At **11:58:36 AM\\:** a new turn started.",
+    ].join("\n\n");
+    const canonical = [
+      "## What actually went wrong",
+      "At **11:58:03 AM**, the task was `done`.",
+      "The event was marked **acknowledged**.",
+      "At **11:58:36 AM:** a new turn started.",
+    ].join("\n\n");
+    expect(mergeFinalAnswer(escaped, canonical)).toBe(canonical);
+    expect(mergeFinalAnswer(canonical, escaped)).toBe(escaped);
+    expect(mergeFinalAnswer("Use `\\.` in this regex.", "Use `.` in this regex.")).toBe(
+      "Use `\\.` in this regex.\n\nUse `.` in this regex.",
+    );
+  });
+
   it("retains the complete answer and recognizes the hidden ending copy", () => {
     const full =
       "First paragraph\n\n## Evidence\nThe findings are here.\n\n## Conclusion\nComplete.";
