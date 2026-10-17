@@ -1,0 +1,60 @@
+name: ChatGPT Mobile Production APK
+on:
+  push:
+    branches: [build/chatgpt-production-apk-5a773cce3]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
+      - name: Generate Android native project
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+      - name: Use stable Android compile SDK
+        run: |
+          echo 'android.compileSdkVersion=36' >> apps/mobile/android/gradle.properties
+          echo 'android.buildToolsVersion=36.0.0' >> apps/mobile/android/gradle.properties
+      - name: Assemble standalone APK
+        working-directory: apps/mobile/android
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+        run: ./gradlew :app:assembleRelease --no-daemon
+      - name: Verify APK
+        run: |
+          test -s apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk T3-Code-ChatGPT-Mobile-production.apk
+          sha256sum T3-Code-ChatGPT-Mobile-production.apk > SHA256SUMS.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-production-apk
+          path: |
+            T3-Code-ChatGPT-Mobile-production.apk
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
