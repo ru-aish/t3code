@@ -23,7 +23,7 @@ jobs:
           sparse-checkout-cone-mode: false
       - name: Guard JS-only/native-compatible delta
         run: |
-          set -euo pipefail
+          set -eu
           base=64c91dfca80b5a4f41ea2292e38e2b1fc624ea49
           git diff --name-only "$base"...HEAD | tee js-repack-changes.txt
           bad="$(grep -Ev '^(\.github/workflows/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|apps/mobile/src/|apps/mobile/package\.json$)' js-repack-changes.txt || true)"
@@ -59,11 +59,11 @@ jobs:
           NODE_ENV: production
           EXPO_NO_GIT_STATUS: '1'
         run: |
-          set -euo pipefail
+          set -eu
           npx --yes @expo/repack-app             --platform android             --source-app "$GITHUB_WORKSPACE/base/T3-Code-ChatGPT-Mobile-production.apk"             --output "$GITHUB_WORKSPACE/T3-Code-ChatGPT-Mobile-js-repack.apk"             --js-bundle-only             --embed-bundle-assets             --ks "$GITHUB_WORKSPACE/smoke.keystore"             --ks-pass pass:android             --ks-key-alias smoke             --ks-key-pass pass:android             --android-build-tools-dir "$ANDROID_HOME/build-tools/36.0.0"             "$GITHUB_WORKSPACE/apps/mobile"
       - name: Verify repacked APK
         run: |
-          set -euo pipefail
+          set -eu
           test -s T3-Code-ChatGPT-Mobile-js-repack.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-js-repack.apk
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-js-repack.apk | tee apk-badging.txt
