@@ -25,44 +25,6 @@ jobs:
           run-install: false
       - name: Install mobile dependencies
         run: vp install --frozen-lockfile --filter=@t3tools/mobile...
-      - name: Align React Navigation native-stack runtime API
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          matches = list(Path("node_modules/.pnpm").glob("@react-navigation+native-stack@7.21.0*/node_modules/@react-navigation/native-stack/lib/module/navigators/createNativeStackNavigator.js"))
-          if len(matches) != 1:
-              raise SystemExit(f"expected exactly one native-stack runtime file, found {len(matches)}: {matches}")
-
-          path = matches[0]
-          source = path.read_text()
-          old_binding = "const { state, describe, descriptors, navigation, render } ="
-          new_binding = "const { state, describe, descriptors, navigation, NavigationContent } ="
-          if source.count(old_binding) != 1:
-              raise SystemExit("native-stack render binding shape changed")
-          source = source.replace(old_binding, new_binding, 1)
-
-          start_marker = "  return render("
-          start = source.find(start_marker)
-          if start < 0:
-              raise SystemExit("native-stack render call not found")
-          body_start = start + len(start_marker)
-          function_end = source.find("\n}", body_start)
-          if function_end < 0:
-              raise SystemExit("native-stack navigator function end not found")
-          wrapped = source[body_start:function_end]
-          if not wrapped.endswith(");"):
-              raise SystemExit(f"unexpected native-stack render tail: {wrapped[-80:]!r}")
-          child = wrapped[:-2]
-          replacement = "  return /*#__PURE__*/_jsx(NavigationContent, {\n    children: " + child + "\n  });"
-          source = source[:start] + replacement + source[function_end:]
-          path.write_text(source)
-
-          verify = path.read_text()
-          if "return render(" in verify or "NavigationContent" not in verify:
-              raise SystemExit("native-stack compatibility patch verification failed")
-          print(path)
-          PY
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools'
