@@ -26,7 +26,7 @@ jobs:
           set -euo pipefail
           base=64c91dfca80b5a4f41ea2292e38e2b1fc624ea49
           git diff --name-only "$base"...HEAD | tee js-repack-changes.txt
-          bad="$(grep -Ev '^(\.github/workflows/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|apps/mobile/src/|apps/mobile/package\.json$|patches/@react-navigation%2Fnative-stack@7\.21\.0\.patch$)' js-repack-changes.txt || true)"
+          bad="$(grep -Ev '^(\.github/workflows/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|apps/mobile/src/|apps/mobile/package\.json$)' js-repack-changes.txt || true)"
           if [ -n "$bad" ]; then
             echo "JS repack is unsafe because native-relevant files changed:"
             echo "$bad"
@@ -42,23 +42,7 @@ jobs:
         with:
           packages: 'platform-tools'
       - name: Install Android build tools
-        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
-      - name: Generate Android project
-        working-directory: apps/mobile
-        env:
-          APP_VARIANT: production
-          EXPO_NO_GIT_STATUS: '1'
-        run: pnpm exec expo prebuild --platform android --clean --no-install
-      - name: Configure stable Android SDK
-        run: |
-          echo 'android.compileSdkVersion=36' >> apps/mobile/android/gradle.properties
-          echo 'android.buildToolsVersion=36.0.0' >> apps/mobile/android/gradle.properties
-      - name: Build production JS bundle only
-        working-directory: apps/mobile/android
-        env:
-          APP_VARIANT: production
-          NODE_ENV: production
-        run: ./gradlew :app:createBundleReleaseJsAndAssets --no-daemon --build-cache
+        run: sdkmanager --install 'build-tools;36.0.0'
       - name: Download native-compatible base APK
         uses: actions/download-artifact@v4
         with:
@@ -66,36 +50,21 @@ jobs:
           path: base
           run-id: 39033226092
           github-token: ${{ github.token }}
-      - name: Replace bundled JS without rebuilding native code
+      - name: Create CI signing key
+        run: |
+          keytool -genkeypair -noprompt             -keystore smoke.keystore             -storepass android             -keypass android             -alias smoke             -dname 'CN=T3 JS Repack Smoke'             -keyalg RSA             -keysize 2048             -validity 3650
+      - name: Repack production APK without native compilation
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+          EXPO_NO_GIT_STATUS: '1'
         run: |
           set -euo pipefail
-          bundle=apps/mobile/android/app/build/generated/assets/react/release/index.android.bundle
-          base=base/T3-Code-ChatGPT-Mobile-production.apk
-          test -s "$bundle"
-          test -s "$base"
-          python3 - <<'PY'
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          base = Path("base/T3-Code-ChatGPT-Mobile-production.apk")
-          bundle = Path("apps/mobile/android/app/build/generated/assets/react/release/index.android.bundle").read_bytes()
-          out = Path("T3-Code-ChatGPT-Mobile-js-repack-unsigned.apk")
-          replaced = False
-          with ZipFile(base, "r") as zin, ZipFile(out, "w", allowZip64=True) as zout:
-              for info in zin.infolist():
-                  if info.filename.startswith("META-INF/"):
-                      continue
-                  data = zin.read(info.filename)
-                  if info.filename == "assets/index.android.bundle":
-                      data = bundle
-                      replaced = True
-                  zout.writestr(info, data)
-          if not replaced:
-              raise SystemExit("base APK has no assets/index.android.bundle")
-          PY
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -p 4 T3-Code-ChatGPT-Mobile-js-repack-unsigned.apk T3-Code-ChatGPT-Mobile-js-repack-aligned.apk
-          keytool -genkeypair -noprompt -keystore smoke.keystore -storepass android -keypass android -alias smoke -dname 'CN=T3 JS Repack Smoke' -keyalg RSA -keysize 2048 -validity 3650
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks smoke.keystore --ks-pass pass:android --key-pass pass:android --out T3-Code-ChatGPT-Mobile-js-repack.apk T3-Code-ChatGPT-Mobile-js-repack-aligned.apk
+          npx --yes @expo/repack-app             --platform android             --source-app "$GITHUB_WORKSPACE/base/T3-Code-ChatGPT-Mobile-production.apk"             --output "$GITHUB_WORKSPACE/T3-Code-ChatGPT-Mobile-js-repack.apk"             --js-bundle-only             --embed-bundle-assets             --ks "$GITHUB_WORKSPACE/smoke.keystore"             --ks-pass pass:android             --ks-key-alias smoke             --ks-key-pass pass:android             --android-build-tools-dir "$ANDROID_HOME/build-tools/36.0.0"             "$GITHUB_WORKSPACE/apps/mobile"
+      - name: Verify repacked APK
+        run: |
+          set -euo pipefail
+          test -s T3-Code-ChatGPT-Mobile-js-repack.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-js-repack.apk
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-js-repack.apk | tee apk-badging.txt
           grep -F "package: name='com.t3tools.t3code'" apk-badging.txt
@@ -117,12 +86,18 @@ jobs:
             set -euo pipefail
             mkdir -p smoke-js-repack
             adb install T3-Code-ChatGPT-Mobile-js-repack.apk | tee smoke-js-repack/install.txt
+            adb shell pm path com.t3tools.t3code | tee smoke-js-repack/package-path.txt
             adb logcat -c
+            adb shell am force-stop com.t3tools.t3code
             adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-js-repack/start.txt
             sleep 8
             adb shell dumpsys activity activities > smoke-js-repack/activities.txt
+            adb shell dumpsys window windows > smoke-js-repack/windows.txt
+            adb shell dumpsys package com.t3tools.t3code > smoke-js-repack/package.txt
             adb shell dumpsys dropbox --print data_app_crash > smoke-js-repack/dropbox-data-app-crash.txt || true
             adb logcat -d -v threadtime > smoke-js-repack/logcat.txt
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml smoke-js-repack/window.xml || true
             adb exec-out screencap -p > smoke-js-repack/screenshot.png
             adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-js-repack/process.txt
             test -s smoke-js-repack/process.txt
