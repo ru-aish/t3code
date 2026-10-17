@@ -21,6 +21,17 @@ jobs:
           run-install: false
       - name: Install mobile dependencies
         run: vp install --no-frozen-lockfile --filter=@t3tools/mobile...
+      - name: Typecheck mobile
+        run: vp run --filter=@t3tools/mobile typecheck
+      - name: Upload regenerated lockfile
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: navigation-core-7-24-lockfile
+          path: pnpm-lock.yaml
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - name: Print resolved navigation packages
         run: |
           set -eu
