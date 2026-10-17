@@ -1,0 +1,69 @@
+name: Diagnose Mobile JS Stack
+on:
+  push:
+    branches: [diag/mobile-js-stack-64c91df]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - name: Generate production JS bundle and source map
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: |
+          pnpm exec expo export:embed \
+            --platform android \
+            --dev false \
+            --entry-file index.ts \
+            --bundle-output "$RUNNER_TEMP/index.android.bundle" \
+            --sourcemap-output "$RUNNER_TEMP/index.android.bundle.map" \
+            --minify true
+      - name: Inspect failing bundle offsets
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ["RUNNER_TEMP"])/"index.android.bundle"
+          text=p.read_text(errors="replace")
+          print("bundle_bytes", p.stat().st_size)
+          for pos in (4821106,4821376,6937365):
+              print("\n=== OFFSET",pos,"===")
+              lo=max(0,pos-1200); hi=min(len(text),pos+1200)
+              print(text[lo:hi])
+          PY
+      - name: Symbolicate captured stack
+        working-directory: apps/mobile
+        run: |
+          printf '%s\n' \
+            'at NativeStackNavigator (index.android.bundle:1:4821376)' \
+            'at NativeStackNavigator (index.android.bundle:1:6937365)' \
+            'at AdaptiveRootStack (index.android.bundle:1:4616427)' \
+            | pnpm exec metro-symbolicate "$RUNNER_TEMP/index.android.bundle.map" || true
+      - name: Upload diagnostic bundle
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mobile-js-bundle-diagnostic
+          path: |
+            ${{ runner.temp }}/index.android.bundle
+            ${{ runner.temp }}/index.android.bundle.map
+          if-no-files-found: warn
+          retention-days: 2
+          compression-level: 0
