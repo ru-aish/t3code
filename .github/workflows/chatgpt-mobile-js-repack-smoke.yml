@@ -102,7 +102,7 @@ jobs:
             adb exec-out screencap -p > smoke-js-repack/screenshot.png
             adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-js-repack/process.txt
             test -s smoke-js-repack/process.txt
-            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke-js-repack/activities.txt > smoke-js-repack/resumed-activity.txt
+            grep -m1 -E '(topResumedActivity|ResumedActivity|mResumedActivity).*com.t3tools.t3code' smoke-js-repack/activities.txt > smoke-js-repack/resumed-activity.txt
             cat smoke-js-repack/resumed-activity.txt
             ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke-js-repack/logcat.txt
       - name: Upload JS-repack evidence
