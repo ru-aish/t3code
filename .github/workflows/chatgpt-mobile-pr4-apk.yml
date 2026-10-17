@@ -22,7 +22,6 @@ jobs:
           run-install: false
       - name: Install mobile dependencies
         run: vp install --frozen-lockfile --filter=@t3tools/mobile...
-      - uses: android-actions/setup-android@v3
       - name: Install Android SDK components
         run: |
           yes | sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006' || test "${PIPESTATUS[0]}" = 141
