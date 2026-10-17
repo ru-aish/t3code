@@ -1,3 +1,31 @@
+diff --git a/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationBuilder.kt b/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationBuilder.kt
+--- a/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationBuilder.kt
++++ b/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationBuilder.kt
+@@ -16,3 +16,3 @@
+ import expo.modules.widgets.R
+-import io.github.jakex7.peek.notification.PeekNotificationViews
+-import io.github.jakex7.peek.notification.setPeekContent
++import io.github.expo.peek.notification.PeekNotificationViews
++import io.github.expo.peek.notification.setPeekContent
+diff --git a/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationRenderer.kt b/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationRenderer.kt
+--- a/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationRenderer.kt
++++ b/android/src/main/java/expo/modules/widgets/notifications/CustomNotificationRenderer.kt
+@@ -10,4 +10,4 @@
+ import expo.modules.widgets.toPeekRoot
+-import io.github.jakex7.peek.emittables.peekEmittableNotificationViews
+-import io.github.jakex7.peek.notification.PeekNotificationSizes
+-import io.github.jakex7.peek.notification.PeekNotificationViews
++import io.github.expo.peek.emittables.peekEmittableNotificationViews
++import io.github.expo.peek.notification.PeekNotificationSizes
++import io.github.expo.peek.notification.PeekNotificationViews
+diff --git a/android/src/main/java/expo/modules/widgets/notifications/CustomNotifications.kt b/android/src/main/java/expo/modules/widgets/notifications/CustomNotifications.kt
+--- a/android/src/main/java/expo/modules/widgets/notifications/CustomNotifications.kt
++++ b/android/src/main/java/expo/modules/widgets/notifications/CustomNotifications.kt
+@@ -5,3 +5,3 @@
+ import androidx.core.app.NotificationManagerCompat
+-import io.github.jakex7.peek.notification.PeekNotificationViews
++import io.github.expo.peek.notification.PeekNotificationViews
+ import kotlinx.coroutines.CancellationException
 diff --git a/build/Widgets.types.d.ts b/build/Widgets.types.d.ts
 index 4c474bb..b0173df 100644
 --- a/build/Widgets.types.d.ts
