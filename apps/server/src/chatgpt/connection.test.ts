@@ -1,6 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Wire tests exercise real binary files and serialized renderer code.
 import { describe, expect, it } from "@effect/vitest";
-import { ChatGPTConnection, executionPrompt, stableMessageId } from "./connection.ts";
+import {
+  ChatGPTConnection,
+  executionPrompt,
+  stableMessageId,
+  type ChatGPTUpdate,
+} from "./connection.ts";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -24,6 +29,56 @@ describe("ChatGPT submission identity", () => {
       expect(compiled).toContain(
         "Without fedora_t3code tool use, simply end your response normally.",
       );
+    }
+  });
+});
+
+describe("ChatGPT streamed update delivery", () => {
+  it("does not block known-conversation updates on diagnostic cache writes", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-stream-"));
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "thread",
+      cacheDir: directory,
+    });
+    await connection.adoptConversation("conversation");
+    const delivered: string[] = [];
+    connection.onUpdate((update) => delivered.push(update.messageId ?? update.kind));
+    const gate = Promise.withResolvers<void>();
+    const internals = connection as unknown as {
+      persist: () => Promise<void>;
+      acceptRendererUpdate: (update: ChatGPTUpdate) => void;
+    };
+    const persist = vi.fn(() => gate.promise);
+    internals.persist = persist;
+    try {
+      internals.acceptRendererUpdate({
+        kind: "update",
+        requestId: "request",
+        conversationId: "conversation",
+        messageId: "delta",
+        text: "Streaming",
+      });
+      await Promise.resolve();
+      expect(delivered).toEqual(["delta"]);
+      expect(persist).not.toHaveBeenCalled();
+
+      internals.acceptRendererUpdate({
+        kind: "complete",
+        requestId: "request",
+        conversationId: "conversation",
+      });
+      await Promise.resolve();
+      expect(delivered).toEqual(["delta", "complete"]);
+      expect(persist).toHaveBeenCalledTimes(1);
+      gate.resolve();
+      await gate.promise;
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
 });

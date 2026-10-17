@@ -227,6 +227,7 @@ export const makeChatGPTAdapter = (
         const finalFragments = new Map<string, Map<string, string>>();
         const reasoningKeys = new Set<string>();
         let streamComplete = false;
+        let completionRecoveryRequestId: string | null = null;
         let usedTerminalTools = false;
         let generation = 0;
         let nextOrdinal = 0;
@@ -328,6 +329,29 @@ export const makeChatGPTAdapter = (
             threadDisposition: "reusable",
           });
         });
+        const recoverMissingCompletion = Effect.fnUntraced(function* (requestId: string) {
+          if (completionRecoveryRequestId === requestId) return;
+          completionRecoveryRequestId = requestId;
+          for (let probe = 0; probe < 20; probe++) {
+            if (
+              !active ||
+              active.requestId !== requestId ||
+              streamComplete ||
+              binding.state !== "done"
+            )
+              break;
+            const idle = yield* attempt(() => connection.isConversationIdle()).pipe(
+              Effect.catch(() => Effect.succeed(false)),
+            );
+            if (idle) {
+              streamComplete = true;
+              yield* finish("completed");
+              break;
+            }
+            yield* Effect.sleep("250 millis");
+          }
+          if (completionRecoveryRequestId === requestId) completionRecoveryRequestId = null;
+        });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
           if (
             update.role === "assistant" &&
@@ -374,8 +398,13 @@ export const makeChatGPTAdapter = (
           const isFinalAnswer =
             update.role === "assistant" &&
             (!update.channel || update.channel === "final") &&
+            (!update.recipient || update.recipient === "all") &&
+            update.hidden !== true;
+          const isReasoning =
+            update.role === "assistant" &&
+            (update.channel === "analysis" || update.channel === "commentary") &&
             (!update.recipient || update.recipient === "all");
-          if (update.kind === "error" || (update.hidden && !isFinalAnswer)) return;
+          if (update.kind === "error" || update.hidden) return;
           const outputTurn = update.requestId ? outputTurns.get(update.requestId) : undefined;
           if (
             !outputTurn ||
@@ -439,7 +468,7 @@ export const makeChatGPTAdapter = (
             completedAt: streaming ? null : timestamp,
             updatedAt: timestamp,
           };
-          if (update.channel === "analysis") {
+          if (isReasoning) {
             reasoningKeys.add(key);
             yield* emit({
               type: "turn_item.updated",
@@ -499,6 +528,8 @@ export const makeChatGPTAdapter = (
               } else if (control.kind === "state" && control.payload.state === "done") {
                 binding = { ...binding, state: "done" };
                 if (streamComplete) yield* finish("completed");
+                else if (active)
+                  yield* recoverMissingCompletion(active.requestId).pipe(Effect.forkScoped);
               } else if (control.kind === "continue" && active) {
                 const claim = yield* attempt(() =>
                   connection.control<{ valid: boolean }>("claim", { eventId: control.event_id }),
