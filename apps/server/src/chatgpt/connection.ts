@@ -272,7 +272,17 @@ export class ChatGPTConnection {
       }),
       signal: signal ?? AbortSignal.timeout(15_000),
     });
-    if (!response.ok) throw new Error(`Terminal MCP control request failed (${response.status})`);
+    if (!response.ok) {
+      const raw = await response.text().catch(() => "");
+      let detail = raw.trim();
+      try {
+        const decoded = JSON.parse(raw) as { error?: unknown };
+        if (typeof decoded.error === "string" && decoded.error.trim()) detail = decoded.error.trim();
+      } catch {}
+      throw new Error(
+        `Terminal MCP control request failed (${response.status})${detail ? `: ${detail}` : ""}`,
+      );
+    }
     return (await response.json()) as T;
   }
   private async renderer() {
