@@ -203,7 +203,6 @@ describe("ChatGPT app-owned delegation", () => {
                 dispatch: orchestrator.dispatch,
                 getThreadShell: orchestrator.getThreadShell,
                 getThreadRecords: orchestrator.getThreadRecords,
-                getThreadShell: orchestrator.getThreadShell,
                 recoverDelegatedTask: orchestrator.recoverDelegatedTask,
                 delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
                 hasReceipt: () => Effect.succeed(false),
