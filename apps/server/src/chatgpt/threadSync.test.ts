@@ -13,15 +13,17 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ThreadSync from "./threadSync.ts";
 
-it.effect(
-  "persists an idle thread's recovered answer before refresh succeeds, without duplicate imports",
-  () =>
+it.effect.each([false, true])(
+  "persists an idle thread's recovered answer before refresh succeeds, detached=%s",
+  (detached) =>
     Effect.scoped(
       Effect.gen(function* () {
         const entered = yield* Deferred.make<void>();
@@ -39,11 +41,12 @@ it.effect(
             activeProviderThreadId: "provider-thread",
             runtimeMode: "full-access",
             interactionMode: "default",
+            projectId: "project",
           },
           providerThreads: [
             { id: "provider-thread", driver: "chatgpt", providerSessionId: "session" },
           ],
-          providerSessions: [{ id: "session", cwd: "/tmp/isolated" }],
+          providerSessions: detached ? [] : [{ id: "session", cwd: "/tmp/isolated" }],
           runs: [
             {
               providerThreadId: "provider-thread",
@@ -70,6 +73,9 @@ it.effect(
             }),
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
         const dependencies = Layer.mergeAll(
+          Layer.mock(ProjectService.ProjectService)({
+            getById: () => Effect.succeed(Option.some({ workspaceRoot: "/tmp/isolated" } as never)),
+          }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThreadProjection: () =>
               Effect.succeed({
@@ -79,8 +85,10 @@ it.effect(
           }),
           Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
             get: () => Effect.succeedNone,
-            open: () =>
+            open: (input) =>
               Effect.sync(() => {
+                expect(input.providerSessionId).toBe("session");
+                expect(input.runtimePolicy.cwd).toBe("/tmp/isolated");
                 opens++;
                 return runtime;
               }),

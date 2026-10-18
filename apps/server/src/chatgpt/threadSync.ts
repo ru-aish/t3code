@@ -13,6 +13,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 
 const isRefreshError = Schema.is(ChatGPTThreadRefreshError);
 
@@ -42,25 +43,34 @@ export const layer = Layer.effect(
           const savedSession = projection.providerSessions.find(
             (session) => session.id === providerThread?.providerSessionId,
           );
-          if (!providerThread || providerThread.driver !== "chatgpt" || !savedSession)
+          if (!providerThread || providerThread.driver !== "chatgpt")
             return yield* new ChatGPTThreadRefreshError({ threadId });
           const modelSelection = [...projection.runs]
             .reverse()
             .find((run) => run.providerThreadId === providerThread.id)?.modelSelection;
           if (!modelSelection) return yield* new ChatGPTThreadRefreshError({ threadId });
-          const live = yield* sessions.get(savedSession.id);
+          const live = yield* sessions.get(providerThread.providerSessionId);
+          const cwd = savedSession?.cwd ?? projection.thread.worktreePath;
+          const project = cwd
+            ? Option.none()
+            : yield* (yield* ProjectService.ProjectService).getById(projection.thread.projectId);
+          const workspace = cwd ?? Option.getOrUndefined(project)?.workspaceRoot;
+          if (!workspace) return yield* new ChatGPTThreadRefreshError({ threadId });
           const runtime = Option.isSome(live)
             ? live.value
             : yield* sessions.open({
                 threadId,
-                providerSessionId: savedSession.id,
+                providerSessionId: providerThread.providerSessionId,
                 modelSelection,
                 runtimePolicy: {
-                  cwd: savedSession.cwd,
+                  cwd: workspace,
                   runtimeMode: projection.thread.runtimeMode,
                   interactionMode: projection.thread.interactionMode,
                 },
-                resumeFromSession: savedSession,
+                ...(savedSession ? { resumeFromSession: savedSession } : {}),
+                ...(providerThread.nativeThreadRef
+                  ? { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }
+                  : {}),
               });
           const snapshot = yield* runtime.readThreadSnapshot({
             providerThread,
@@ -97,7 +107,7 @@ export const layer = Layer.effect(
           const events: OrchestrationV2DomainEvent[] = [];
           for (const event of changes) {
             const normalized = yield* ingestor.normalize({
-              providerSessionId: savedSession.id,
+              providerSessionId: providerThread.providerSessionId,
               providerInstanceId: runtime.instanceId,
               threadId,
               event,
