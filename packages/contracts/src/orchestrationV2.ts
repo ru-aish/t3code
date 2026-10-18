@@ -1784,6 +1784,15 @@ export const OrchestrationV2LatestVisibleMessageSummary = Schema.Struct({
 export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
+export const OrchestrationV2PendingThreadWakeup = Schema.Struct({
+  wakeupId: Schema.String,
+  kind: Schema.Literals(["time", "process"]),
+  dueAt: Schema.NullOr(Schema.DateTimeUtc),
+  pid: Schema.NullOr(Schema.Number),
+  status: Schema.Literals(["scheduled", "due"]),
+});
+export type OrchestrationV2PendingThreadWakeup = typeof OrchestrationV2PendingThreadWakeup.Type;
+
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -1825,6 +1834,9 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   hasActionableProposedPlan: Schema.Boolean,
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  pendingWakeups: Schema.optional(Schema.Array(OrchestrationV2PendingThreadWakeup)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   providerInstanceHistory: Schema.optional(Schema.Array(ProviderInstanceId)).pipe(
@@ -1881,6 +1893,15 @@ export const OrchestrationV2ShellStreamItem = Schema.Union([
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationV2ShellSnapshot,
     resolvedRepositoryIdentityRoots: Schema.optionalKey(Schema.Array(Schema.String)),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("thread.wakeups"),
+    threads: Schema.Array(
+      Schema.Struct({
+        threadId: ThreadId,
+        pendingWakeups: Schema.Array(OrchestrationV2PendingThreadWakeup),
+      }),
+    ),
   }),
   Schema.Struct({
     kind: Schema.Literal("project.updated"),
@@ -2332,6 +2353,14 @@ export const OrchestrationV2LatestVisibleMessageSummaryJson =
 export type OrchestrationV2LatestVisibleMessageSummaryJson =
   typeof OrchestrationV2LatestVisibleMessageSummaryJson.Type;
 
+export const OrchestrationV2PendingThreadWakeupJson =
+  OrchestrationV2PendingThreadWakeup.mapFields((fields) => ({
+    ...fields,
+    dueAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  }));
+export type OrchestrationV2PendingThreadWakeupJson =
+  typeof OrchestrationV2PendingThreadWakeupJson.Type;
+
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2340,6 +2369,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),
+  pendingWakeups: Schema.optional(Schema.Array(OrchestrationV2PendingThreadWakeupJson)),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   createdAt: Schema.DateTimeUtcFromString,

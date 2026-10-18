@@ -1,6 +1,7 @@
 // The bridge relays opaque JSON-RPC lines verbatim; schema-decoding foreign
 // payloads here would reject traffic it must pass through untouched.
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off
+import * as NodeFSP from "node:fs/promises";
 import * as NodeReadline from "node:readline";
 
 import * as Cause from "effect/Cause";
@@ -289,14 +290,110 @@ export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.
   });
 }
 
+const CHATGPT_WAKE_TOOLS = new Set(["schedule_continue", "continue_after_process"]);
+
+export async function callChatGptWakeToolFromConfig(input: {
+  readonly configPath: string;
+  readonly tool: string;
+  readonly argumentsJson: string;
+  readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+}): Promise<unknown> {
+  if (!CHATGPT_WAKE_TOOLS.has(input.tool)) {
+    throw new AcpMcpBridgeError("chatgpt-wake-call only allows packaged self-wake tools.");
+  }
+  let config: unknown;
+  try {
+    config = JSON.parse(await NodeFSP.readFile(input.configPath, "utf8"));
+  } catch (cause) {
+    throw new AcpMcpBridgeError("Could not read the packaged ChatGPT wake bridge config.", {
+      cause,
+    });
+  }
+  if (
+    typeof config !== "object" ||
+    config === null ||
+    typeof (config as { endpoint?: unknown }).endpoint !== "string" ||
+    typeof (config as { authorization?: unknown }).authorization !== "string"
+  ) {
+    throw new AcpMcpBridgeError("Packaged ChatGPT wake bridge config is invalid.");
+  }
+  const { endpoint, authorization } = config as {
+    readonly endpoint: string;
+    readonly authorization: string;
+  };
+  let parsedEndpoint: URL;
+  try {
+    parsedEndpoint = new URL(endpoint);
+  } catch (cause) {
+    throw new AcpMcpBridgeError("Packaged ChatGPT wake bridge endpoint is invalid.", { cause });
+  }
+  if (
+    parsedEndpoint.protocol !== "http:" ||
+    !["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsedEndpoint.hostname)
+  ) {
+    throw new AcpMcpBridgeError("Packaged ChatGPT wake bridge endpoint must be loopback HTTP.");
+  }
+  if (!authorization.startsWith("Bearer ")) {
+    throw new AcpMcpBridgeError("Packaged ChatGPT wake bridge authorization is invalid.");
+  }
+  let argumentsValue: unknown;
+  try {
+    argumentsValue = JSON.parse(input.argumentsJson);
+  } catch (cause) {
+    throw new AcpMcpBridgeError("chatgpt-wake-call arguments must be valid JSON.", { cause });
+  }
+  if (
+    typeof argumentsValue !== "object" ||
+    argumentsValue === null ||
+    Array.isArray(argumentsValue)
+  ) {
+    throw new AcpMcpBridgeError("chatgpt-wake-call arguments must be a JSON object.");
+  }
+  return Effect.runPromise(
+    callAcpMcpTool({
+      endpoint,
+      authorization,
+      tool: input.tool,
+      arguments: argumentsValue as Record<string, unknown>,
+      ...(input.fetchImplementation === undefined
+        ? {}
+        : { fetchImplementation: input.fetchImplementation }),
+    }),
+  );
+}
+
 /**
  * Kept free of heavy imports: these commands run on the ACP first-message
  * critical path.
  */
 export async function runAcpMcpCliFastPath(
-  command: "acp-mcp-bridge" | "acp-mcp-call",
+  command: "acp-mcp-bridge" | "acp-mcp-call" | "chatgpt-wake-call",
   args: ReadonlyArray<string>,
 ): Promise<void> {
+  if (command === "chatgpt-wake-call") {
+    const [configPath, tool, argumentsJson] = args;
+    if (configPath === undefined || tool === undefined || argumentsJson === undefined) {
+      process.stderr.write(
+        "chatgpt-wake-call requires <config-path> <tool> <arguments-json>.\n",
+      );
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const result = await callChatGptWakeToolFromConfig({
+        configPath,
+        tool,
+        argumentsJson,
+      });
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      process.exitCode = 2;
+    }
+    return;
+  }
   const endpoint = process.env.T3_ACP_MCP_ENDPOINT;
   const authorization = process.env.T3_ACP_MCP_AUTHORIZATION;
   if (endpoint === undefined || authorization === undefined) {

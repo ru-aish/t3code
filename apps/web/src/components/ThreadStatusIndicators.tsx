@@ -15,7 +15,7 @@ import {
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
-import { FolderGit2Icon, TerminalIcon } from "lucide-react";
+import { AlarmClockIcon, CircleDashedIcon, FolderGit2Icon, TerminalIcon } from "lucide-react";
 import { useCallback, useMemo } from "react";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
@@ -55,6 +55,7 @@ import {
 } from "./Sidebar.logic";
 
 import type { SidebarThreadSummary } from "../types";
+import { formatRelativeTimeUntilLabel } from "../timestampFormat";
 import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { pullRequestListLines } from "./pullRequest/pullRequestListLines";
@@ -728,6 +729,133 @@ export function resolveDisplayedThreadPrProvider(input: {
   return undefined;
 }
 
+export interface ThreadWakeupPresentation {
+  readonly icon: "time" | "process" | "multiple";
+  readonly label: string;
+  readonly tooltip: string;
+  readonly colorClass: string;
+  readonly pulse: boolean;
+}
+
+function threadWakeupTimeLabel(
+  wakeup: NonNullable<SidebarThreadSummary["pendingWakeups"]>[number],
+): string {
+  if (wakeup.dueAt === null) return "";
+  const relative = formatRelativeTimeUntilLabel(wakeup.dueAt);
+  if (relative === "Expired") return "now";
+  if (relative === "Soon") return "soon";
+  return relative.replace(/ left$/, "");
+}
+
+function threadWakeupDetail(
+  wakeup: NonNullable<SidebarThreadSummary["pendingWakeups"]>[number],
+): string {
+  if (wakeup.status === "due") return "Ready to resume";
+  if (wakeup.kind === "time") {
+    const relative = threadWakeupTimeLabel(wakeup);
+    return relative ? `Scheduled wake in ${relative}` : "Scheduled wake";
+  }
+  return wakeup.pid === null
+    ? "Waiting for process completion"
+    : `Waiting for process PID ${wakeup.pid}`;
+}
+
+export function resolveThreadWakeupPresentation(
+  wakeups: SidebarThreadSummary["pendingWakeups"],
+): ThreadWakeupPresentation | null {
+  if (wakeups === undefined || wakeups.length === 0) return null;
+
+  const due = wakeups.find((wakeup) => wakeup.status === "due");
+  const timed = wakeups.find((wakeup) => wakeup.kind === "time");
+  const process = wakeups.find((wakeup) => wakeup.kind === "process");
+  const tooltip =
+    wakeups.length === 1
+      ? `Self-wake · ${threadWakeupDetail(wakeups[0]!)}`
+      : `${wakeups.length} self-wakes · ${wakeups.map(threadWakeupDetail).join(" · ")}`;
+
+  if (due !== undefined) {
+    return {
+      icon: wakeups.length === 1 ? due.kind : "multiple",
+      label: wakeups.length === 1 ? "Wake pending" : `${wakeups.length} wakes pending`,
+      tooltip,
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      pulse: true,
+    };
+  }
+
+  if (wakeups.length === 1) {
+    const wakeup = wakeups[0]!;
+    if (wakeup.kind === "time") {
+      const relative = threadWakeupTimeLabel(wakeup);
+      return {
+        icon: "time",
+        label: relative ? `Wake in ${relative}` : "Wake scheduled",
+        tooltip,
+        colorClass: "text-amber-600 dark:text-amber-300/90",
+        pulse: false,
+      };
+    }
+    return {
+      icon: "process",
+      label: wakeup.pid === null ? "Waiting for process" : `Waiting for PID ${wakeup.pid}`,
+      tooltip,
+      colorClass: "text-sky-600 dark:text-sky-300/90",
+      pulse: false,
+    };
+  }
+
+  const relative = timed === undefined ? "" : threadWakeupTimeLabel(timed);
+  return {
+    icon: "multiple",
+    label:
+      relative !== ""
+        ? `${wakeups.length} wakes · next in ${relative}`
+        : process !== undefined
+          ? `${wakeups.length} process wakes`
+          : `${wakeups.length} wakes pending`,
+    tooltip,
+    colorClass: "text-amber-600 dark:text-amber-300/90",
+    pulse: false,
+  };
+}
+
+export function ThreadWakeupStatusIndicator({
+  thread,
+}: {
+  thread: Pick<SidebarThreadSummary, "id" | "pendingWakeups">;
+}) {
+  const presentation = resolveThreadWakeupPresentation(thread.pendingWakeups);
+  if (presentation === null) return null;
+  const Icon = presentation.icon === "process" ? CircleDashedIcon : AlarmClockIcon;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            role="img"
+            aria-label={presentation.tooltip}
+            data-testid={`thread-wakeup-status-${thread.id}`}
+            className={cn(
+              "inline-flex items-center justify-center",
+              presentation.colorClass,
+            )}
+          />
+        }
+      >
+        <Icon
+          className={cn("size-3.5", presentation.pulse && "motion-safe:animate-status-pulse")}
+        />
+      </TooltipTrigger>
+      <TooltipPopup
+        side="top"
+        className="max-w-[min(30rem,calc(100vw-2rem))] whitespace-normal"
+      >
+        {presentation.tooltip}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
 export function terminalStatusFromRunningIds(
   runningTerminalIds: ReadonlyArray<string>,
 ): TerminalStatusIndicator | null {
@@ -1002,13 +1130,15 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
   const threadEnvironmentLabel = isRemoteThread ? (remoteEnvLabel ?? "Remote") : null;
   const remoteMachine = resolveEnvironmentMachineKind(environment?.serverConfig ?? null);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
+  const wakeupStatus = resolveThreadWakeupPresentation(thread.pendingWakeups);
 
-  if (!terminalStatus && !isRemoteThread) {
+  if (!wakeupStatus && !terminalStatus && !isRemoteThread) {
     return null;
   }
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5">
+      {wakeupStatus ? <ThreadWakeupStatusIndicator thread={thread} /> : null}
       {terminalStatus ? (
         <Tooltip>
           <TooltipTrigger

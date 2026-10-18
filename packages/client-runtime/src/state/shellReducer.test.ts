@@ -1,4 +1,5 @@
 import { ProjectId, ThreadId, type ThreadPullRequestLink } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import { v2Project, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
@@ -43,6 +44,42 @@ describe("applyShellStreamEvent", () => {
     expect(next.threads[0]).toBe(threads[0]);
     expect(next.threads[1]).toBe(updated);
     expect(next.threads[2]).toBe(threads[2]);
+  });
+
+  it("applies wakeup enrichment without advancing the orchestration sequence", () => {
+    const thread = { ...v2ThreadShell, id: ThreadId.make("wake-thread"), pendingWakeups: [] };
+    const snapshot = { ...v2ShellSnapshot, snapshotSequence: 7, threads: [thread] };
+    const scheduled = applyShellStreamEvent(snapshot, {
+      kind: "thread.wakeups",
+      threads: [
+        {
+          threadId: thread.id,
+          pendingWakeups: [
+            {
+              wakeupId: "wake-1",
+              kind: "time",
+              dueAt: DateTime.makeUnsafe("2026-10-18T12:30:00Z"),
+              pid: null,
+              status: "scheduled",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(scheduled.snapshotSequence).toBe(7);
+    expect(scheduled.threads[0]?.pendingWakeups?.[0]).toMatchObject({
+      wakeupId: "wake-1",
+      kind: "time",
+      status: "scheduled",
+    });
+
+    const cleared = applyShellStreamEvent(scheduled, {
+      kind: "thread.wakeups",
+      threads: [{ threadId: thread.id, pendingWakeups: [] }],
+    });
+    expect(cleared.snapshotSequence).toBe(7);
+    expect(cleared.threads[0]?.pendingWakeups).toEqual([]);
   });
 
   it("keeps the thread list and object when an update changes nothing", () => {

@@ -13,15 +13,26 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
 } from "@t3tools/provider-core/server/driver";
 import { ChatGPTConnection, type ChatGPTModel } from "./connection.ts";
+import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import { CHATGPT_DRIVER, makeChatGPTAdapter } from "./adapter.ts";
+import {
+  ChatGPTWakeBridgeError,
+  prepareChatGPTWakeBridge,
+  removeChatGPTWakeBridge,
+} from "./wakeBridge.ts";
 
-export type ChatGPTDriverEnv = ProviderHost.ProviderHost | FileSystem.FileSystem | Path.Path;
+export type ChatGPTDriverEnv =
+  | ProviderHost.ProviderHost
+  | FileSystem.FileSystem
+  | Path.Path
+  | McpProviderSessions.McpProviderSessions;
 const decodeSettings = Schema.decodeSync(ChatGPTSettings);
 
 export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = {
@@ -36,6 +47,8 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
       const path = yield* Path.Path;
       const home = yield* HostProcess.HomeDirectory;
       const host = yield* ProviderHost.ProviderHost;
+      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const selfInvocation = yield* resolveSelfInvocation();
       const cacheDir = path.join(host.paths.stateDir, "chatgpt", input.instanceId);
       const environmentId = NodeCrypto.createHash("sha256")
         .update(host.paths.stateDir)
@@ -238,6 +251,30 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           cacheDir,
           resolveAttachmentPath: host.resolveAttachmentPath,
           linkPullRequest: actions.linkPullRequest,
+          prepareWakeBridge: (threadId) =>
+            mcpSessions.read(threadId).pipe(
+              Effect.flatMap((session) =>
+                session === undefined
+                  ? Effect.succeed(undefined)
+                  : Effect.tryPromise({
+                      try: () =>
+                        prepareChatGPTWakeBridge({
+                          cacheDir,
+                          threadId,
+                          session,
+                          selfInvocation,
+                        }),
+                      catch: (cause) =>
+                        new ChatGPTWakeBridgeError({ operation: "prepare", cause }),
+                    }),
+              ),
+            ),
+          cleanupWakeBridge: (threadId) =>
+            Effect.tryPromise({
+              try: () => removeChatGPTWakeBridge(cacheDir, threadId),
+              catch: (cause) =>
+                new ChatGPTWakeBridgeError({ operation: "cleanup", cause }),
+            }),
         }),
         textGeneration: {
           generateCommitMessage: unsupported,

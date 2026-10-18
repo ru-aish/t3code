@@ -3,6 +3,8 @@ import * as Schema from "effect/Schema";
 
 import {
   OrchestratorMcpCreateThreadsInput,
+  OrchestratorMcpScheduleContinueInput,
+  OrchestratorMcpContinueAfterProcessInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptInput,
@@ -169,5 +171,33 @@ describe("orchestrator MCP contracts", () => {
         reason: "Loop converged.",
       }).reason,
     ).toBe("Loop converged.");
+  });
+});
+
+describe("self-wake contracts", () => {
+  it("accepts exactly one time selector and requires an explicit timezone", () => {
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpScheduleContinueInput);
+    expect(decode({ afterSeconds: 0.5 })).toEqual({ afterSeconds: 0.5 });
+    expect(decode({ wakeAt: "2026-10-18T10:00:00+05:30" }).wakeAt).toBeDefined();
+    for (const input of [
+      {},
+      { afterSeconds: 0 },
+      { afterSeconds: -1 },
+      { afterSeconds: Infinity },
+      { afterSeconds: 1, wakeAt: "2026-10-18T10:00:00Z" },
+      { wakeAt: "2026-10-18T10:00:00" },
+      { wakeAt: "tomorrow" },
+      { afterSeconds: 1, idempotencyKey: "x".repeat(257) },
+    ])
+      expect(() => decode(input)).toThrow();
+    expect(Object.keys(OrchestratorMcpScheduleContinueInput.fields)).not.toContain("threadId");
+    expect(Object.keys(OrchestratorMcpContinueAfterProcessInput.fields)).not.toContain("threadId");
+  });
+  it("requires a real positive integer PID", () => {
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpContinueAfterProcessInput);
+    expect(decode({ pid: 42 })).toEqual({ pid: 42 });
+    for (const pid of [0, -1, 1.5, Infinity, "opaque-process-id"]) {
+      expect(() => decode({ pid })).toThrow();
+    }
   });
 });

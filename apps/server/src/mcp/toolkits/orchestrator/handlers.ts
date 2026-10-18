@@ -1,6 +1,7 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import { readCaller } from "../../threadAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -8,7 +9,59 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
 
+import * as ThreadWakeupService from "../../../threadWakeups/ThreadWakeupService.ts";
+import type { ProcessIdentityError } from "../../../threadWakeups/ProcessIdentity.ts";
+
+const wakeupFailure = (cause: ThreadWakeupService.ThreadWakeupError | ProcessIdentityError) =>
+  new OrchestratorMcpFailure({
+    code:
+      cause._tag === "ProcessIdentityError" ||
+      cause.reason === "invalid_schedule" ||
+      cause.reason === "thread_unavailable"
+        ? "invalid_request"
+        : "orchestration_error",
+    message: cause.message,
+  });
+
+const wakeupService = Effect.serviceOption(ThreadWakeupService.ThreadWakeupService).pipe(
+  Effect.flatMap(
+    Option.match({
+      onNone: () =>
+        Effect.fail(
+          new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: "Thread wakeup service is unavailable.",
+          }),
+        ),
+      onSome: Effect.succeed,
+    }),
+  ),
+);
+
 const handlers = {
+  schedule_continue: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const { scope } = yield* readCaller();
+      const caller = yield* McpInvocationContext.requireThreadScope(scope, "schedule_continue");
+      const service = yield* wakeupService;
+      return yield* service
+        .scheduleContinue(caller.thread.threadId, input)
+        .pipe(Effect.mapError(wakeupFailure));
+    }),
+  ),
+  continue_after_process: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const { scope, caller: callerShell } = yield* readCaller();
+      const caller = yield* McpInvocationContext.requireThreadScope(
+        scope,
+        "continue_after_process",
+      );
+      const service = yield* wakeupService;
+      return yield* service
+        .continueAfterProcess(caller.thread.threadId, input, callerShell?.activeRunId ?? null)
+        .pipe(Effect.mapError(wakeupFailure));
+    }),
+  ),
   orchestrator_capabilities: McpToolAccess.reads(() =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

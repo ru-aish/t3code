@@ -89,3 +89,17 @@ describe("orchestrator MCP tool guidance", () => {
     assert.include(ThreadUpdateTool.description ?? "", "Workspace and branch changes");
   });
 });
+
+it("publishes self-wake tools without a thread target or arbitrary prompt", () => {
+  for (const name of ["schedule_continue", "continue_after_process"] as const) {
+    const tool = OrchestratorToolkit.tools[name];
+    const schema = Tool.getJsonSchema(tool) as {
+      type?: string;
+      properties?: Record<string, unknown>;
+    };
+    assert.equal(schema.type, "object");
+    assert.notProperty(schema.properties, "threadId");
+    assert.notProperty(schema.properties, "prompt");
+    assert.include(tool.description ?? "", "current T3 thread");
+  }
+});

@@ -4,6 +4,7 @@ import {
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -20,6 +21,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ThreadWakeupService from "../threadWakeups/ThreadWakeupService.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -56,6 +58,7 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const threadWakeups = yield* Effect.serviceOption(ThreadWakeupService.ThreadWakeupService);
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -84,8 +87,20 @@ export const layer = HttpApiBuilder.group(
           latestSequence: applicationEvents.latestApplicationSequence,
         }),
       );
-      const projects = yield* enrichProjectShells(base.projects);
-      return { ...base, projects };
+      const [projects, pendingWakeups] = yield* Effect.all([
+        enrichProjectShells(base.projects),
+        Option.isSome(threadWakeups)
+          ? threadWakeups.value.readPendingWakeups
+          : Effect.succeed([]),
+      ]);
+      return {
+        ...base,
+        projects,
+        threads: ThreadWakeupService.decorateShellsWithPendingWakeups(
+          base.threads,
+          pendingWakeups,
+        ),
+      };
     });
 
     const loadThreadSnapshot = Effect.fn("http.orchestration.loadThreadSnapshot")(function* (

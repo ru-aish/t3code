@@ -107,6 +107,13 @@ export interface EnvironmentThreadShell {
   readonly pendingBackgroundTasks: ReadonlyArray<
     NonNullable<OrchestrationV2ThreadShell["pendingBackgroundTasks"]>[number]
   >;
+  readonly pendingWakeups: ReadonlyArray<{
+    readonly wakeupId: string;
+    readonly kind: "time" | "process";
+    readonly dueAt: string | null;
+    readonly pid: number | null;
+    readonly status: "scheduled" | "due";
+  }>;
   readonly providerInstanceHistory: ReadonlyArray<ProviderInstanceId>;
   readonly goal: OrchestrationV2ProviderGoal | null;
   readonly itemCount: number;
@@ -249,6 +256,10 @@ export function presentThreadShell(
     pendingSubagentRequest,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
+    pendingWakeups: (thread.pendingWakeups ?? []).map((wakeup) => ({
+      ...wakeup,
+      dueAt: nullableIso(wakeup.dueAt),
+    })),
     providerInstanceHistory: thread.providerInstanceHistory ?? [],
     goal: thread.goal ?? null,
     itemCount: thread.itemCount,

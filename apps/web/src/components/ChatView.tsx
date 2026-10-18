@@ -309,6 +309,7 @@ import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
+  CircleDashedIcon,
   MessageCircleIcon,
   PaperclipIcon,
   ChevronDownIcon,
@@ -496,7 +497,10 @@ import {
   type QueuedRunsControlHandle,
   type EditQueuedRunRequest,
 } from "./chat/QueuedRunsControl";
-import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
+import {
+  resolveThreadWakeupPresentation,
+  useLinkedThreadPullRequest,
+} from "./ThreadStatusIndicators";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ThreadStatusLine } from "./chat/ThreadStatusLine";
 import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
@@ -7274,6 +7278,9 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const threadStatusLine = useMemo(() => {
     void nowMinute;
+    const wakeupPresentation = resolveThreadWakeupPresentation(
+      activeThreadShell?.pendingWakeups ?? [],
+    );
     return activeThreadSnoozed ? (
       <ThreadStatusLine
         icon={<AlarmClockIcon />}
@@ -7285,6 +7292,13 @@ export default function ChatView(props: ChatViewProps) {
         actionLabel={isUnsnoozing ? "Waking..." : "Wake now"}
         actionDisabled={!canOperateThread || isUnsnoozing}
         onAction={() => void handleUnsnoozeActiveThreadStable()}
+      />
+    ) : wakeupPresentation !== null ? (
+      <ThreadStatusLine
+        icon={
+          wakeupPresentation.icon === "process" ? <CircleDashedIcon /> : <AlarmClockIcon />
+        }
+        label={wakeupPresentation.label}
       />
     ) : activeThreadSettled ? (
       <ThreadStatusLine
@@ -7309,6 +7323,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     acknowledgeActiveThreadWokeStable,
     activeThreadSettled,
+    activeThreadShell?.pendingWakeups,
     activeThreadShell?.settledAt,
     activeThreadShell?.snoozedUntil,
     activeThreadSnoozed,
