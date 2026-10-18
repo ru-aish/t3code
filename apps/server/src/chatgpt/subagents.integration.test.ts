@@ -202,6 +202,7 @@ describe("ChatGPT app-owned delegation", () => {
               Layer.mock(ThreadManagementService.ThreadManagementService)({
                 dispatch: orchestrator.dispatch,
                 getThreadRecords: orchestrator.getThreadRecords,
+                getThreadShell: orchestrator.getThreadShell,
                 recoverDelegatedTask: orchestrator.recoverDelegatedTask,
                 delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
                 hasReceipt: () => Effect.succeed(false),
