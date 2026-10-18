@@ -152,6 +152,7 @@ it.effect("rejects other providers before opening a runtime or reading a convers
       ThreadSync.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            Layer.mock(ProjectService.ProjectService)({}),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getThreadProjection: () =>
                 Effect.succeed({

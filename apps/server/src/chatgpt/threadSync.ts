@@ -33,6 +33,7 @@ export const layer = Layer.effect(
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
     const sink = yield* EventSink.EventSinkV2;
+    const projects = yield* ProjectService.ProjectService;
     return ChatGPTThreadSync.of({
       refresh: (threadId) =>
         Effect.gen(function* () {
@@ -53,7 +54,7 @@ export const layer = Layer.effect(
           const cwd = savedSession?.cwd ?? projection.thread.worktreePath;
           const project = cwd
             ? Option.none()
-            : yield* (yield* ProjectService.ProjectService).getById(projection.thread.projectId);
+            : yield* projects.getById(projection.thread.projectId);
           const workspace = cwd ?? Option.getOrUndefined(project)?.workspaceRoot;
           if (!workspace) return yield* new ChatGPTThreadRefreshError({ threadId });
           const runtime = Option.isSome(live)
