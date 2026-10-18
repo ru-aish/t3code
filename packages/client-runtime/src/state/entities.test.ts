@@ -76,6 +76,31 @@ describe("V2 client presentation", () => {
     expect(shell.source).toBe(v2ThreadShell);
   });
 
+  it("presents pending wakeups with transport-friendly timestamps", () => {
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      pendingWakeups: [
+        {
+          wakeupId: "wake-1",
+          kind: "time",
+          dueAt: DateTime.makeUnsafe("2026-10-18T12:15:00Z"),
+          pid: null,
+          status: "scheduled",
+        },
+      ],
+    });
+
+    expect(shell.pendingWakeups).toEqual([
+      {
+        wakeupId: "wake-1",
+        kind: "time",
+        dueAt: "2026-10-18T12:15:00.000Z",
+        pid: null,
+        status: "scheduled",
+      },
+    ]);
+  });
+
   it("preserves active ordering and both pull-request sources", () => {
     const linkedPullRequest = {
       projectId: v2ThreadShell.projectId,

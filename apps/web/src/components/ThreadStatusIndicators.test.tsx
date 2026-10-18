@@ -1,8 +1,13 @@
 import { ThreadId, type ThreadPullRequestLink } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { ThreadWorktreeIndicator, linkedPullRequestSnapshotStatus } from "./ThreadStatusIndicators";
+import {
+  ThreadWakeupStatusIndicator,
+  ThreadWorktreeIndicator,
+  linkedPullRequestSnapshotStatus,
+  resolveThreadWakeupPresentation,
+} from "./ThreadStatusIndicators";
 
 describe("ThreadWorktreeIndicator", () => {
   it("renders the worktree folder and branch in an accessible label", () => {
@@ -35,6 +40,83 @@ describe("ThreadWorktreeIndicator", () => {
     );
 
     expect(markup).toBe("");
+  });
+});
+
+describe("thread wakeup indicators", () => {
+  it("describes a scheduled time wake with a compact countdown", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-18T12:00:00Z"));
+    try {
+      const presentation = resolveThreadWakeupPresentation([
+        {
+          wakeupId: "wake-time",
+          kind: "time",
+          dueAt: "2026-10-18T12:15:00Z",
+          pid: null,
+          status: "scheduled",
+        },
+      ]);
+      expect(presentation).toMatchObject({
+        icon: "time",
+        label: "Wake in 15m",
+        pulse: false,
+      });
+      expect(presentation?.tooltip).toContain("Scheduled wake in 15m");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("distinguishes process waits and due wakeups", () => {
+    expect(
+      resolveThreadWakeupPresentation([
+        {
+          wakeupId: "wake-process",
+          kind: "process",
+          dueAt: null,
+          pid: 4242,
+          status: "scheduled",
+        },
+      ]),
+    ).toMatchObject({
+      icon: "process",
+      label: "Waiting for PID 4242",
+      pulse: false,
+    });
+
+    const due = resolveThreadWakeupPresentation([
+      {
+        wakeupId: "wake-process",
+        kind: "process",
+        dueAt: "2026-10-18T12:00:00Z",
+        pid: 4242,
+        status: "due",
+      },
+    ]);
+    expect(due).toMatchObject({ label: "Wake pending", pulse: true });
+  });
+
+  it("renders an accessible sidebar wake indicator", () => {
+    const markup = renderToStaticMarkup(
+      <ThreadWakeupStatusIndicator
+        thread={{
+          id: ThreadId.make("thread-wake"),
+          pendingWakeups: [
+            {
+              wakeupId: "wake-process",
+              kind: "process",
+              dueAt: null,
+              pid: 4242,
+              status: "scheduled",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="thread-wakeup-status-thread-wake"');
+    expect(markup).toContain("Waiting for process PID 4242");
   });
 });
 

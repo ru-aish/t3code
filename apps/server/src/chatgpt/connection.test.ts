@@ -31,6 +31,21 @@ describe("ChatGPT submission identity", () => {
       );
     }
   });
+
+  it("advertises the packaged self-wake helper without placing MCP credentials in the prompt", () => {
+    const compiled = executionPrompt("registered-id", "/work/project", "start work", {
+      command: "/opt/T3 Code/t3",
+      entrypoint: "/opt/T3 Code/bin.mjs",
+      configPath: "/home/user/.t3/wake bridge.json",
+    });
+    expect(compiled).toContain("chatgpt-wake-call");
+    expect(compiled).toContain("schedule_continue");
+    expect(compiled).toContain("continue_after_process");
+    expect(compiled).toContain("'/home/user/.t3/wake bridge.json'");
+    expect(compiled).not.toContain("T3_ACP_MCP_AUTHORIZATION");
+    expect(compiled).not.toContain("Bearer ");
+    expect(compiled.endsWith("\n\nstart work")).toBe(true);
+  });
 });
 
 describe("ChatGPT streamed update delivery", () => {

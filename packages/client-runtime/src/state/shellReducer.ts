@@ -126,6 +126,22 @@ export function applyShellStreamEvent(
     { readonly kind: "snapshot" } | { readonly kind: "synchronized" }
   >,
 ): OrchestrationV2ShellSnapshot {
+  if (event.kind === "thread.wakeups") {
+    const pendingByThread = new Map(
+      event.threads.map((entry) => [entry.threadId, entry.pendingWakeups] as const),
+    );
+    let changed = false;
+    const threads = snapshot.threads.map((thread) => {
+      const pendingWakeups = pendingByThread.get(thread.id);
+      if (pendingWakeups === undefined) return thread;
+      const candidate = { ...thread, pendingWakeups };
+      if (sameThreadShell(thread, candidate)) return thread;
+      changed = true;
+      return candidate;
+    });
+    return changed ? { ...snapshot, threads } : snapshot;
+  }
+
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 
   switch (event.kind) {

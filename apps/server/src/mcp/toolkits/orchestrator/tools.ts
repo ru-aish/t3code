@@ -1,5 +1,8 @@
 import {
   OrchestratorMcpCapabilitiesResult,
+  OrchestratorMcpScheduleContinueInput,
+  OrchestratorMcpContinueAfterProcessInput,
+  OrchestratorMcpContinueResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
@@ -38,6 +41,31 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+
+const wakeupDependencies = [
+  McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
+];
+
+const ScheduleContinueTool = Tool.make("schedule_continue", {
+  description:
+    "Schedule exactly one literal continue in the current T3 thread. No thread id is needed: the authenticated calling thread is the target. Supply exactly one of afterSeconds (positive seconds) or wakeAt (timezone-aware ISO-8601). Delivery starts when idle or queues behind the active run, normally within five seconds of the due time. Reuse idempotencyKey when retrying the same registration.",
+  parameters: OrchestratorMcpScheduleContinueInput,
+  success: OrchestratorMcpContinueResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: wakeupDependencies,
+}).annotate(Tool.Destructive, false);
+
+const ContinueAfterProcessTool = Tool.make("continue_after_process", {
+  description:
+    "Queue exactly one literal continue in the current T3 thread after a process on the T3 server exits, regardless of exit code. No thread id is needed. Pass the real OS pid, not an opaque terminal process_id. Captures the exact Linux execution identity to protect against PID reuse; other platforms are unsupported. An already-gone process is immediately due. Detection normally takes up to five seconds. Reuse idempotencyKey when retrying the same registration.",
+  parameters: OrchestratorMcpContinueAfterProcessInput,
+  success: OrchestratorMcpContinueResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: wakeupDependencies,
+}).annotate(Tool.Destructive, false);
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -272,6 +300,8 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
   .annotate(Tool.Destructive, true);
 
 export const OrchestratorToolkit = Toolkit.make(
+  ScheduleContinueTool,
+  ContinueAfterProcessTool,
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
   TaskStatusTool,

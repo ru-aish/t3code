@@ -48,6 +48,41 @@ const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(256),
 ).annotate({ description: "Stable idempotency key to reuse when retrying this mutation." });
 
+export const OrchestratorMcpScheduleContinueInput = Schema.Struct({
+  afterSeconds: Schema.optional(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0))),
+  wakeAt: Schema.optional(
+    Schema.String.check(
+      Schema.makeFilter(
+        (value) =>
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+          Number.isFinite(Date.parse(value)),
+        { message: "Expected a timezone-aware ISO-8601 timestamp." },
+      ),
+    ),
+  ),
+  idempotencyKey: Schema.optional(OrchestratorMcpClientRequestId),
+}).check(
+  Schema.makeFilter(
+    (input) => (input.afterSeconds === undefined) !== (input.wakeAt === undefined),
+    { message: "Provide exactly one of afterSeconds or wakeAt." },
+  ),
+);
+export type OrchestratorMcpScheduleContinueInput = typeof OrchestratorMcpScheduleContinueInput.Type;
+
+export const OrchestratorMcpContinueAfterProcessInput = Schema.Struct({
+  pid: PositiveInt,
+  idempotencyKey: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpContinueAfterProcessInput =
+  typeof OrchestratorMcpContinueAfterProcessInput.Type;
+
+export const OrchestratorMcpContinueResult = Schema.Struct({
+  wakeupId: TrimmedNonEmptyString,
+  status: Schema.Literals(["scheduled", "due", "delivered", "stale"]),
+  dueAt: Schema.NullOr(IsoDateTime),
+});
+export type OrchestratorMcpContinueResult = typeof OrchestratorMcpContinueResult.Type;
+
 /**
  * OpenCode 1.15 has been observed serializing nested MCP union objects as JSON
  * strings. Keep the structured object as the documented form while accepting

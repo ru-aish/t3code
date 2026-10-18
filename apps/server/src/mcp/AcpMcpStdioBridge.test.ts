@@ -1,11 +1,19 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { AcpMcpBridgeError, callAcpMcpTool, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
+import {
+  AcpMcpBridgeError,
+  callAcpMcpTool,
+  callChatGptWakeToolFromConfig,
+  runAcpMcpStdioBridge,
+} from "./AcpMcpStdioBridge.ts";
 
 function makeHarness(responder: (request: Request) => Promise<Response> | Response) {
   const input = new NodeStream.PassThrough();
@@ -30,6 +38,62 @@ function makeHarness(responder: (request: Request) => Promise<Response> | Respon
 }
 
 describe("AcpMcpStdioBridge", () => {
+  it("limits the ChatGPT local bridge to wake tools and reads credentials from its config file", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-wake-call-"));
+    const configPath = NodePath.join(directory, "bridge.json");
+    await NodeFSP.writeFile(
+      configPath,
+      JSON.stringify({
+        endpoint: "http://127.0.0.1:3773/mcp",
+        authorization: "Bearer bridge-secret",
+      }),
+    );
+    const requests: unknown[] = [];
+    const fetchImplementation = async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        readonly id?: unknown;
+        readonly method?: unknown;
+      };
+      requests.push(body);
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result:
+            body.method === "initialize"
+              ? { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: {} }
+              : { structuredContent: { wakeupId: "wake-1" } },
+        }),
+        { headers: { "content-type": "application/json", "mcp-session-id": "wake-session" } },
+      );
+    };
+    try {
+      const result = await callChatGptWakeToolFromConfig({
+        configPath,
+        tool: "schedule_continue",
+        argumentsJson: '{"afterSeconds":5}',
+        fetchImplementation,
+      });
+      expect(result).toEqual({ structuredContent: { wakeupId: "wake-1" } });
+      expect(requests.at(-1)).toMatchObject({
+        method: "tools/call",
+        params: { name: "schedule_continue", arguments: { afterSeconds: 5 } },
+      });
+      await expect(
+        callChatGptWakeToolFromConfig({
+          configPath,
+          tool: "delegate_task",
+          argumentsJson: "{}",
+          fetchImplementation,
+        }),
+      ).rejects.toThrow("only allows packaged self-wake tools");
+      expect(requests).toHaveLength(3);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.effect("preserves the original transport failure as the typed error cause", () =>
     Effect.gen(function* () {
       const source = new Error("fetch failed");

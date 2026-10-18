@@ -125,6 +125,7 @@ import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as ThreadWakeupService from "./threadWakeups/ThreadWakeupService.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -939,8 +940,12 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projects = yield* ProjectStore.ProjectStoreV2;
     const projectService = yield* ProjectService.ProjectService;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const threadWakeups = yield* Effect.serviceOption(ThreadWakeupService.ThreadWakeupService);
 
     const enrichmentChanges = yield* projectEnrichment.subscribeChanges;
+    const wakeupChanges = Option.isSome(threadWakeups)
+      ? yield* threadWakeups.value.subscribeChanges
+      : null;
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
       function* (snapshotSequence: number) {
         const enriched = yield* enrichProjectShells(yield* projects.listShells());
@@ -956,6 +961,31 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         };
       },
     );
+    const wakeupRefresh = Effect.fn("ws.orchestrationV2.wakeupRefresh")(function* (
+      threadIds: ReadonlyArray<ThreadId>,
+    ) {
+      const pending = Option.isSome(threadWakeups)
+        ? yield* threadWakeups.value.readPendingWakeups
+        : [];
+      const byThread = new Map<ThreadId, Array<(typeof pending)[number]>>();
+      for (const entry of pending) {
+        const current = byThread.get(entry.threadId) ?? [];
+        byThread.set(entry.threadId, [...current, entry]);
+      }
+      return {
+        kind: "thread.wakeups" as const,
+        threads: [...new Set(threadIds)].map((threadId) => ({
+          threadId,
+          pendingWakeups: (byThread.get(threadId) ?? []).map((entry) => entry.wakeup),
+        })),
+      };
+    });
+    const loadAllWakeupRefresh = Effect.fn("ws.orchestrationV2.loadAllWakeupRefresh")(function* () {
+      if (Option.isNone(threadWakeups)) return null;
+      const readSnapshot = yield* threadManagement.readShellSnapshot({ location: "active" });
+      const snapshot = yield* readSnapshot;
+      return yield* wakeupRefresh(snapshot.threads.map((thread) => thread.id));
+    });
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
       const base = buildActiveShellSnapshot(
         yield* loadShellSnapshotParts({
@@ -965,9 +995,21 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           latestSequence: applicationEvents.latestApplicationSequence,
         }),
       );
-      const enriched = yield* enrichProjectShells(base.projects);
+      const [enriched, pendingWakeups] = yield* Effect.all([
+        enrichProjectShells(base.projects),
+        Option.isSome(threadWakeups)
+          ? threadWakeups.value.readPendingWakeups
+          : Effect.succeed([]),
+      ]);
       return {
-        snapshot: { ...base, projects: enriched.projects } as OrchestrationV2ShellSnapshot,
+        snapshot: {
+          ...base,
+          projects: enriched.projects,
+          threads: ThreadWakeupService.decorateShellsWithPendingWakeups(
+            base.threads,
+            pendingWakeups,
+          ),
+        } as OrchestrationV2ShellSnapshot,
         resolvedRepositoryIdentityRoots: enriched.resolvedRepositoryIdentityRoots,
       };
     });
@@ -999,15 +1041,26 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
+      const coalesced = coalesceShellApplicationEvents(events);
+      const pendingWakeups =
+        coalesced.some((stored) => !("aggregateKind" in stored)) && Option.isSome(threadWakeups)
+          ? yield* threadWakeups.value.readPendingWakeups
+          : [];
       return yield* Effect.forEach(
-        coalesceShellApplicationEvents(events),
+        coalesced,
         (stored) =>
           Effect.gen(function* () {
             if ("aggregateKind" in stored) {
               return yield* projectItem(stored);
             }
             const shell = yield* threadManagement.getThreadShell(stored.event.threadId);
-            return shellStreamItemFromThreadShell({ stored, shell });
+            return shellStreamItemFromThreadShell({
+              stored,
+              shell:
+                shell === null
+                  ? null
+                  : ThreadWakeupService.decorateShellWithPendingWakeups(shell, pendingWakeups),
+            });
           }),
         { concurrency: 8 },
       );
@@ -1061,6 +1114,14 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         }),
       ),
     );
+    const wakeupRefreshes =
+      wakeupChanges === null
+        ? Stream.empty
+        : Stream.fromSubscription(wakeupChanges).pipe(
+            Stream.groupedWithin(128, Duration.millis(25)),
+            Stream.mapEffect((threadIds) => wakeupRefresh(Array.from(threadIds))),
+          );
+    const shellEnrichmentRefreshes = Stream.merge(enrichmentRefreshes, wakeupRefreshes);
 
     // Always attach the enrichment subscription before the first load so
     // completions that race HTTP snapshot fetch still push a refresh. We still
@@ -1103,7 +1164,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         return composeShellStreamWithEnrichment({
           initial: initialSnapshotItems(loaded),
           tail: completionThenLive(loaded.snapshot.snapshotSequence),
-          enrichment: enrichmentRefreshes,
+          enrichment: shellEnrichmentRefreshes,
         });
       }
 
@@ -1113,11 +1174,12 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         return composeShellStreamWithEnrichment({
           initial: initialSnapshotItems(loaded),
           tail: completionThenLive(loaded.snapshot.snapshotSequence),
-          enrichment: enrichmentRefreshes,
+          enrichment: shellEnrichmentRefreshes,
         });
       }
 
       const loaded = yield* loadProjectMetadataSnapshot(highWater);
+      const currentWakeups = yield* loadAllWakeupRefresh();
       const replay = toShellStream(
         applicationEvents.readApplicationEvents({
           afterSequence: input.afterSequence,
@@ -1129,9 +1191,12 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         }),
       );
       return composeShellStreamWithEnrichment({
-        initial: initialEnrichmentItems(loaded),
+        initial: Stream.concat(
+          initialEnrichmentItems(loaded),
+          currentWakeups === null ? Stream.empty : rpcInitialItems([currentWakeups]),
+        ),
         tail: Stream.concat(Stream.concat(replay, completionMarker), liveFrom(highWater)),
-        enrichment: enrichmentRefreshes,
+        enrichment: shellEnrichmentRefreshes,
       });
     }).pipe(
       Effect.mapError(

@@ -28,6 +28,7 @@ import {
   type TerminalBinding,
   type TerminalEvent,
 } from "./connection.ts";
+import type { ChatGPTWakeBridge, ChatGPTWakeBridgeError } from "./wakeBridge.ts";
 
 export const CHATGPT_DRIVER = ProviderDriverKind.make("chatgpt");
 
@@ -144,6 +145,12 @@ export const makeChatGPTAdapter = (
       url: string,
       eventId: string,
     ) => Effect.Effect<void, ChatGPTActionError>;
+    readonly prepareWakeBridge?: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ChatGPTWakeBridge | undefined, ChatGPTWakeBridgeError>;
+    readonly cleanupWakeBridge?: (
+      threadId: ThreadId,
+    ) => Effect.Effect<void, ChatGPTWakeBridgeError>;
   },
 ) =>
   ProviderAdapter.ProviderAdapterV2.of({
@@ -176,7 +183,11 @@ export const makeChatGPTAdapter = (
           Effect.sync(() => {
             abort.abort();
             connection.close();
-          }),
+          }).pipe(
+            Effect.andThen(
+              transport.cleanupWakeBridge?.(input.threadId).pipe(Effect.ignore) ?? Effect.void,
+            ),
+          ),
         );
         const attempt = <A>(operation: () => Promise<A>) =>
           Effect.tryPromise({
@@ -188,6 +199,19 @@ export const makeChatGPTAdapter = (
                 cause,
               }),
           });
+        const prepareWakeBridge = Effect.fnUntraced(function* () {
+          if (transport.prepareWakeBridge === undefined) return undefined;
+          return yield* transport.prepareWakeBridge(input.threadId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CHATGPT_DRIVER,
+                  detail: "Could not prepare packaged ChatGPT wake bridge",
+                  cause,
+                }),
+            ),
+          );
+        });
         const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => Queue.offer(events, event);
         const session = {
           id: input.providerSessionId,
@@ -540,6 +564,7 @@ export const makeChatGPTAdapter = (
                   active = { ...active, generation, requestId: control.event_id };
                   outputTurns.set(control.event_id, active);
                   streamComplete = false;
+                  const wakeBridge = yield* prepareWakeBridge();
                   yield* attempt(() =>
                     connection.send(
                       control.event_id,
@@ -549,6 +574,9 @@ export const makeChatGPTAdapter = (
                       active!.input.modelSelection.options?.find(
                         (option) => option.id === "reasoningEffort",
                       )?.value as string | undefined,
+                      [],
+                      undefined,
+                      wakeBridge,
                     ),
                   );
                 }
@@ -667,6 +695,7 @@ export const makeChatGPTAdapter = (
             threadId: input.threadId,
             providerTurn: turn,
           });
+          const wakeBridge = yield* prepareWakeBridge();
           yield* attempt(() =>
             connection.send(
               request.message.messageId,
@@ -682,6 +711,7 @@ export const makeChatGPTAdapter = (
                 : (request.modelSelection.options?.find(
                     (option) => option.id === "chatgptProjectId",
                   )?.value as string | undefined),
+              wakeBridge,
             ),
           ).pipe(
             Effect.tapError(() =>

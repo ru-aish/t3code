@@ -5,9 +5,9 @@ import { InlineButton } from "../ui/button";
 export function ThreadStatusLine(props: {
   readonly icon: ReactNode;
   readonly label: string;
-  readonly actionLabel: string;
+  readonly actionLabel?: string;
   readonly actionDisabled?: boolean;
-  readonly onAction: () => void;
+  readonly onAction?: () => void;
 }) {
   return (
     <div
@@ -16,10 +16,14 @@ export function ThreadStatusLine(props: {
     >
       {props.icon}
       <span className="min-w-0 truncate">{props.label}</span>
-      <span aria-hidden="true">·</span>
-      <InlineButton tone="muted" disabled={props.actionDisabled} onClick={props.onAction}>
-        {props.actionLabel}
-      </InlineButton>
+      {props.actionLabel !== undefined && props.onAction !== undefined ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <InlineButton tone="muted" disabled={props.actionDisabled} onClick={props.onAction}>
+            {props.actionLabel}
+          </InlineButton>
+        </>
+      ) : null}
     </div>
   );
 }

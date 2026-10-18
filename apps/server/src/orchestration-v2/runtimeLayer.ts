@@ -1,5 +1,7 @@
 import * as ChatGPTActions from "../chatgpt/actions.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
+import * as ThreadWakeupService from "../threadWakeups/ThreadWakeupService.ts";
+import * as ProcessIdentity from "../threadWakeups/ProcessIdentity.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -364,6 +366,10 @@ export const layerProduction = Layer.mergeAll(
   layerThreadLaunchProvided,
   layerThreadLifecycleProvided,
   layerScheduledTaskProvided,
+  ThreadWakeupService.layer.pipe(
+    Layer.provide(Layer.merge(layerThreadManagementProvided, layerCommandReceiptStoreProvided)),
+    Layer.provide(ProcessIdentity.layer()),
+  ),
   layerSecretRequestsProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
