@@ -260,3 +260,102 @@ describe("ChatGPT image and project submissions", () => {
     }
   });
 });
+
+describe("ChatGPT conversation reconciliation", () => {
+  it("reads one active branch, restores the final answer, and rejects other submissions", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-refresh-"));
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "thread",
+      cacheDir: directory,
+    });
+    const snapshot = {
+      async_status: null as string | null,
+      current_node: "final",
+      mapping: {
+        user: {
+          parent: null,
+          message: {
+            id: stableMessageId("request"),
+            author: { role: "user" },
+            content: { parts: ["T3 execution context and prompt"] },
+          },
+        },
+        final: {
+          parent: "user",
+          message: {
+            id: "native-final",
+            author: { role: "assistant" },
+            channel: "final",
+            recipient: "all",
+            status: "finished_successfully",
+            end_turn: true,
+            create_time: 1234,
+            content: { parts: ["Recovered answer"] },
+          },
+        },
+        sibling: {
+          parent: "user",
+          message: {
+            id: "other-branch",
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: ["Wrong branch"] },
+          },
+        },
+      },
+    };
+    const get = vi.fn(async () => ({ conversation: snapshot }));
+    const client = { get, list() {}, models() {}, startCompletionStream: vi.fn() };
+    const window = { [Symbol.for("terminal-mcp.chat-runtime.client.v5")]: client };
+    Object.assign(connection, {
+      renderer: async () => ({
+        evaluate: (expression: string) =>
+          NodeVM.runInNewContext(expression, { window, Symbol, Map, Set }),
+      }),
+    });
+    try {
+      await NodeFSP.writeFile(
+        connection.cachePath,
+        JSON.stringify({
+          conversationId: "conversation",
+          messages: {},
+          dispatches: { request: { messageId: stableMessageId("request"), state: "submitted" } },
+          handledEvents: [],
+        }),
+      );
+      await connection.load();
+      expect(connection.latestSubmittedRequestId).toBe("request");
+      const recovered = await connection.readCompletion("request");
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(recovered).toMatchObject([
+        {
+          kind: "update",
+          requestId: "request",
+          messageId: "native-final",
+          text: "Recovered answer",
+          createdAt: 1234,
+        },
+        { kind: "complete", requestId: "request" },
+      ]);
+      expect(client.startCompletionStream).not.toHaveBeenCalled();
+      snapshot.async_status = "running";
+      expect(await connection.readCompletion("request")).toBeNull();
+      snapshot.async_status = null;
+      snapshot.mapping.final.message.end_turn = false;
+      expect(await connection.readCompletion("request")).toBeNull();
+      snapshot.mapping.final.message.end_turn = true;
+      snapshot.mapping.user.message.id = "some-other-user-submission";
+      expect(await connection.readCompletion("request")).toBeNull();
+      expect((await connection.readConversation()).updates).toEqual([]);
+      snapshot.mapping.final.parent = "final";
+      await expect(connection.readConversation()).rejects.toThrow("ancestry is invalid");
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});

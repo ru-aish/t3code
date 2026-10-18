@@ -41,6 +41,11 @@ describe("RPC authorization scopes", () => {
       AuthOrchestrationOperateScope,
     );
   });
+  it("requires operate access to reconcile a ChatGPT conversation", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverRefreshChatGPTThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
 
   it("authorizes background policy reporting and observation deliberately", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverReportClientActivity)).toBe(

@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -15,6 +16,7 @@ import {
   NodeId,
   MessageId,
   OrchestrationV2AppThread,
+  OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import type { ChatGPTUpdate, TerminalEvent } from "./connection.ts";
 
@@ -28,6 +30,9 @@ const fakes = vi.hoisted(() => ({
     controls: string[];
     idle: boolean;
     idleChecks: number;
+    onCompletionRead?: () => void;
+    state: string;
+    conversationReads: number;
     options: { orchestrationCommand?: string | undefined };
   }>,
 }));
@@ -42,6 +47,8 @@ vi.mock("./connection.ts", () => ({
     idle = false;
     idleChecks = 0;
     epoch = 0;
+    state = "working";
+    conversationReads = 0;
     pending: Array<TerminalEvent> = [];
     wake?: () => void;
     readonly options: { orchestrationCommand?: string | undefined };
@@ -57,14 +64,17 @@ vi.mock("./connection.ts", () => ({
     }
     async control(action: string) {
       this.controls.push(action);
-      if (action === "activate") this.epoch++;
+      if (action === "activate") {
+        this.epoch++;
+        this.state = "working";
+      }
       if (action === "claim") return { valid: true };
       return {
         thread_id: "test-thread",
         terminal_id: "test-thread",
         conversation_id: null,
         epoch: this.epoch,
-        state: "working",
+        state: this.state,
         paused: 0,
         cwd: "/tmp",
         model: "test-model",
@@ -80,9 +90,52 @@ vi.mock("./connection.ts", () => ({
     async stop() {
       this.stops++;
     }
-    async isConversationIdle() {
+    get submittedRequestIds() {
+      return [...this.sent];
+    }
+    async readConversation() {
+      this.conversationReads++;
+      const requestId = this.sent.at(-1)!;
+      return {
+        updates: [
+          {
+            kind: "update" as const,
+            requestId,
+            conversationId: null,
+            role: "assistant",
+            channel: "final",
+            messageId: "recovered-final",
+            text: "Recovered final answer",
+            status: "finished_successfully",
+          },
+        ],
+        idle: this.idle,
+        complete: this.idle,
+        latestRequestId: requestId,
+      };
+    }
+    get latestSubmittedRequestId() {
+      return this.sent.at(-1);
+    }
+    onCompletionRead?: () => void;
+    async readCompletion(requestId: string): Promise<ChatGPTUpdate[] | null> {
       this.idleChecks++;
-      return this.idle;
+      this.onCompletionRead?.();
+      return this.idle
+        ? [
+            {
+              kind: "update",
+              requestId,
+              conversationId: null,
+              role: "assistant",
+              channel: "final",
+              messageId: "recovered-final",
+              text: "Recovered final answer",
+              status: "finished_successfully",
+            },
+            { kind: "complete", requestId, conversationId: null },
+          ]
+        : null;
     }
     async acknowledge() {}
     publish(event: TerminalEvent) {
@@ -197,6 +250,7 @@ const fixture = Effect.gen(function* () {
   return {
     attachMcp,
     refreshMcp,
+    turnInput,
     session,
     events,
     fake: fakes.connections.at(-1)!,
@@ -565,6 +619,120 @@ describe("ChatGPT task authority", () => {
           );
           expect(ended[0]?.status).toBe("completed");
           expect(fake.idleChecks).toBeGreaterThan(0);
+        }),
+      ),
+  );
+
+  it.effect("recovers the saved final answer more than five minutes after done", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        yield* Queue.take(events);
+        const started = Promise.withResolvers<void>();
+        fake.onCompletionRead = () => started.resolve();
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => started.promise);
+        yield* TestClock.adjust("6 minutes");
+        expect(yield* Queue.size(events)).toBe(0);
+        fake.idle = true;
+        yield* TestClock.adjust("30 seconds");
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(
+          recorded.filter((event) => event.type === "message.updated").at(-1)?.message.text,
+        ).toBe("Recovered final answer");
+        expect(recorded.at(-1)?.type).toBe("turn.terminal");
+        expect(fake.idleChecks).toBeGreaterThan(2);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.live("reconciles a done task on restart without activating or submitting it again", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, requestId, turnInput } = yield* fixture;
+        yield* Queue.take(events);
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        fake.idle = true;
+        yield* session.startTurn({
+          ...turnInput,
+          runId: RunId.make("restart-run"),
+          runOrdinal: 2,
+          attemptId: RunAttemptId.make("restart-attempt"),
+          message: {
+            ...turnInput.message,
+            messageId: MessageId.make("message:restart-continuation:run"),
+            createdBy: "agent",
+            creationSource: "server",
+          },
+        });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(fake.sent).toEqual([requestId]);
+        expect(fake.controls.filter((action) => action === "activate")).toHaveLength(1);
+        expect(
+          recorded.filter((event) => event.type === "message.updated").at(-1)?.message.runId,
+        ).toBe("restart-run");
+      }),
+    ),
+  );
+
+  it.live(
+    "manual refresh imports one snapshot and completes a done task without another prompt",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, session, turnInput } = yield* fixture;
+          yield* Queue.take(events);
+          fake.state = "done";
+          fake.idle = true;
+          const projection = yield* Schema.decodeUnknownEffect(OrchestrationV2ThreadProjection)({
+            thread: turnInput.appThread,
+            runs: [],
+            attempts: [],
+            nodes: [],
+            subagents: [],
+            providerSessions: [],
+            providerThreads: [],
+            providerTurns: [],
+            runtimeRequests: [],
+            messages: [],
+            plans: [],
+            turnItems: [],
+            checkpointScopes: [],
+            checkpoints: [],
+            contextHandoffs: [],
+            contextTransfers: [],
+            visibleTurnItems: [],
+            updatedAt: turnInput.appThread.updatedAt,
+          });
+          const snapshot = yield* session.readThreadSnapshot({
+            providerThread: turnInput.providerThread,
+            existingProjection: projection,
+          });
+          expect(snapshot.messages.at(-1)?.text).toBe("Recovered final answer");
+          const recorded = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          expect(recorded.at(-1)?.type).toBe("turn.terminal");
+          const again = yield* session.readThreadSnapshot({
+            providerThread: turnInput.providerThread,
+            existingProjection: projection,
+          });
+          expect(again.messages).toHaveLength(1);
+          expect(again.messages[0]?.id).toBe(snapshot.messages[0]?.id);
+          expect(fake.sent).toHaveLength(1);
+          expect(fake.conversationReads).toBe(2);
         }),
       ),
   );

@@ -1150,6 +1150,14 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input]),
       },
     }),
+    refreshChatGPTThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:chatgpt-thread:refresh",
+      tag: WS_METHODS.serverRefreshChatGPTThread,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.threadId]),
+      },
+    }),
     listProviderCloudProjects: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:cloud-projects:list",
       tag: WS_METHODS.serverListProviderCloudProjects,

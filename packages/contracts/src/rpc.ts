@@ -25,7 +25,7 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   CodexAuthCallbackInput,
   CodexAuthCallbackState,
@@ -466,6 +466,7 @@ export const WS_METHODS = {
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverListProviderCloudProjects: "server.listProviderCloudProjects",
+  serverRefreshChatGPTThread: "server.refreshChatGPTThread",
   serverCreateProviderCloudProject: "server.createProviderCloudProject",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
@@ -601,6 +602,19 @@ const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
 const ProviderCloudProject = Schema.Struct({
   id: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
+});
+export class ChatGPTThreadRefreshError extends Schema.TaggedError<ChatGPTThreadRefreshError>()(
+  "ChatGPTThreadRefreshError",
+  { threadId: ThreadId, cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message() {
+    return "Could not refresh the ChatGPT conversation.";
+  }
+}
+const WsServerRefreshChatGPTThreadRpc = Rpc.make(WS_METHODS.serverRefreshChatGPTThread, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Struct({ messageCount: NonNegativeInt }),
+  error: Schema.Union([ChatGPTThreadRefreshError, EnvironmentAuthorizationError]),
 });
 const WsServerListProviderCloudProjectsRpc = Rpc.make(WS_METHODS.serverListProviderCloudProjects, {
   payload: Schema.Struct({ instanceId: ProviderInstanceId }),
@@ -1877,6 +1891,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerListProviderCloudProjectsRpc,
+  WsServerRefreshChatGPTThreadRpc,
   WsServerCreateProviderCloudProjectRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,

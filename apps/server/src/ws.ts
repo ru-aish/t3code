@@ -142,6 +142,7 @@ import {
   type ShellApplicationEvent,
 } from "./orchestration-v2/ShellStream.ts";
 import { ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION } from "./orchestration-v2/ProjectionStore.ts";
+import * as ChatGPTThreadSync from "./chatgpt/threadSync.ts";
 import { bufferLiveStream } from "./orchestration-v2/LiveStreamBudget.ts";
 import { coalesceThreadLiveStream } from "./orchestration-v2/ThreadLiveEventCoalescer.ts";
 import {
@@ -1180,6 +1181,7 @@ const layerWsRpc = (
       const projectService = yield* ProjectService.ProjectService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
+      const chatGPTThreadSync = yield* ChatGPTThreadSync.ChatGPTThreadSync;
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const mcpAppRequests = yield* McpAppRequests.McpAppRequests;
@@ -2159,6 +2161,8 @@ const layerWsRpc = (
               }),
             ),
           ),
+        [WS_METHODS.serverRefreshChatGPTThread]: (input) =>
+          chatGPTThreadSync.refresh(input.threadId),
         [WS_METHODS.serverListProviderCloudProjects]: (input) =>
           Effect.gen(function* () {
             const instance = yield* providerInstances.getInstance(input.instanceId);
