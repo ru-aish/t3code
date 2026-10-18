@@ -46,11 +46,13 @@ export const layer = Layer.effect(
           );
           if (!providerThread || providerThread.driver !== "chatgpt")
             return yield* new ChatGPTThreadRefreshError({ threadId });
+          const providerSessionId = providerThread.providerSessionId;
+          if (!providerSessionId) return yield* new ChatGPTThreadRefreshError({ threadId });
           const modelSelection = [...projection.runs]
             .reverse()
             .find((run) => run.providerThreadId === providerThread.id)?.modelSelection;
           if (!modelSelection) return yield* new ChatGPTThreadRefreshError({ threadId });
-          const live = yield* sessions.get(providerThread.providerSessionId);
+          const live = yield* sessions.get(providerSessionId);
           const cwd = savedSession?.cwd ?? projection.thread.worktreePath;
           const project = cwd
             ? Option.none()
@@ -61,7 +63,7 @@ export const layer = Layer.effect(
             ? live.value
             : yield* sessions.open({
                 threadId,
-                providerSessionId: providerThread.providerSessionId,
+                providerSessionId,
                 modelSelection,
                 runtimePolicy: {
                   cwd: workspace,
@@ -108,7 +110,7 @@ export const layer = Layer.effect(
           const events: OrchestrationV2DomainEvent[] = [];
           for (const event of changes) {
             const normalized = yield* ingestor.normalize({
-              providerSessionId: providerThread.providerSessionId,
+              providerSessionId,
               providerInstanceId: runtime.instanceId,
               threadId,
               event,
