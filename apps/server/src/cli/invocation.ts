@@ -143,7 +143,7 @@ const powershellWord = (value: string) =>
     .replace(/["\u201C\u201D\u201E]/g, "$&$&")}"`;
 
 /** Quotes a word for the host's shell: POSIX, or PowerShell on Windows. */
-const hostShellWord = (platform: NodeJS.Platform, value: string) =>
+export const hostShellWord = (platform: NodeJS.Platform, value: string) =>
   platform === "win32" ? powershellWord(value) : shellWord(value);
 
 /**

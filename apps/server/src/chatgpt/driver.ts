@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import {
@@ -19,9 +20,14 @@ import {
   type ProviderDriver,
 } from "@t3tools/provider-core/server/driver";
 import { ChatGPTConnection, type ChatGPTModel } from "./connection.ts";
+import * as ChatGPTMcpBridge from "./mcpBridge.ts";
 import { CHATGPT_DRIVER, makeChatGPTAdapter } from "./adapter.ts";
 
-export type ChatGPTDriverEnv = ProviderHost.ProviderHost | FileSystem.FileSystem | Path.Path;
+export type ChatGPTDriverEnv =
+  | ProviderHost.ProviderHost
+  | FileSystem.FileSystem
+  | Path.Path
+  | McpProviderSessions.McpProviderSessions;
 const decodeSettings = Schema.decodeSync(ChatGPTSettings);
 
 export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = {
@@ -236,6 +242,7 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           token,
           environmentId,
           cacheDir,
+          attachMcp: yield* ChatGPTMcpBridge.make,
           resolveAttachmentPath: host.resolveAttachmentPath,
           linkPullRequest: actions.linkPullRequest,
         }),

@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/server/adapterDriver";
+import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
 import { mergeFinalAnswer } from "./protocol.ts";
 import {
   ChatGPTConnection,
@@ -138,6 +139,7 @@ export const makeChatGPTAdapter = (
     readonly token: string;
     readonly environmentId: string;
     readonly cacheDir: string;
+    readonly attachMcp: Effect.Success<typeof ChatGPTMcpBridge.make>;
     readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
     readonly linkPullRequest?: (
       threadId: ThreadId,
@@ -160,6 +162,7 @@ export const makeChatGPTAdapter = (
             driver: CHATGPT_DRIVER,
             providerSessionId: input.providerSessionId,
           });
+        const orchestration = yield* transport.attachMcp(input.threadId, transport.cacheDir);
         const connection = new ChatGPTConnection({
           cdpEndpoint: options.config.cdpEndpoint,
           controlEndpoint: options.config.terminalEndpoint,
@@ -168,6 +171,7 @@ export const makeChatGPTAdapter = (
           providerId: options.instanceId,
           threadId: input.threadId,
           cacheDir: transport.cacheDir,
+          orchestrationCommand: orchestration?.command,
         });
         const incoming = yield* Queue.unbounded<Update>();
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
@@ -634,6 +638,16 @@ export const makeChatGPTAdapter = (
               path,
             });
           }
+          yield* (orchestration?.refresh ?? Effect.void).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CHATGPT_DRIVER,
+                  detail: "Failed to refresh the ChatGPT orchestration bridge credential",
+                  cause,
+                }),
+            ),
+          );
           thread = request.providerThread;
           binding = yield* attempt(() =>
             connection.control<TerminalBinding>("activate", {
