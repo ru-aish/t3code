@@ -1,3 +1,4 @@
+import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -11,16 +12,22 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { HttpRouter } from "effect/http";
+import * as NodeChildProcess from "node:child_process";
+import * as NodePath from "node:path";
+import * as NodeUtil from "node:util";
 import { vi } from "vite-plus/test";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
-import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
-import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -126,18 +133,15 @@ const provider: ServerProvider = {
   skills: [],
   supportedRuntimeModes: ["full-access"],
 };
-const scope: McpInvocationScope = {
-  environmentId: EnvironmentId.make("test"),
-  requestNamespace: "chatgpt-session",
-  thread: {
-    threadId: parentId,
-    providerSessionId: "chatgpt-session",
-    providerInstanceId: instanceId,
-  },
-  client: undefined,
-  capabilities: new Set(["orchestration"]),
-  issuedAt: 1,
-};
+
+const exec = NodeUtil.promisify(NodeChildProcess.exec);
+const serverBinPath = NodePath.resolve(import.meta.dirname, "../bin.ts");
+const withInvocation = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.provideService(HostProcess.Arguments, [process.execPath, serverBinPath]),
+    Effect.provideService(HostProcess.ExecutablePath, process.execPath),
+    Effect.provideService(HostProcess.IsExecutable, false),
+  );
 
 describe("ChatGPT app-owned delegation", () => {
   it.live(
@@ -155,6 +159,7 @@ describe("ChatGPT app-owned delegation", () => {
               fake.submitted = undefined;
             }),
           );
+          const attachMcp = yield* ChatGPTMcpBridge.make;
           const adapter = makeChatGPTAdapter(
             {
               instanceId,
@@ -167,7 +172,7 @@ describe("ChatGPT app-owned delegation", () => {
               token: "test",
               environmentId: "test",
               cacheDir: cwd + "/chatgpt-cache",
-              attachMcp: yield* ChatGPTMcpBridge.make,
+              attachMcp,
             },
           );
           const capabilities = yield* adapter.getCapabilities();
@@ -192,32 +197,46 @@ describe("ChatGPT app-owned delegation", () => {
           yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const sink = yield* EventSink.EventSinkV2;
-            const serviceLayer = OrchestratorMcpService.layer.pipe(
+            const mcpDependencies = Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(ThreadManagementService.ThreadManagementService)({
+                dispatch: orchestrator.dispatch,
+                getThreadRecords: orchestrator.getThreadRecords,
+                recoverDelegatedTask: orchestrator.recoverDelegatedTask,
+                delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
+                hasReceipt: () => Effect.succeed(false),
+              }),
+              registry,
+              ProviderRegistryMock.layer([provider]),
+              ServerSettings.layerTest(),
+              Layer.mock(ProjectService.ProjectService)({
+                getById: () =>
+                  Effect.succeed(
+                    Option.some({ id: projectId, defaultModelSelection: null } as never),
+                  ),
+              }),
+              Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+              Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+            );
+            const mcpRoutes = McpHttpServer.layerOrchestratorToolkit.pipe(
+              Layer.provideMerge(McpHttpServer.layerMcpTransport),
+              Layer.provide(mcpDependencies),
+              Layer.provide(McpSessionRegistry.layer),
+            );
+            yield* HttpRouter.serve(mcpRoutes, {
+              disableListenLog: true,
+              disableLogger: true,
+            }).pipe(
+              Layer.provide(NodeHttpServer.layerTest),
               Layer.provide(
-                Layer.mergeAll(
-                  NodeServices.layer,
-                  Layer.mock(ThreadManagementService.ThreadManagementService)({
-                    dispatch: orchestrator.dispatch,
-                    getThreadRecords: orchestrator.getThreadRecords,
-                    recoverDelegatedTask: orchestrator.recoverDelegatedTask,
-                    delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
-                    hasReceipt: () => Effect.succeed(false),
-                  }),
-                  registry,
-                  ProviderRegistryMock.layer([provider]),
-                  ServerSettings.layerTest(),
-                  Layer.mock(ProjectService.ProjectService)({
-                    getById: () =>
-                      Effect.succeed(
-                        Option.some({ id: projectId, defaultModelSelection: null } as never),
-                      ),
-                  }),
-                  Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
-                  Layer.mock(GitVcsDriver.GitVcsDriver)({}),
-                  Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-                  Layer.mock(SecretRequests.SecretRequests)({}),
-                ),
+                Layer.mock(ServerEnvironment.ServerEnvironment)({
+                  getEnvironmentId: Effect.succeed(EnvironmentId.make("test")),
+                }),
               ),
+              Layer.provide(NodeServices.layer),
+              Layer.build,
             );
             yield* orchestrator.dispatch({
               type: "thread.create",
@@ -255,14 +274,37 @@ describe("ChatGPT app-owned delegation", () => {
               Stream.take(1),
               Stream.runDrain,
             );
-            const task = yield* OrchestratorMcpService.OrchestratorMcpService.use((service) =>
-              service.delegateTask(scope, {
-                task: "Review the API",
-                title: "API review",
-                target: { model: "gpt-child" },
-                clientRequestId: "review-one",
-              }),
-            ).pipe(Effect.provide(serviceLayer));
+            const credential = yield* McpSessionRegistry.issueActiveMcpCredential({
+              threadId: parentId,
+              providerInstanceId: instanceId,
+              browserToolsAvailable: false,
+              capabilities: new Set(["orchestration"]),
+            });
+            if (credential === undefined) {
+              return yield* Effect.die(new Error("MCP credential was not issued."));
+            }
+            expect(credential.config.threadId).toBe(parentId);
+            yield* (yield* McpProviderSessions.McpProviderSessions).set(credential.config);
+            const bridge = yield* attachMcp(parentId, cwd + "/bridge-call");
+            if (bridge === undefined) {
+              return yield* Effect.die(new Error("ChatGPT MCP bridge was not attached."));
+            }
+            const { stdout, stderr } = yield* Effect.promise(() =>
+              exec(
+                `${bridge.command} delegate_task '${JSON.stringify({
+                  task: "Review the API",
+                  title: "API review",
+                  target: { model: "gpt-child" },
+                  clientRequestId: "review-one",
+                })}'`,
+              ),
+            );
+            expect(stderr).toBe("");
+            const task = JSON.parse(stdout).structuredContent;
+            expect(task).toMatchObject({
+              childThreadId: expect.any(String),
+              taskId: expect.any(String),
+            });
             expect(["queued", "running"]).toContain(task.status);
             expect(task.taskId).not.toBe(task.childThreadId);
             expect(task.summary).toBeNull();
@@ -303,6 +345,9 @@ describe("ChatGPT app-owned delegation", () => {
             continuation.complete();
           }).pipe(Effect.provide(runtime));
         }),
-      ).pipe(Effect.provide(Layer.merge(NodeServices.layer, McpProviderSessions.layer))),
+      ).pipe(
+        withInvocation,
+        Effect.provide(Layer.merge(NodeServices.layer, McpProviderSessions.layer)),
+      ),
   );
 });
