@@ -461,7 +461,11 @@ export const makeChatGPTAdapter = (
           if (isFinalAnswer) {
             const fragments = finalFragments.get(key) ?? new Map<string, string>();
             const previous = fragments.get(update.messageId);
-            if (previous && previous.length > update.text.length && previous.startsWith(update.text))
+            if (
+              previous &&
+              previous.length > update.text.length &&
+              previous.startsWith(update.text)
+            )
               return;
             fragments.set(update.messageId, update.text);
             finalFragments.set(key, fragments);

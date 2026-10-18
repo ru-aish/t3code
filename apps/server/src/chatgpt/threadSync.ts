@@ -35,9 +35,11 @@ export const layer = Layer.effect(
           );
           if (!providerThread || providerThread.driver !== "chatgpt" || !savedSession)
             return yield* new ChatGPTThreadRefreshError({ threadId });
-          const modelSelection = [...projection.runs].reverse().find(run => run.providerThreadId === providerThread.id)?.modelSelection;
-      if (!modelSelection) return yield* new ChatGPTThreadRefreshError({ threadId });
-      const live = yield* sessions.get(savedSession.id);
+          const modelSelection = [...projection.runs]
+            .reverse()
+            .find((run) => run.providerThreadId === providerThread.id)?.modelSelection;
+          if (!modelSelection) return yield* new ChatGPTThreadRefreshError({ threadId });
+          const live = yield* sessions.get(savedSession.id);
           const runtime = Option.isSome(live)
             ? live.value
             : yield* sessions.open({
@@ -58,9 +60,7 @@ export const layer = Layer.effect(
           return { messageCount: snapshot.messages.length };
         }).pipe(
           Effect.mapError((cause) =>
-            isRefreshError(cause)
-              ? cause
-              : new ChatGPTThreadRefreshError({ threadId, cause }),
+            isRefreshError(cause) ? cause : new ChatGPTThreadRefreshError({ threadId, cause }),
           ),
         ),
     });
