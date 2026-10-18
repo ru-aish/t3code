@@ -53,7 +53,7 @@ export const make = Effect.gen(function* () {
       .join(" ");
     const command =
       platform === "win32"
-        ? `$env:ELECTRON_RUN_AS_NODE='1'; try { & ${invocation} } finally { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue }`
+        ? `& { $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE; $exitCode = 1; try { $env:ELECTRON_RUN_AS_NODE='1'; & ${invocation} @args; $exitCode = $LASTEXITCODE } finally { if ($null -eq $previousElectronRunAsNode) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode } }; $global:LASTEXITCODE = $exitCode }`
         : `env ELECTRON_RUN_AS_NODE=1 ${invocation}`;
     return { command, refresh };
   });
