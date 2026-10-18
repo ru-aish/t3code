@@ -244,7 +244,7 @@ export const makeChatGPTAdapter = (
         const settleReasoning = Effect.fnUntraced(function* (turn: ActiveTurn) {
           const timestamp = yield* DateTime.now;
           for (const key of reasoningKeys) {
-            if (!key.startsWith(`${turn.generation}:`)) continue;
+            if (!key.startsWith(`${turn.turn.id}:${turn.generation}:`)) continue;
             const item = messages.get(key);
             if (!item?.streaming) continue;
             messages.set(key, { ...item, streaming: false, updatedAt: timestamp });
@@ -281,7 +281,7 @@ export const makeChatGPTAdapter = (
           active = null;
           yield* settleReasoning(completed);
           const timestamp = yield* DateTime.now;
-          const finalKey = String(completed.generation) + ":final";
+          const finalKey = `${completed.turn.id}:${completed.generation}:final`;
           const finalMessage = messages.get(finalKey);
           if (finalMessage?.streaming) {
             const message = { ...finalMessage, streaming: false, updatedAt: timestamp };
@@ -416,8 +416,9 @@ export const makeChatGPTAdapter = (
             return;
           const timestamp = yield* DateTime.now;
           // GenUI can replace an in-progress final message's native ID with a
-          // canonical full-answer ID. Keep one final answer per submission.
-          const key = `${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
+          // canonical full-answer ID. Keep one final answer per submission, scoped
+          // to the durable attempt because generation resets when sessions reopen.
+          const key = `${outputTurn.turn.id}:${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
           if (isFinalAnswer) yield* settleReasoning(outputTurn);
           const id = MessageId.make(`chatgpt:${input.threadId}:${key}`);
           const existing = messages.get(key);

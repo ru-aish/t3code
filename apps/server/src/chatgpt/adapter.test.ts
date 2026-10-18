@@ -22,6 +22,7 @@ const fakes = vi.hoisted(() => ({
   failNextSend: false,
   connections: [] as Array<{
     callback?: (update: ChatGPTUpdate) => void;
+    onSend?: (requestId: string) => void;
     publish: (event: TerminalEvent) => void;
     sent: string[];
     stops: number;
@@ -35,6 +36,7 @@ vi.mock("./connection.ts", () => ({
     conversationId = null;
     messages = [];
     callback?: (update: ChatGPTUpdate) => void;
+    onSend?: (requestId: string) => void;
     sent: string[] = [];
     stops = 0;
     controls: string[] = [];
@@ -69,6 +71,7 @@ vi.mock("./connection.ts", () => ({
     }
     async send(id: string) {
       this.sent.push(id);
+      this.onSend?.(id);
       if (fakes.failNextSend) {
         fakes.failNextSend = false;
         throw new Error("Image upload failed");
@@ -101,7 +104,7 @@ vi.mock("./connection.ts", () => ({
 }));
 import { makeChatGPTAdapter } from "./adapter.ts";
 
-const fixture = Effect.gen(function* () {
+const fixtureFor = Effect.fnUntraced(function* (runOrdinal = 1, attemptId = "attempt") {
   const threadId = ThreadId.make("test-thread");
   const now = yield* DateTime.now;
   const selection = { instanceId: ProviderInstanceId.make("chatgpt"), model: "test-model" };
@@ -162,10 +165,10 @@ const fixture = Effect.gen(function* () {
   const turnInput = {
     appThread,
     threadId,
-    runId: RunId.make("run"),
-    runOrdinal: 1,
+    runId: RunId.make(`run-${runOrdinal}`),
+    runOrdinal,
     providerTurnOrdinal: 1,
-    attemptId: RunAttemptId.make("attempt"),
+    attemptId: RunAttemptId.make(attemptId),
     rootNodeId: NodeId.make("root"),
     providerThread,
     message: {
@@ -186,6 +189,7 @@ const fixture = Effect.gen(function* () {
     requestId: turnInput.message.messageId,
   };
 });
+const fixture = fixtureFor();
 
 const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
   seq: 1,
@@ -197,6 +201,78 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("preserves answers across reopened sessions and retries of the same run", () =>
+    Effect.gen(function* () {
+      const completeReply = Effect.fnUntraced(function* (
+        runOrdinal: number,
+        attemptId: string,
+        text: string,
+      ) {
+        const { events, fake, requestId } = yield* fixtureFor(runOrdinal, attemptId);
+        yield* Queue.take(events);
+        const update = {
+          kind: "update" as const,
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          status: "in_progress",
+        };
+        fake.callback?.({
+          ...update,
+          channel: "commentary",
+          messageId: "progress",
+          text: "Checking",
+        });
+        fake.callback?.({ ...update, channel: "final", messageId: "draft", text });
+        fake.callback?.({
+          ...update,
+          channel: "final",
+          messageId: "canonical",
+          text: `${text}\nComplete.`,
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        return yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+      });
+      const first = yield* completeReply(1, "attempt-one", "First answer").pipe(Effect.scoped);
+      const second = yield* completeReply(2, "attempt-two", "Second answer").pipe(Effect.scoped);
+      const retry = yield* completeReply(2, "attempt-retry", "Retried answer").pipe(Effect.scoped);
+      const messages = new Map(
+        [...first, ...second, ...retry].flatMap((event) =>
+          event.type === "message.updated" ? [[event.message.id, event.message] as const] : [],
+        ),
+      );
+      expect([...messages.values()].map((message) => message.text)).toEqual([
+        "First answer\nComplete.",
+        "Second answer\nComplete.",
+        "Retried answer\nComplete.",
+      ]);
+      expect([...messages.values()].every((message) => !message.streaming)).toBe(true);
+      const items = new Map(
+        [...first, ...second, ...retry].flatMap((event) =>
+          event.type === "turn_item.updated" ? [[event.turnItem.id, event.turnItem] as const] : [],
+        ),
+      );
+      expect([...items.values()].map((item) => item.type)).toEqual([
+        "reasoning",
+        "assistant_message",
+        "reasoning",
+        "assistant_message",
+        "reasoning",
+        "assistant_message",
+      ]);
+      expect([...items.values()].every((item) => item.status === "completed")).toBe(true);
+      for (const item of items.values()) {
+        if (item.type === "assistant_message") {
+          expect(item.messageId).toBe(item.id);
+          expect(messages.get(item.messageId)?.text).toBe(item.text);
+        }
+      }
+    }),
+  );
+
   it.live("finishes a reply-only stream with no Terminal MCP done event", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -222,6 +298,60 @@ describe("ChatGPT task authority", () => {
         expect(finalMessages.at(-1)?.message.streaming).toBe(false);
         expect(recorded.at(-1)?.type).toBe("turn.terminal");
         expect(fake.controls).toEqual(["register", "activate", "pause"]);
+      }),
+    ),
+  );
+
+  it.live("keeps automatic continuation answers distinct within the same attempt", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const sent = yield* Queue.unbounded<string>();
+        fake.onSend = (id) => {
+          Queue.offerUnsafe(sent, id);
+        };
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          recipient: "api_tool.call_tool",
+          text: "fedora_t3code.run_command",
+        });
+        const answer = {
+          kind: "update" as const,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "answer",
+          status: "finished_successfully",
+        };
+        fake.callback?.({ ...answer, requestId, text: "First answer" });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const initial = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "message.updated"),
+          Stream.runCollect,
+        );
+        fake.publish(terminal("continue"));
+        const continuationId = yield* Queue.take(sent);
+        fake.callback?.({ ...answer, requestId: continuationId, text: "Continued answer" });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId: continuationId, conversationId: null });
+        const continued = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const messages = new Map(
+          [...initial, ...continued].flatMap((event) =>
+            event.type === "message.updated" ? [[event.message.id, event.message] as const] : [],
+          ),
+        );
+        expect([...messages.values()].map((message) => message.text)).toEqual([
+          "First answer",
+          "Continued answer",
+        ]);
+        expect(new Set([...messages.values()].map((message) => message.runId)).size).toBe(1);
       }),
     ),
   );
