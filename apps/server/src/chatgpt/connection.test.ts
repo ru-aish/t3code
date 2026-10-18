@@ -73,6 +73,33 @@ describe("ChatGPT orchestration instructions", () => {
   });
 });
 
+describe("ChatGPT Terminal MCP control errors", () => {
+  it("includes the control-plane error detail in failed requests", async () => {
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "thread:delegated-task:command%3Amcp%3Aexample",
+      cacheDir: "/tmp",
+    });
+    const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "A non-default registered thread identifier is required" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    try {
+      await expect(connection.control("register", { cwd: "/work", model: "gpt-5-6" })).rejects.toThrow(
+        "Terminal MCP control request failed (409): A non-default registered thread identifier is required",
+      );
+    } finally {
+      request.mockRestore();
+    }
+  });
+});
+
 describe("ChatGPT streamed update delivery", () => {
   it("does not block known-conversation updates on diagnostic cache writes", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-stream-"));
