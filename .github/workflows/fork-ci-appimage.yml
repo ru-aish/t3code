@@ -27,11 +27,15 @@ jobs:
           sudo apt-get install -y libsecret-1-dev pkg-config imagemagick
       - name: Test ChatGPT integration
         run: |
+          command -v pwsh
           vp test run \
             apps/server/src/chatgpt/connection.test.ts \
             apps/server/src/chatgpt/adapter.test.ts \
             apps/server/src/chatgpt/protocol.test.ts \
             apps/server/src/chatgpt/driver.test.ts \
+            apps/server/src/chatgpt/mcpBridge.test.ts \
+            apps/server/src/chatgpt/mcpBridge.windows.test.ts \
+            apps/server/src/chatgpt/subagents.integration.test.ts \
             apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts \
             packages/contracts/src/settings.test.ts \
             apps/web/src/components/chat/ModelPickerContent.test.ts

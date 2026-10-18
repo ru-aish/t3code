@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Wire tests exercise real binary files and serialized renderer code.
+import { OrchestratorMcpThreadSendInput } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 import {
   ChatGPTConnection,
@@ -11,6 +13,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeVM from "node:vm";
 import { vi } from "vite-plus/test";
+
+const decodeThreadSend = Schema.decodeUnknownSync(
+  Schema.fromJsonString(OrchestratorMcpThreadSendInput),
+);
 
 describe("ChatGPT submission identity", () => {
   it("uses the same valid upstream message ID for a retried durable request", () => {
@@ -30,6 +36,40 @@ describe("ChatGPT submission identity", () => {
         "Without fedora_t3code tool use, simply end your response normally.",
       );
     }
+  });
+});
+
+describe("ChatGPT orchestration instructions", () => {
+  it("exposes canonical async controls without a parent registration or credential", () => {
+    const prompt = executionPrompt(
+      "parent-thread",
+      "/work/project",
+      "Delegate a review",
+      "private-bridge-command",
+    );
+    for (const tool of [
+      "orchestrator_capabilities",
+      "delegate_task",
+      "task_status",
+      "task_cancel",
+      "t3_thread_send",
+      "t3_thread_read",
+    ])
+      expect(prompt).toContain(tool);
+    const sendExample = prompt.match(/send_input = t3_thread_send (\{[^}]+\})/)?.[1];
+    expect(decodeThreadSend(sendExample)).toMatchObject({
+      threadId: "returned childThreadId",
+      message: "follow-up",
+      mode: "auto",
+    });
+    expect(prompt).not.toContain("--help");
+    expect(prompt).toContain("Spawn is async by default");
+    expect(prompt).toContain("Do not poll, wait, or start watcher processes");
+    expect(prompt).toContain("taskId is the delegated task handle");
+    expect(prompt).not.toContain("Bearer");
+    expect(executionPrompt("parent-thread", "/work/project", "Hello")).not.toContain(
+      "T3 orchestration tools",
+    );
   });
 });
 
@@ -128,6 +168,7 @@ describe("ChatGPT image and project submissions", () => {
         NodeVM.runInNewContext(expression, { window, Image, Symbol, Map, Set, Date, Intl, URL }),
     };
     const options = {
+      orchestrationCommand: "test-orchestration-command",
       cdpEndpoint: "http://127.0.0.1:9234",
       controlEndpoint: "http://127.0.0.1:8022",
       token: "test",
@@ -190,6 +231,8 @@ describe("ChatGPT image and project submissions", () => {
         "standard",
         images,
       );
+      expect(JSON.stringify(requests[0])).toContain("test-orchestration-command");
+      expect(JSON.stringify(requests[1])).toContain("test-orchestration-command");
       expect(requests[1]?.parent_message_id).toBe("canonical-parent");
       expect(requests[1]?.gizmo_id).toBe("g-p-selected");
       expect(upload).toHaveBeenCalledTimes(1);

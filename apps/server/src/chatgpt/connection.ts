@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { imageUploadDestination, normalizeProjects, normalizeStreamMessage } from "./protocol.ts";
+import { orchestrationPrompt } from "./mcpBridge.ts";
 import { rendererDiscovery } from "./rendererDiscovery.ts";
 
 export type ChatGPTUpdate = {
@@ -75,8 +76,13 @@ export function stableMessageId(requestId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-export function executionPrompt(terminalId: string, cwd: string, text: string): string {
-  return `[T3 execution context]\nYour permanent Terminal MCP thread ID is: ${terminalId}\nWorkspace: ${JSON.stringify(cwd)}\nIf you use fedora_t3code tools, bootstrap and recover only with this exact ID and reuse it as session_id for every tool call. Never invent or substitute an ID. Only after using those tools, report verified completion with thread_task(action="complete", evidence=[...]), or call thread_task(action="wait", reason="...") if user input is required. Without fedora_t3code tool use, simply end your response normally.\n[/T3 execution context]\n\n${text}`;
+export function executionPrompt(
+  terminalId: string,
+  cwd: string,
+  text: string,
+  orchestrationCommand?: string,
+): string {
+  return `[T3 execution context]\nYour permanent Terminal MCP thread ID is: ${terminalId}\nWorkspace: ${JSON.stringify(cwd)}\nIf you use fedora_t3code tools, bootstrap and recover only with this exact ID and reuse it as session_id for every tool call. Never invent or substitute an ID. Only after using those tools, report verified completion with thread_task(action="complete", evidence=[...]), or call thread_task(action="wait", reason="...") if user input is required. Without fedora_t3code tool use, simply end your response normally.\n[/T3 execution context]\n${orchestrationCommand ? orchestrationPrompt(orchestrationCommand, terminalId) : ""}\n${text}`;
 }
 
 class Cdp {
@@ -201,6 +207,7 @@ export class ChatGPTConnection {
     providerId: string;
     threadId: string;
     cacheDir: string;
+    orchestrationCommand?: string | undefined;
   };
   constructor(options: {
     cdpEndpoint: string;
@@ -210,6 +217,7 @@ export class ChatGPTConnection {
     providerId: string;
     threadId: string;
     cacheDir: string;
+    orchestrationCommand?: string | undefined;
   }) {
     this.options = options;
     this.cachePath = NodePath.join(
@@ -473,7 +481,7 @@ export class ChatGPTConnection {
                 height: image.height,
                 size_bytes: image.size,
               })),
-              executionPrompt(this.options.threadId, cwd, text),
+              executionPrompt(this.options.threadId, cwd, text, this.options.orchestrationCommand),
             ],
           },
           create_time: Date.now() / 1000,

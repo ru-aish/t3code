@@ -28,6 +28,7 @@ const fakes = vi.hoisted(() => ({
     controls: string[];
     idle: boolean;
     idleChecks: number;
+    options: { orchestrationCommand?: string | undefined };
   }>,
 }));
 vi.mock("./connection.ts", () => ({
@@ -43,7 +44,9 @@ vi.mock("./connection.ts", () => ({
     epoch = 0;
     pending: Array<TerminalEvent> = [];
     wake?: () => void;
-    constructor() {
+    readonly options: { orchestrationCommand?: string | undefined };
+    constructor(options: { orchestrationCommand?: string | undefined }) {
+      this.options = options;
       fakes.connections.push(this);
     }
     async load() {}
@@ -110,6 +113,13 @@ const fixture = Effect.gen(function* () {
     interactionMode: "default" as const,
     cwd: "/tmp",
   };
+  const refreshMcp = vi.fn();
+  const attachMcp = vi.fn(() =>
+    Effect.succeed({
+      command: "test-orchestration-command",
+      refresh: Effect.sync(refreshMcp),
+    }),
+  );
   const adapter = makeChatGPTAdapter(
     {
       instanceId: selection.instanceId,
@@ -118,7 +128,12 @@ const fixture = Effect.gen(function* () {
       enabled: true,
       config: yield* Schema.decodeEffect(ChatGPTSettings)({}),
     },
-    { token: "test-token", environmentId: "test-environment", cacheDir: "/tmp/test-chatgpt" },
+    {
+      token: "test-token",
+      environmentId: "test-environment",
+      cacheDir: "/tmp/test-chatgpt",
+      attachMcp,
+    },
   );
   const session = yield* adapter.openSession({
     threadId,
@@ -180,6 +195,8 @@ const fixture = Effect.gen(function* () {
   };
   yield* session.startTurn(turnInput);
   return {
+    attachMcp,
+    refreshMcp,
     session,
     events,
     fake: fakes.connections.at(-1)!,
@@ -197,6 +214,16 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("attaches the orchestration command and refreshes credentials before a turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake, attachMcp, refreshMcp } = yield* fixture;
+        expect(attachMcp).toHaveBeenCalledWith(ThreadId.make("test-thread"), "/tmp/test-chatgpt");
+        expect(fake.options.orchestrationCommand).toBe("test-orchestration-command");
+        expect(refreshMcp).toHaveBeenCalledOnce();
+      }),
+    ),
+  );
   it.live("finishes a reply-only stream with no Terminal MCP done event", () =>
     Effect.scoped(
       Effect.gen(function* () {

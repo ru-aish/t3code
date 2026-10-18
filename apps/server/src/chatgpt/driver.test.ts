@@ -1,3 +1,4 @@
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { ChatGPTSettings, ProviderInstanceId } from "@t3tools/contracts";
@@ -41,7 +42,9 @@ vi.mock("./connection.ts", () => ({
 }));
 import { ChatGPTDriver } from "./driver.ts";
 
-const layer = TestProviderHost.layer().pipe(Layer.provideMerge(NodeServices.layer));
+const layer = TestProviderHost.layer().pipe(
+  Layer.provideMerge(Layer.merge(NodeServices.layer, McpProviderSessions.layer)),
+);
 const decodeSettings = Schema.decodeSync(ChatGPTSettings);
 
 describe("ChatGPT initial discovery", () => {
