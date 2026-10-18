@@ -1,13 +1,6 @@
 name: Fork CI and AppImage
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "apps/server/src/chatgpt/**"
-      - ".github/workflows/fork-ci-appimage.yml"
-  push:
-    branches:
-      - feat/chatgpt-t3-subagents-v2
 permissions:
   contents: read
 jobs:
