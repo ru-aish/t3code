@@ -110,10 +110,18 @@ describe("ChatGPT orchestration attachment", () => {
           expect(command.includes(serverBinPath)).toBe(!packaged);
           expect(command).not.toContain(session.authorizationHeader);
           if (platform === "win32") {
-            expect(command).toContain("$env:ELECTRON_RUN_AS_NODE='1'; try { & ");
             expect(command).toContain(
-              "} finally { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue }",
+              "& { $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE; $exitCode = 1;",
             );
+            expect(command).toContain("$env:ELECTRON_RUN_AS_NODE='1'; & ");
+            expect(command).toContain("@args; $exitCode = $LASTEXITCODE");
+            expect(command).toContain(
+              "Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue",
+            );
+            expect(command).toContain(
+              "$env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode",
+            );
+            expect(command).toContain("$global:LASTEXITCODE = $exitCode");
             expect(command).toContain('"C:\\Program Files\\T3 `$Code``\\t3.exe"');
             expect(command).not.toContain("env ELECTRON_RUN_AS_NODE=1");
           } else {
