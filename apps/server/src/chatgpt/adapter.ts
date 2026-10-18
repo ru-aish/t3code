@@ -208,7 +208,12 @@ export const makeChatGPTAdapter = (
                 cause,
               }),
           });
-        const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => Queue.offer(events, event);
+        const snapshotItems = new Map<TurnItemId, OrchestrationV2TurnItem>();
+        const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => {
+          if (event.type === "turn_item.updated")
+            snapshotItems.set(event.turnItem.id, event.turnItem);
+          return Queue.offer(events, event);
+        };
         const session = {
           id: input.providerSessionId,
           driver: CHATGPT_DRIVER,
@@ -616,7 +621,10 @@ export const makeChatGPTAdapter = (
           return {
             providerThread: thread,
             providerTurns: [],
-            messages: [...messages.values()],
+            messages: [...messages]
+              .filter(([key]) => !reasoningKeys.has(key))
+              .map(([, message]) => message),
+            turnItems: [...snapshotItems.values()],
             runtimeRequests: [],
           } satisfies ProviderAdapter.ProviderAdapterV2ThreadSnapshot;
         });
@@ -897,7 +905,9 @@ export const makeChatGPTAdapter = (
                 return {
                   providerThread: request.providerThread,
                   providerTurns: [],
-                  messages: [...messages.values()],
+                  messages: [...messages]
+                    .filter(([key]) => !reasoningKeys.has(key))
+                    .map(([, message]) => message),
                   runtimeRequests: [],
                 };
               const result = yield* Deferred.make<

@@ -32,6 +32,7 @@ jobs:
             apps/server/src/chatgpt/adapter.test.ts \
             apps/server/src/chatgpt/protocol.test.ts \
             apps/server/src/chatgpt/driver.test.ts \
+            apps/server/src/chatgpt/threadSync.test.ts \
             apps/server/src/chatgpt/mcpBridge.test.ts \
             apps/server/src/chatgpt/subagents.integration.test.ts \
             apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts \

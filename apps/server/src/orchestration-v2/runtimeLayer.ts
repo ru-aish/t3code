@@ -149,7 +149,14 @@ const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 const layerChatGPTThreadSyncProvided = ChatGPTThreadSync.layer.pipe(
-  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      layerProviderEventIngestorProvided,
+      layerEventSinkProvided,
+    ),
+  ),
 );
 
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(

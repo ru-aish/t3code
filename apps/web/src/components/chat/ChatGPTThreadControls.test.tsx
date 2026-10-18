@@ -62,7 +62,12 @@ afterEach(() => {
 
 it("opens the exact web conversation and prevents repeated refresh while synchronizing", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const gate = Promise.withResolvers<{ _tag: "Success"; value: { messageCount: number } }>();
+  type Result = { _tag: "Success"; value: { messageCount: number } };
+  let resolve!: (value: Result) => void;
+  const promise = new Promise<Result>((complete) => {
+    resolve = complete;
+  });
+  const gate = { promise, resolve };
   state.refresh.mockReturnValue(gate.promise);
   act(() => {
     renderer = create(

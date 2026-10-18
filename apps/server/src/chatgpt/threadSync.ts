@@ -1,4 +1,9 @@
-import { ChatGPTThreadRefreshError, type ThreadId } from "@t3tools/contracts";
+import {
+  ChatGPTThreadRefreshError,
+  type OrchestrationV2DomainEvent,
+  type ThreadId,
+} from "@t3tools/contracts";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -6,6 +11,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 
 const isRefreshError = Schema.is(ChatGPTThreadRefreshError);
 
@@ -23,6 +30,8 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+    const sink = yield* EventSink.EventSinkV2;
     return ChatGPTThreadSync.of({
       refresh: (threadId) =>
         Effect.gen(function* () {
@@ -57,6 +66,35 @@ export const layer = Layer.effect(
             providerThread,
             existingProjection: projection,
           });
+          // Idle threads have no run subscriber to persist adapter events.
+          // Commit the reconciled transcript before acknowledging a refresh.
+          const knownMessages = new Map(
+            projection.messages.map((message) => [message.id, message]),
+          );
+          const knownItems = new Map(projection.turnItems.map((item) => [item.id, item]));
+          const changes: ProviderAdapter.ProviderAdapterV2Event[] = [];
+          for (const message of snapshot.messages) {
+            const previous = knownMessages.get(message.id);
+            if (previous?.text === message.text && previous.streaming === message.streaming)
+              continue;
+            changes.push({ type: "message.updated", driver: runtime.driver, message });
+          }
+          for (const item of snapshot.turnItems ?? []) {
+            const previous = knownItems.get(item.id);
+            if (previous && JSON.stringify(previous) === JSON.stringify(item)) continue;
+            changes.push({ type: "turn_item.updated", driver: runtime.driver, turnItem: item });
+          }
+          const events: OrchestrationV2DomainEvent[] = [];
+          for (const event of changes) {
+            const normalized = yield* ingestor.normalize({
+              providerSessionId: savedSession.id,
+              providerInstanceId: runtime.instanceId,
+              threadId,
+              event,
+            });
+            events.push(...normalized);
+          }
+          if (events.length) yield* sink.write({ events });
           return { messageCount: snapshot.messages.length };
         }).pipe(
           Effect.mapError((cause) =>

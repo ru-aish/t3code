@@ -451,6 +451,7 @@ export interface ProviderAdapterV2ThreadSnapshot {
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
   readonly messages: ReadonlyArray<OrchestrationV2ConversationMessage>;
+  readonly turnItems?: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runtimeRequests: ReadonlyArray<OrchestrationV2RuntimeRequest>;
   readonly providerPayload?: unknown;
 }

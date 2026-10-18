@@ -32,6 +32,7 @@ jobs:
           apps/server/src/chatgpt/adapter.test.ts
           apps/server/src/chatgpt/protocol.test.ts
           apps/server/src/chatgpt/driver.test.ts
+          apps/server/src/chatgpt/threadSync.test.ts
           apps/web/src/components/chat/ModelPickerContent.test.ts
           apps/web/src/components/chat/ChatGPTThreadControls.test.tsx
           apps/web/src/components/chat/ThreadDetailsPanel.test.tsx
