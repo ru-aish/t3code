@@ -1,4 +1,4 @@
-import { NodeHttpServer } from "@effect/platform-node";
+// @effect-diagnostics nodeBuiltinImport:off -- Integration test executes the real CLI against a loopback MCP endpoint.\nimport { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
