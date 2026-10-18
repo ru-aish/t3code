@@ -71,9 +71,6 @@ export const layer = Layer.effect(
                   interactionMode: projection.thread.interactionMode,
                 },
                 ...(savedSession ? { resumeFromSession: savedSession } : {}),
-                ...(providerThread.nativeThreadRef
-                  ? { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }
-                  : {}),
               });
           const snapshot = yield* runtime.readThreadSnapshot({
             providerThread,
