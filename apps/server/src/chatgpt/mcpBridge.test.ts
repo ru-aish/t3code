@@ -113,8 +113,11 @@ describe("ChatGPT orchestration attachment", () => {
             expect(command).toContain(
               "& { $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE; $exitCode = 1;",
             );
-            expect(command).toContain("$env:ELECTRON_RUN_AS_NODE='1'; & ");
-            expect(command).toContain("@args; $exitCode = $LASTEXITCODE");
+            expect(command).toContain("$env:ELECTRON_RUN_AS_NODE='1'; $argumentsBase64 = ");
+            expect(command).toContain("[Convert]::ToBase64String");
+            expect(command).toContain(
+              "([string]$args[0]) --arguments-base64 $argumentsBase64; $exitCode = $LASTEXITCODE",
+            );
             expect(command).toContain(
               "Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue",
             );
@@ -122,6 +125,9 @@ describe("ChatGPT orchestration attachment", () => {
               "$env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode",
             );
             expect(command).toContain("$global:LASTEXITCODE = $exitCode");
+            expect(command).toContain(
+              'if ($exitCode -ne 0) { throw "T3 MCP bridge failed with exit code $exitCode." }',
+            );
             expect(command).toContain('"C:\\Program Files\\T3 `$Code``\\t3.exe"');
             expect(command).not.toContain("env ELECTRON_RUN_AS_NODE=1");
           } else {
