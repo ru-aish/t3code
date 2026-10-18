@@ -53,7 +53,7 @@ export const make = Effect.gen(function* () {
       .join(" ");
     const command =
       platform === "win32"
-        ? `& { $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE; $exitCode = 1; try { $env:ELECTRON_RUN_AS_NODE='1'; & ${invocation} @args; $exitCode = $LASTEXITCODE } finally { if ($null -eq $previousElectronRunAsNode) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode } }; $global:LASTEXITCODE = $exitCode }`
+        ? `& { $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE; $exitCode = 1; try { if ($args.Count -lt 2) { throw 'T3 MCP bridge requires <tool> <arguments-json>.' }; $env:ELECTRON_RUN_AS_NODE='1'; $argumentsBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$args[1])); & ${invocation} ([string]$args[0]) --arguments-base64 $argumentsBase64; $exitCode = $LASTEXITCODE } finally { if ($null -eq $previousElectronRunAsNode) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue } else { $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode } }; $global:LASTEXITCODE = $exitCode; if ($exitCode -ne 0) { throw "T3 MCP bridge failed with exit code $exitCode." } }`
         : `env ELECTRON_RUN_AS_NODE=1 ${invocation}`;
     return { command, refresh };
   });
