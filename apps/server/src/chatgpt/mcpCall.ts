@@ -11,7 +11,11 @@ const decodeArguments = Schema.decodeSync(
 const decodeCredential = Schema.decodeSync(ChatGPTMcpCredential);
 
 export async function runChatGPTMcpCall(args: ReadonlyArray<string>): Promise<void> {
-  const [credentialPath, tool, argumentsJson] = args;
+  const [credentialPath, tool, encodedOrJson, encodedArguments] = args;
+  const argumentsJson =
+    encodedOrJson === "--arguments-base64" && encodedArguments !== undefined
+      ? Buffer.from(encodedArguments, "base64").toString("utf8")
+      : encodedOrJson;
   if (!credentialPath || !tool || argumentsJson === undefined) {
     process.stderr.write("chatgpt-mcp-call requires <session-file> <tool> <arguments-json>.\n");
     process.exitCode = 2;
