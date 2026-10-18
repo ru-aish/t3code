@@ -33,12 +33,17 @@ jobs:
             apps/server/src/chatgpt/adapter.test.ts \
             apps/server/src/chatgpt/protocol.test.ts \
             apps/server/src/chatgpt/driver.test.ts \
+            apps/server/src/chatgpt/threadSync.test.ts \
             apps/server/src/chatgpt/mcpBridge.test.ts \
             apps/server/src/chatgpt/mcpBridge.windows.test.ts \
             apps/server/src/chatgpt/subagents.integration.test.ts \
             apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts \
             packages/contracts/src/settings.test.ts \
-            apps/web/src/components/chat/ModelPickerContent.test.ts
+            apps/web/src/components/chat/ModelPickerContent.test.ts \
+            apps/web/src/components/chat/ChatGPTThreadControls.test.tsx \
+            apps/web/src/components/chat/ThreadDetailsPanel.test.tsx \
+            apps/server/src/auth/RpcAuthorization.test.ts \
+            packages/client-runtime/src/state/commandPermissions.test.ts
       - name: Typecheck server and web
         run: vp run --filter t3 --filter @t3tools/web typecheck
       - name: Package AppImage

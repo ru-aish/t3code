@@ -1,4 +1,7 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type {
+  OrchestrationV2HistoricalMessage,
+  OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -448,12 +451,14 @@ export interface ProviderAdapterV2ThreadSnapshot {
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
   readonly messages: ReadonlyArray<OrchestrationV2ConversationMessage>;
+  readonly turnItems?: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runtimeRequests: ReadonlyArray<OrchestrationV2RuntimeRequest>;
   readonly providerPayload?: unknown;
 }
 
 export interface ProviderAdapterV2ReadThreadSnapshotInput {
   readonly providerThread: OrchestrationV2ProviderThread;
+  readonly existingProjection?: OrchestrationV2ThreadProjection;
 }
 
 export type ProviderAdapterV2RollbackTarget =

@@ -21,6 +21,7 @@ import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+import { ChatGPTThreadControls } from "./ChatGPTThreadControls";
 
 const GitActionsControl = memo(BaseGitActionsControl);
 
@@ -101,6 +102,13 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
     >
       {(density) => (
         <>
+          {!props.draftId ? (
+            <ChatGPTThreadControls
+              key={`${props.environmentId}:${props.threadId}`}
+              environmentId={props.environmentId}
+              threadId={props.threadId}
+            />
+          ) : null}
           <ThreadDetailsSection
             headingId="thread-details-workspace-heading"
             title="Workspace"

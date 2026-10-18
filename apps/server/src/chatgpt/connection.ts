@@ -18,6 +18,7 @@ export type ChatGPTUpdate = {
   status?: string | undefined;
   endTurn?: boolean | undefined;
   hidden?: boolean | undefined;
+  createdAt?: number | undefined;
 };
 export type TerminalBinding = {
   thread_id: string;
@@ -59,6 +60,12 @@ type UploadedImage = {
   height: number;
 };
 export type CachedMessage = ChatGPTUpdate & { messageId: string; text: string };
+type ConversationSnapshot = {
+  updates: ChatGPTUpdate[];
+  idle: boolean;
+  complete: boolean;
+  latestRequestId?: string;
+};
 type Cache = {
   conversationId: string | null;
   projectId?: string | null;
@@ -198,6 +205,7 @@ export class ChatGPTConnection {
   private callback: ((update: ChatGPTUpdate) => void) | undefined;
   private deliveryBarrier = Promise.resolve();
   private closed = false;
+  private snapshotRead: Promise<ConversationSnapshot> | undefined;
   readonly cachePath: string;
   readonly options: {
     cdpEndpoint: string;
@@ -396,12 +404,56 @@ export class ChatGPTConnection {
   get messages() {
     return Object.values(this.cache.messages);
   }
-  async isConversationIdle(): Promise<boolean> {
-    if (!this.cache.conversationId) return false;
+  get submittedRequestIds() {
+    return Object.entries(this.cache.dispatches)
+      .filter(([, dispatch]) => dispatch.state === "submitted")
+      .map(([requestId]) => requestId);
+  }
+  get latestSubmittedRequestId() {
+    return this.submittedRequestIds.at(-1);
+  }
+  readConversation(): Promise<ConversationSnapshot> {
+    this.snapshotRead ??= this.fetchConversation().finally(() => {
+      this.snapshotRead = undefined;
+    });
+    return this.snapshotRead;
+  }
+  private async fetchConversation(): Promise<ConversationSnapshot> {
+    const conversationId = this.cache.conversationId;
+    if (!conversationId) throw new Error("This thread has no ChatGPT conversation yet");
+    const requests = Object.fromEntries(
+      this.submittedRequestIds.map((requestId) => [
+        this.cache.dispatches[requestId]!.messageId,
+        requestId,
+      ]),
+    );
     const cdp = await this.renderer();
-    return cdp.evaluate<boolean>(`(async()=>{${rendererDiscovery}
-      const r=await resolveClient();const raw=await r.client.get(${JSON.stringify(this.cache.conversationId)});const c=raw.conversation||raw.data||raw;return c.async_status===null;
+    return cdp.evaluate(`(async()=>{${rendererDiscovery}
+      const r=await resolveClient();const raw=await r.client.get(${JSON.stringify(conversationId)});const c=raw.conversation||raw.data||raw;
+      if(!c.mapping||!c.current_node)throw new Error('ChatGPT conversation history is unavailable');
+      const normalize=${normalizeStreamMessage.toString()};const requests=${JSON.stringify(requests)};
+      const nodes=[];const seen=new Set();let key=c.current_node;
+      while(key){
+        if(seen.has(key)||!c.mapping[key])throw new Error('ChatGPT conversation ancestry is invalid');
+        seen.add(key);const node=c.mapping[key];if(node.message)nodes.push(node.message);key=node.parent;
+      }
+      const head=normalize(nodes[0]);const updates=[];let requestId;
+      for(const raw of nodes.reverse()){
+        const message=normalize(raw);
+        if(message.role==='user'){requestId=requests[message.messageId];continue;}
+        if(requestId&&message.role==='assistant'&&!message.hidden&&(!message.recipient||message.recipient==='all'))updates.push({...message,kind:'update',requestId,conversationId:${JSON.stringify(conversationId)},createdAt:raw.create_time});
+      }
+      return {updates,idle:c.async_status===null,complete:head.role==='assistant'&&head.status==='finished_successfully'&&head.endTurn===true&&!head.hidden&&(!head.recipient||head.recipient==='all'),latestRequestId:requestId};
     })()`);
+  }
+  async readCompletion(requestId: string): Promise<ChatGPTUpdate[] | null> {
+    if (this.cache.dispatches[requestId]?.state !== "submitted") return null;
+    const snapshot = await this.readConversation();
+    if (!snapshot.idle || !snapshot.complete || snapshot.latestRequestId !== requestId) return null;
+    return [
+      ...snapshot.updates.filter((update) => update.requestId === requestId),
+      { kind: "complete", requestId, conversationId: this.cache.conversationId },
+    ];
   }
   onUpdate(callback: (update: ChatGPTUpdate) => void) {
     this.callback = callback;

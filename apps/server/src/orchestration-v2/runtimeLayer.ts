@@ -1,4 +1,5 @@
 import * as ChatGPTActions from "../chatgpt/actions.ts";
+import * as ChatGPTThreadSync from "../chatgpt/threadSync.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -146,6 +147,16 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
 
 const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
+);
+const layerChatGPTThreadSyncProvided = ChatGPTThreadSync.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      layerProviderEventIngestorProvided,
+      layerEventSinkProvided,
+    ),
+  ),
 );
 
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
@@ -352,6 +363,7 @@ export const layer = Layer.mergeAll(
   layerEffectWorkerProvided,
   layerProviderSessionManagerProvided,
   layerProviderAuthServiceProvided,
+  layerChatGPTThreadSyncProvided,
   layerProviderRuntimeRecoveryProvided,
   layerProjectionMaintenanceProvided,
   layerLegacyV1ThreadImporterProvided,

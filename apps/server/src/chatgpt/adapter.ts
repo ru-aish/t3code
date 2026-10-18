@@ -12,8 +12,10 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -125,13 +127,26 @@ const capabilities = {
 } satisfies OrchestrationV2ProviderCapabilities;
 
 type ActiveTurn = {
-  input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  input: Pick<
+    ProviderAdapter.ProviderAdapterV2TurnInput,
+    "runId" | "rootNodeId" | "runOrdinal" | "modelSelection"
+  >;
   turn: OrchestrationV2ProviderTurn;
   generation: number;
   requestId: string;
 };
 
-type Update = { kind: "chat"; update: ChatGPTUpdate } | { kind: "terminal"; event: TerminalEvent };
+type Update =
+  | { kind: "chat"; update: ChatGPTUpdate }
+  | { kind: "terminal"; event: TerminalEvent }
+  | {
+      kind: "refresh";
+      input: ProviderAdapter.ProviderAdapterV2ReadThreadSnapshotInput;
+      result: Deferred.Deferred<
+        ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
+        ProviderAdapter.ProviderAdapterProtocolError
+      >;
+    };
 
 export const makeChatGPTAdapter = (
   options: ProviderAdapterDriverCreateInput<ChatGPTSettings>,
@@ -156,6 +171,7 @@ export const makeChatGPTAdapter = (
     openSession: (input) =>
       Effect.gen(function* () {
         const now = yield* DateTime.now;
+        const sessionScope = yield* Effect.scope;
         const cwd = input.runtimePolicy.cwd;
         if (!cwd)
           return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -192,7 +208,12 @@ export const makeChatGPTAdapter = (
                 cause,
               }),
           });
-        const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => Queue.offer(events, event);
+        const snapshotItems = new Map<TurnItemId, OrchestrationV2TurnItem>();
+        const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => {
+          if (event.type === "turn_item.updated")
+            snapshotItems.set(event.turnItem.id, event.turnItem);
+          return Queue.offer(events, event);
+        };
         const session = {
           id: input.providerSessionId,
           driver: CHATGPT_DRIVER,
@@ -236,6 +257,8 @@ export const makeChatGPTAdapter = (
         let generation = 0;
         let nextOrdinal = 0;
         const itemOrdinals = new Map<string, number>();
+        const itemIds = new Map<string, TurnItemId>();
+        const restoredItems = new Map<string, OrchestrationV2TurnItem>();
         const nativeMessageIds = new Map<string, string>();
         connection.onUpdate((update) => {
           Queue.offerUnsafe(incoming, { kind: "chat", update });
@@ -248,7 +271,7 @@ export const makeChatGPTAdapter = (
         const settleReasoning = Effect.fnUntraced(function* (turn: ActiveTurn) {
           const timestamp = yield* DateTime.now;
           for (const key of reasoningKeys) {
-            if (!key.startsWith(`${turn.generation}:`)) continue;
+            if (!key.startsWith(`${turn.turn.id}:${turn.requestId}:`)) continue;
             const item = messages.get(key);
             if (!item?.streaming) continue;
             messages.set(key, { ...item, streaming: false, updatedAt: timestamp });
@@ -256,7 +279,7 @@ export const makeChatGPTAdapter = (
               type: "turn_item.updated",
               driver: CHATGPT_DRIVER,
               turnItem: {
-                id: TurnItemId.make(`chatgpt:${input.threadId}:${key}`),
+                id: itemIds.get(key)!,
                 threadId: input.threadId,
                 runId: turn.input.runId,
                 nodeId: turn.input.rootNodeId,
@@ -285,7 +308,7 @@ export const makeChatGPTAdapter = (
           active = null;
           yield* settleReasoning(completed);
           const timestamp = yield* DateTime.now;
-          const finalKey = String(completed.generation) + ":final";
+          const finalKey = `${completed.turn.id}:${completed.requestId}:final`;
           const finalMessage = messages.get(finalKey);
           if (finalMessage?.streaming) {
             const message = { ...finalMessage, streaming: false, updatedAt: timestamp };
@@ -295,7 +318,7 @@ export const makeChatGPTAdapter = (
               type: "turn_item.updated",
               driver: CHATGPT_DRIVER,
               turnItem: {
-                id: TurnItemId.make("chatgpt:" + input.threadId + ":" + finalKey),
+                id: itemIds.get(finalKey)!,
                 threadId: input.threadId,
                 runId: completed.input.runId,
                 nodeId: completed.input.rootNodeId,
@@ -336,25 +359,31 @@ export const makeChatGPTAdapter = (
         const recoverMissingCompletion = Effect.fnUntraced(function* (requestId: string) {
           if (completionRecoveryRequestId === requestId) return;
           completionRecoveryRequestId = requestId;
-          for (let probe = 0; probe < 20; probe++) {
-            if (
-              !active ||
-              active.requestId !== requestId ||
-              streamComplete ||
-              binding.state !== "done"
-            )
-              break;
-            const idle = yield* attempt(() => connection.isConversationIdle()).pipe(
-              Effect.catch(() => Effect.succeed(false)),
-            );
-            if (idle) {
-              streamComplete = true;
-              yield* finish("completed");
-              break;
+          yield* Effect.gen(function* () {
+            let delay = 250;
+            while (active?.requestId === requestId && !streamComplete && binding.state === "done") {
+              const updates = yield* attempt(() => connection.readCompletion(requestId)).pipe(
+                Effect.catch(() => Effect.succeed(null)),
+              );
+              if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
+                break;
+              if (updates) {
+                // Keep recovered text ahead of completion on the same serialized
+                // update path as live output, including after a renderer restart.
+                for (const update of updates)
+                  yield* Queue.offer(incoming, { kind: "chat", update });
+                break;
+              }
+              yield* Effect.sleep(delay);
+              delay = Math.min(delay * 2, 30_000);
             }
-            yield* Effect.sleep("250 millis");
-          }
-          if (completionRecoveryRequestId === requestId) completionRecoveryRequestId = null;
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (completionRecoveryRequestId === requestId) completionRecoveryRequestId = null;
+              }),
+            ),
+          );
         });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
           if (
@@ -421,13 +450,28 @@ export const makeChatGPTAdapter = (
           const timestamp = yield* DateTime.now;
           // GenUI can replace an in-progress final message's native ID with a
           // canonical full-answer ID. Keep one final answer per submission.
-          const key = `${outputTurn.generation}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
+          const key = `${outputTurn.turn.id}:${outputTurn.requestId}:${(!update.channel || update.channel === "final") && (!update.recipient || update.recipient === "all") ? "final" : update.messageId}`;
           if (isFinalAnswer) yield* settleReasoning(outputTurn);
-          const id = MessageId.make(`chatgpt:${input.threadId}:${key}`);
           const existing = messages.get(key);
+          const streaming = update.status !== "finished_successfully";
+          if (existing && !existing.streaming && streaming && existing.text.startsWith(update.text))
+            return;
+          const restored = restoredItems.get(`${outputTurn.turn.id}:${update.messageId}`);
+          const id =
+            existing?.id ??
+            (restored?.type === "assistant_message"
+              ? restored.messageId
+              : MessageId.make(`chatgpt:${input.threadId}:${key}`));
           let text = update.text;
           if (isFinalAnswer) {
             const fragments = finalFragments.get(key) ?? new Map<string, string>();
+            const previous = fragments.get(update.messageId);
+            if (
+              previous &&
+              previous.length > update.text.length &&
+              previous.startsWith(update.text)
+            )
+              return;
             fragments.set(update.messageId, update.text);
             finalFragments.set(key, fragments);
             text = [...fragments.values()].reduce<string>(
@@ -435,7 +479,6 @@ export const makeChatGPTAdapter = (
               "",
             );
           }
-          const streaming = update.status !== "finished_successfully";
           if (existing?.text === text && existing.streaming === streaming) return;
           const message: OrchestrationV2ConversationMessage = {
             id,
@@ -448,16 +491,24 @@ export const makeChatGPTAdapter = (
             streaming,
             createdBy: "agent",
             creationSource: "provider",
-            createdAt: existing?.createdAt ?? timestamp,
+            createdAt:
+              existing?.createdAt ??
+              restored?.startedAt ??
+              (typeof update.createdAt === "number" && Number.isFinite(update.createdAt)
+                ? DateTime.makeUnsafe(update.createdAt * 1000)
+                : timestamp),
             updatedAt: timestamp,
           };
           messages.set(key, message);
           nativeMessageIds.set(key, update.messageId);
-          const ordinal = itemOrdinals.get(key) ?? ++nextOrdinal;
+          const ordinal = itemOrdinals.get(key) ?? restored?.ordinal ?? ++nextOrdinal;
           itemOrdinals.set(key, ordinal);
+          const itemId =
+            itemIds.get(key) ?? restored?.id ?? TurnItemId.make(`chatgpt:${input.threadId}:${key}`);
+          itemIds.set(key, itemId);
 
           const base = {
-            id: TurnItemId.make(`chatgpt:${input.threadId}:${key}`),
+            id: itemId,
             threadId: input.threadId,
             runId: outputTurn.input.runId,
             nodeId: outputTurn.input.rootNodeId,
@@ -494,6 +545,89 @@ export const makeChatGPTAdapter = (
             });
           }
         });
+        const synchronize = Effect.fnUntraced(function* (
+          request: ProviderAdapter.ProviderAdapterV2ReadThreadSnapshotInput,
+        ) {
+          const projection = request.existingProjection!;
+          thread = request.providerThread;
+          const snapshot = yield* attempt(() => connection.readConversation());
+          binding = yield* attempt(() =>
+            connection.control<TerminalBinding>("register", {
+              cwd,
+              model: input.modelSelection.model,
+            }),
+          );
+          for (const item of projection.turnItems) {
+            nextOrdinal = Math.max(nextOrdinal, item.ordinal);
+            if (item.nativeItemRef && item.providerTurnId)
+              restoredItems.set(`${item.providerTurnId}:${item.nativeItemRef.nativeId}`, item);
+          }
+          let previous: ActiveTurn | undefined;
+          for (const requestId of connection.submittedRequestIds) {
+            const known = outputTurns.get(requestId);
+            if (known) {
+              previous = known;
+              continue;
+            }
+            const run = projection.runs.find(
+              (run) => run.userMessageId === requestId && run.providerThreadId === thread!.id,
+            );
+            const turn = run
+              ? projection.providerTurns.find((turn) => turn.runAttemptId === run.activeAttemptId)
+              : previous?.turn;
+            if (run?.rootNodeId && turn)
+              previous = {
+                input: {
+                  runId: run.id,
+                  rootNodeId: run.rootNodeId,
+                  runOrdinal: run.ordinal,
+                  modelSelection: run.modelSelection,
+                },
+                turn,
+                generation: ++generation,
+                requestId,
+              };
+            else if (!run && previous)
+              previous = { ...previous, generation: ++generation, requestId };
+            else previous = undefined;
+            if (previous) outputTurns.set(requestId, previous);
+          }
+          if (!active && snapshot.latestRequestId) {
+            const candidate = outputTurns.get(snapshot.latestRequestId);
+            if (
+              candidate?.turn.status === "running" &&
+              projection.runs.some(
+                (run) => run.id === candidate.input.runId && run.status === "running",
+              )
+            ) {
+              active = candidate;
+              streamComplete = false;
+              usedTerminalTools = true;
+            }
+          }
+          for (const update of snapshot.updates) yield* acceptUpdate(update);
+          if (
+            snapshot.idle &&
+            snapshot.complete &&
+            binding.state === "done" &&
+            active !== null &&
+            active.requestId === snapshot.latestRequestId
+          )
+            yield* acceptUpdate({
+              kind: "complete",
+              requestId: active.requestId,
+              conversationId: binding.conversation_id,
+            });
+          return {
+            providerThread: thread,
+            providerTurns: [],
+            messages: [...messages]
+              .filter(([key]) => !reasoningKeys.has(key))
+              .map(([, message]) => message),
+            turnItems: [...snapshotItems.values()],
+            runtimeRequests: [],
+          } satisfies ProviderAdapter.ProviderAdapterV2ThreadSnapshot;
+        });
         const controlEvents = Effect.tryPromise({
           try: async () => {
             for await (const event of connection.terminalEvents(abort.signal))
@@ -516,6 +650,13 @@ export const makeChatGPTAdapter = (
             Effect.gen(function* () {
               if (event.kind === "chat") {
                 yield* acceptUpdate(event.update);
+                return;
+              }
+              if (event.kind === "refresh") {
+                yield* synchronize(event.input).pipe(
+                  Effect.flatMap((snapshot) => Deferred.succeed(event.result, snapshot)),
+                  Effect.catch((cause) => Deferred.fail(event.result, cause)),
+                );
                 return;
               }
               const control = event.event;
@@ -649,11 +790,25 @@ export const makeChatGPTAdapter = (
             ),
           );
           thread = request.providerThread;
-          binding = yield* attempt(() =>
-            connection.control<TerminalBinding>("activate", {
-              requestId: request.message.messageId,
-            }),
-          );
+          const recoveringCompletedTask =
+            binding.state === "done" &&
+            request.message.createdBy === "agent" &&
+            request.message.creationSource === "server" &&
+            request.message.messageId.startsWith("message:restart-continuation:");
+          const recoveryRequestId = recoveringCompletedTask
+            ? connection.latestSubmittedRequestId
+            : undefined;
+          if (recoveringCompletedTask && !recoveryRequestId)
+            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CHATGPT_DRIVER,
+              detail: "Cannot reconcile the completed ChatGPT task's submission identity",
+            });
+          if (!recoveringCompletedTask)
+            binding = yield* attempt(() =>
+              connection.control<TerminalBinding>("activate", {
+                requestId: request.message.messageId,
+              }),
+            );
           const timestamp = yield* DateTime.now;
           const turn: OrchestrationV2ProviderTurn = {
             id: ProviderTurnId.make(`chatgpt:${request.attemptId}`),
@@ -670,9 +825,9 @@ export const makeChatGPTAdapter = (
             input: request,
             turn,
             generation: ++generation,
-            requestId: request.message.messageId,
+            requestId: recoveryRequestId ?? request.message.messageId,
           };
-          outputTurns.set(request.message.messageId, active);
+          outputTurns.set(active.requestId, active);
           streamComplete = false;
           usedTerminalTools = false;
           yield* emit({
@@ -681,6 +836,10 @@ export const makeChatGPTAdapter = (
             threadId: input.threadId,
             providerTurn: turn,
           });
+          if (recoveryRequestId) {
+            yield* recoverMissingCompletion(recoveryRequestId).pipe(Effect.forkIn(sessionScope));
+            return;
+          }
           yield* attempt(() =>
             connection.send(
               request.message.messageId,
@@ -740,12 +899,23 @@ export const makeChatGPTAdapter = (
               yield* finish("interrupted");
             }),
           respondToRuntimeRequest: unsupported,
-          readThreadSnapshot: ({ providerThread }) =>
-            Effect.succeed({
-              providerThread,
-              providerTurns: [],
-              messages: [...messages.values()],
-              runtimeRequests: [],
+          readThreadSnapshot: (request) =>
+            Effect.gen(function* () {
+              if (!request.existingProjection)
+                return {
+                  providerThread: request.providerThread,
+                  providerTurns: [],
+                  messages: [...messages]
+                    .filter(([key]) => !reasoningKeys.has(key))
+                    .map(([, message]) => message),
+                  runtimeRequests: [],
+                };
+              const result = yield* Deferred.make<
+                ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
+                ProviderAdapter.ProviderAdapterProtocolError
+              >();
+              yield* Queue.offer(incoming, { kind: "refresh", input: request, result });
+              return yield* Deferred.await(result);
             }),
           rollbackThread: unsupported,
           forkThread: unsupported,
