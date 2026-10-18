@@ -1,16 +1,46 @@
-import { Effect, Logger, References, Layer } from "effect";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as SharedObservability from "@t3tools/shared/observability";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as References from "effect/References";
+import * as OtlpExporter from "effect/observability/OtlpExporter";
+import * as OtlpLogger from "effect/observability/OtlpLogger";
 
-import { ServerConfig } from "./config";
+import * as ServerConfig from "./config.ts";
 
-export const ServerLoggerLive = Effect.gen(function* () {
-  const config = yield* ServerConfig;
-  const { serverLogPath } = config;
+export const layer = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const hostName = yield* HostProcess.Hostname;
+  const layerMinimumLogLevel = Layer.succeed(References.MinimumLogLevel, config.logLevel);
 
-  const fileLogger = Logger.formatSimple.pipe(Logger.toFile(serverLogPath));
-  const minimumLogLevelLayer = Layer.succeed(References.MinimumLogLevel, config.logLevel);
-  const loggerLayer = Logger.layer([Logger.consolePretty(), fileLogger], {
-    mergeWithExisting: false,
-  });
+  const logs = config.otlpLogsExport;
+  const otlpLogger =
+    config.otlpLogsUrl === undefined
+      ? undefined
+      : OtlpLogger.make({
+          url: config.otlpLogsUrl,
+          exportInterval: `${logs.exportIntervalMs} millis`,
+          headers: logs.headers,
+          resource: ServerConfig.otlpResource(config, hostName),
+        });
 
-  return Layer.mergeAll(loggerLayer, minimumLogLevelLayer);
+  // `Logger.layer` writes the whole logger set rather than adding to it, so
+  // every logger the server wants has to be named in this one call.
+  // `Logger.tracerLogger` reaches a collector by attaching each message to the
+  // active span as a span event, which covers only messages logged inside a
+  // recorded span and files them under traces. The OTLP logger carries the same
+  // messages as log records stamped with their trace and span ids, so it is a
+  // superset: keeping both would export every in-span message twice.
+  const layerLogger = Logger.layer(
+    otlpLogger === undefined
+      ? [Logger.consolePretty(), Logger.tracerLogger]
+      : [Logger.consolePretty(), otlpLogger],
+    { mergeWithExisting: false },
+  ).pipe(
+    Layer.provide(OtlpExporter.layerFlusher),
+    Layer.provide(SharedObservability.layerOtlpSerialization(logs.protocol)),
+  );
+
+  return Layer.mergeAll(layerLogger, layerMinimumLogLevel);
 }).pipe(Layer.unwrap);

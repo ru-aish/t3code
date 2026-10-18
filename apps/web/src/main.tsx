@@ -1,24 +1,78 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { RouterProvider } from "@tanstack/react-router";
 import { createHashHistory, createBrowserHistory } from "@tanstack/react-router";
 
-import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 
+import { prepareProviderAuthDelivery } from "./providerAuthDelivery";
 import { isElectron } from "./env";
+import { hasCloudPublicConfig } from "./cloud/publicConfig";
 import { getRouter } from "./router";
-import { APP_DISPLAY_NAME } from "./branding";
+import {
+  syncDocumentElectronPlatformClasses,
+  syncDocumentWindowControlsOverlayClass,
+} from "./lib/windowControlsOverlay";
+import { AppRoot } from "./AppRoot";
+import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+
+prepareProviderAuthDelivery();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
 
 const router = getRouter(history);
 
-document.title = APP_DISPLAY_NAME;
+if (isElectron) {
+  syncDocumentElectronPlatformClasses(navigator.platform);
+  syncDocumentWindowControlsOverlayClass();
+}
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <RouterProvider router={router} />
-  </React.StrictMode>,
-);
+const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
+
+// A failed split-chunk fetch usually means the hashed assets went stale under
+// a deploy; one guarded reload picks up the fresh index.html.
+let chunkLoadFailed = false;
+let reloadScheduled = false;
+window.addEventListener("vite:preloadError", (event) => {
+  chunkLoadFailed = true;
+  if (reloadOnceForChunkLoadError()) {
+    reloadScheduled = true;
+    event.preventDefault();
+  }
+});
+
+const app = <AppRoot router={router} />;
+
+// Loading only the selected runtime as a split chunk keeps every Clerk byte out
+// of the startup graph for local-mode users, and keeps the bundled clerk-js out
+// of the browser build entirely.
+const managedAuthShellModule =
+  clerkPublishableKey && hasCloudPublicConfig()
+    ? isElectron
+      ? import("./components/clerk/ElectronManagedAuthShell")
+      : import("./components/clerk/BrowserManagedAuthShell")
+    : null;
+
+export const startup = Promise.all([
+  managedAuthShellModule?.then((module) => module.default) ?? null,
+  router.load(),
+])
+  .then(([ManagedAuthShell]) => {
+    // A route chunk failure still resolves router.load(): the error is parked in
+    // the lazy component and surfaces through the route error boundary.
+    if (reloadScheduled) return;
+    if (!chunkLoadFailed) clearChunkReloadGuard();
+    ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+      <React.StrictMode>
+        {ManagedAuthShell && clerkPublishableKey ? (
+          <ManagedAuthShell publishableKey={clerkPublishableKey}>{app}</ManagedAuthShell>
+        ) : (
+          app
+        )}
+      </React.StrictMode>,
+    );
+  })
+  .catch((error: unknown) => {
+    if (reloadScheduled) return;
+    throw error;
+  });

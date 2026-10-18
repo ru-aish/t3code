@@ -1,0 +1,70 @@
+name: ChatGPT Mobile Production Smoke Replay
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: GitHub Actions run ID containing t3-chatgpt-mobile-production-apk
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download freshly built production APK
+        uses: actions/download-artifact@v4
+        with:
+          name: t3-chatgpt-mobile-production-apk
+          path: artifact
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Enable KVM hardware acceleration
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Replay install and launch with crash capture
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            mkdir -p smoke-replay
+            test -s artifact/T3-Code-ChatGPT-Mobile-production.apk
+            adb wait-for-device
+            adb install -r artifact/T3-Code-ChatGPT-Mobile-production.apk | tee smoke-replay/install.txt
+            adb shell pm path com.t3tools.t3code | tee smoke-replay/package-path.txt
+            adb logcat -c
+            adb shell am force-stop com.t3tools.t3code
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-replay/start.txt
+            sleep 8
+            adb shell dumpsys activity activities > smoke-replay/activities.txt
+            adb shell dumpsys window windows > smoke-replay/windows.txt
+            adb shell dumpsys package com.t3tools.t3code > smoke-replay/package.txt
+            adb shell dumpsys dropbox --print data_app_crash > smoke-replay/dropbox-data-app-crash.txt || true
+            adb logcat -d -v threadtime > smoke-replay/logcat.txt
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml smoke-replay/window.xml || true
+            adb exec-out screencap -p > smoke-replay/screenshot.png
+            adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-replay/process.txt
+            test -s smoke-replay/process.txt
+            grep -m1 'mResumedActivity.*com.t3tools.t3code' smoke-replay/activities.txt | tee smoke-replay/resumed-activity.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke-replay/logcat.txt
+      - name: Upload replay evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-production-smoke-replay
+          path: smoke-replay/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

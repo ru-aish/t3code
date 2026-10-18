@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 
 import {
@@ -7,22 +7,26 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateReleaseHistoryUrl,
+  getDesktopUpdateReleaseUrl,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
   shouldShowArm64IntelBuildWarning,
-  shouldShowDesktopUpdateButton,
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 
 const baseState: DesktopUpdateState = {
   enabled: true,
   status: "idle",
+  channel: "latest",
   currentVersion: "1.0.0",
   hostArch: "x64",
   appArch: "x64",
   runningUnderArm64Translation: false,
   availableVersion: null,
   downloadedVersion: null,
+  releaseNotes: [],
+  omittedReleaseCount: 0,
   downloadPercent: null,
   checkedAt: null,
   message: null,
@@ -37,7 +41,6 @@ describe("desktop update button state", () => {
       status: "available",
       availableVersion: "1.1.0",
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
   });
 
@@ -50,9 +53,28 @@ describe("desktop update button state", () => {
       errorContext: "download",
       canRetry: true,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
     expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
+  });
+
+  it("says when the same version did not apply before", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "downloaded",
+      availableVersion: "1.1.0",
+      downloadedVersion: "1.1.0",
+      notAppliedVersion: "1.1.0",
+    };
+    expect(getDesktopUpdateButtonTooltip(state)).toBe(
+      "Update 1.1.0 did not apply. Click to retry.",
+    );
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...state,
+        availableVersion: "1.2.0",
+        downloadedVersion: "1.2.0",
+      }),
+    ).toContain("1.2.0 downloaded");
   });
 
   it("keeps install action available after an install error", () => {
@@ -65,22 +87,46 @@ describe("desktop update button state", () => {
       errorContext: "install",
       canRetry: true,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
     expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
   });
 
-  it("prefers install when a downloaded version already exists", () => {
+  it("keeps install action available after a background updater error", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "error",
+      downloadedVersion: "1.1.0",
+      availableVersion: "1.1.0",
+      message: "background updater error",
+      errorContext: null,
+      canRetry: true,
+    };
+    expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
+    expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to restart and install");
+  });
+
+  it("prefers a newly available release over a stale downloaded version", () => {
     const state: DesktopUpdateState = {
       ...baseState,
       status: "available",
-      availableVersion: "1.1.0",
+      availableVersion: "1.2.0",
       downloadedVersion: "1.1.0",
     };
-    expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
+    expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
   });
 
-  it("hides the button for non-actionable check errors", () => {
+  it("hides the install action while checking for a newer release", () => {
+    const state: DesktopUpdateState = {
+      ...baseState,
+      status: "checking",
+      availableVersion: "1.1.0",
+      downloadedVersion: "1.1.0",
+      downloadPercent: 100,
+    };
+    expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
+  });
+
+  it("has no action for non-actionable check errors", () => {
     const state: DesktopUpdateState = {
       ...baseState,
       status: "error",
@@ -88,7 +134,6 @@ describe("desktop update button state", () => {
       errorContext: "check",
       canRetry: true,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(false);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
   });
 
@@ -99,7 +144,6 @@ describe("desktop update button state", () => {
       availableVersion: "1.1.0",
       downloadPercent: 42.5,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(isDesktopUpdateButtonDisabled(state)).toBe(true);
     expect(getDesktopUpdateButtonTooltip(state)).toContain("42%");
   });
@@ -156,6 +200,29 @@ describe("getDesktopUpdateActionError", () => {
 });
 
 describe("desktop update UI helpers", () => {
+  it("builds the stable release URL for a downloaded version", () => {
+    expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
+      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
+    );
+  });
+
+  it("builds the nightly release URL without dropping its version suffix", () => {
+    expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
+      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30-nightly.20260728.931",
+    );
+  });
+
+  it("omits the release URL when the updater does not report a version", () => {
+    expect(getDesktopUpdateReleaseUrl(null)).toBeNull();
+    expect(getDesktopUpdateReleaseUrl("  ")).toBeNull();
+  });
+
+  it("builds the release history URL", () => {
+    expect(getDesktopUpdateReleaseHistoryUrl()).toBe(
+      "https://github.com/pingdotgg/t3code/releases",
+    );
+  });
+
   it("toasts only for actionable updater errors", () => {
     expect(
       shouldToastDesktopUpdateActionResult({
@@ -223,6 +290,17 @@ describe("desktop update UI helpers", () => {
       }),
     ).toContain("Install update and restart T3 Code?");
   });
+
+  it("keeps the same install confirmation copy across desktop platforms", () => {
+    expect(
+      getDesktopUpdateInstallConfirmationMessage({
+        availableVersion: "1.1.0",
+        downloadedVersion: "1.1.0",
+      }),
+    ).toBe(
+      "Install update 1.1.0 and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+    );
+  });
 });
 
 describe("canCheckForUpdate", () => {
@@ -244,7 +322,7 @@ describe("canCheckForUpdate", () => {
     );
   });
 
-  it("returns false once an update has been downloaded", () => {
+  it("returns true once an update has been downloaded so newer releases can be found", () => {
     expect(
       canCheckForUpdate({
         ...baseState,
@@ -252,7 +330,7 @@ describe("canCheckForUpdate", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.0",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("returns true when idle", () => {

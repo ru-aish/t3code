@@ -1,5 +1,23 @@
-import { assert, describe, it } from "vitest";
-import { buildVisibleToastLayout, shouldHideCollapsedToastContent } from "./toast.logic";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { assert, describe, it } from "vite-plus/test";
+import {
+  buildVisibleToastLayout,
+  hasVisibleToastAction,
+  shouldHideCollapsedToastContent,
+  shouldRenderThreadScopedToast,
+} from "./toast.logic";
+
+describe("hasVisibleToastAction", () => {
+  it("treats a labeled action as visible", () => {
+    assert.equal(hasVisibleToastAction({ children: "Update" }), true);
+  });
+
+  it("hides an explicit empty action used to clear a previous CTA", () => {
+    assert.equal(hasVisibleToastAction({ children: null }), false);
+    assert.equal(hasVisibleToastAction({ children: "" }), false);
+    assert.equal(hasVisibleToastAction(undefined), false);
+  });
+});
 
 describe("shouldHideCollapsedToastContent", () => {
   it("keeps a single visible toast readable", () => {
@@ -40,6 +58,54 @@ describe("buildVisibleToastLayout", () => {
     );
   });
 
+  it("reflows live toasts forward when the front toast is dismissed", () => {
+    const visibleToasts = [
+      { id: "a", height: 48, transitionStatus: "ending" as const },
+      { id: "b", height: 72 },
+      { id: "c", height: 24 },
+    ];
+
+    const layout = buildVisibleToastLayout(visibleToasts);
+
+    assert.equal(layout.frontmostHeight, 72);
+    assert.deepEqual(
+      layout.items.map(({ toast, visibleIndex, offsetY }) => ({
+        id: toast.id,
+        visibleIndex,
+        offsetY,
+      })),
+      [
+        { id: "a", visibleIndex: 0, offsetY: 0 },
+        { id: "b", visibleIndex: 0, offsetY: 0 },
+        { id: "c", visibleIndex: 1, offsetY: 72 },
+      ],
+    );
+  });
+
+  it("keeps a non-front ending toast at its current slot so it exits straight", () => {
+    const visibleToasts = [
+      { id: "a", height: 48 },
+      { id: "b", height: 72, transitionStatus: "ending" as const },
+      { id: "c", height: 24 },
+    ];
+
+    const layout = buildVisibleToastLayout(visibleToasts);
+
+    assert.equal(layout.frontmostHeight, 48);
+    assert.deepEqual(
+      layout.items.map(({ toast, visibleIndex, offsetY }) => ({
+        id: toast.id,
+        visibleIndex,
+        offsetY,
+      })),
+      [
+        { id: "a", visibleIndex: 0, offsetY: 0 },
+        { id: "b", visibleIndex: 1, offsetY: 48 },
+        { id: "c", visibleIndex: 1, offsetY: 48 },
+      ],
+    );
+  });
+
   it("treats missing heights as zero", () => {
     const layout = buildVisibleToastLayout([
       { id: "a" },
@@ -58,6 +124,52 @@ describe("buildVisibleToastLayout", () => {
         { id: "b", offsetY: 0 },
         { id: "c", offsetY: 0 },
       ],
+    );
+  });
+});
+
+describe("shouldRenderThreadScopedToast", () => {
+  const activeThreadRef = {
+    environmentId: "environment-a",
+    threadId: "thread-1",
+  } as ScopedThreadRef;
+
+  it("renders a toast scoped to the active thread ref", () => {
+    assert.equal(
+      shouldRenderThreadScopedToast(
+        {
+          threadRef: activeThreadRef,
+        },
+        activeThreadRef,
+      ),
+      true,
+    );
+  });
+
+  it("hides a scoped toast when the environment differs", () => {
+    assert.equal(
+      shouldRenderThreadScopedToast(
+        {
+          threadRef: {
+            environmentId: "environment-b",
+            threadId: "thread-1",
+          } as ScopedThreadRef,
+        },
+        activeThreadRef,
+      ),
+      false,
+    );
+  });
+
+  it("keeps legacy thread-id scoped toasts working", () => {
+    assert.equal(
+      shouldRenderThreadScopedToast(
+        {
+          threadId: "thread-1" as never,
+        },
+        activeThreadRef,
+      ),
+      true,
     );
   });
 });

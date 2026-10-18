@@ -1,22 +1,409 @@
-import Mime from "@effect/platform-node/Mime";
-import { Effect, FileSystem, Option, Path } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
-
+import * as Mime from "effect/http/Mime";
 import {
-  ATTACHMENTS_ROUTE_PREFIX,
-  normalizeAttachmentRelativePath,
-  resolveAttachmentRelativePath,
-} from "./attachmentPaths";
-import { resolveAttachmentPathById } from "./attachmentStore";
-import { ServerConfig } from "./config";
-import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver";
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  EnvironmentHttpApi,
+} from "@t3tools/contracts";
+import { isDevProxiedPath } from "@t3tools/shared/devProxy";
+import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
+import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+import * as Data from "effect/Data";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import { cast } from "effect/Function";
+import {
+  HttpClient,
+  HttpClientResponse,
+  HttpMiddleware,
+  HttpRouter,
+  HttpServerResponse,
+  HttpServerRequest,
+  HttpServerRespondable,
+} from "effect/http";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
-const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
-const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#6b728080" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-fallback="project-favicon"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>`;
+import * as ServerConfig from "./config.ts";
+import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
+import { githubMediaResponse } from "./assets/GitHubMediaFetch.ts";
+import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
+import {
+  ATTACHMENT_UPLOAD_ROUTE_PREFIX,
+  storeAttachmentUpload,
+  validateAttachmentUploadToken,
+} from "./assets/AttachmentUpload.ts";
+import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
+import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
+import {
+  annotateEnvironmentRequest,
+  failEnvironmentScopeRequired,
+  failEnvironmentAuthInvalid,
+  failEnvironmentInternal,
+} from "./auth/http.ts";
+import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
+import {
+  browserApiCorsAllowedHeaders,
+  browserApiCorsAllowedMethods,
+  DESKTOP_RENDERER_ORIGINS,
+} from "./httpCors.ts";
 
-export const attachmentsRouteLayer = HttpRouter.add(
+const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
+const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+// The sandbox gives the document an opaque origin: scripts run, but same-origin
+// cookies, storage, and API calls are out of reach. No modals: agent HTML can
+// open without a click (inline renders, and mobile loads it as the top document),
+// and must not raise blocking dialogs.
+const HTML_CONTENT_SECURITY_POLICY =
+  "sandbox allow-scripts allow-forms allow-popups allow-downloads";
+
+// Types a browser may render as a document if a proxy strips the disposition
+// header. Downloads of these fall back to octet-stream.
+const DOWNLOAD_MIME_TYPE_PATTERN = /^[\w!#$&^.+-]+\/[\w!#$&^.+-]+$/;
+const isSafeDownloadMimeType = (mimeType: string): boolean =>
+  DOWNLOAD_MIME_TYPE_PATTERN.test(mimeType) &&
+  !/(?:^text\/html$|\/xml(?:$|-)|\+xml$)/i.test(mimeType.trim().toLowerCase());
+const isSafeInlineMediaMimeType = (mimeType: string): boolean =>
+  DOWNLOAD_MIME_TYPE_PATTERN.test(mimeType) && /^(?:audio|video)\//i.test(mimeType);
+const isSafeInlineDocumentMimeType = (mimeType: string): boolean =>
+  mimeType.toLowerCase() === "application/pdf" || mimeType.toLowerCase() === "text/html";
+
+export function downloadContentDisposition(fileName?: string): string {
+  if (fileName === undefined) {
+    return "attachment";
+  }
+  // toWellFormed: encodeURIComponent throws URIError on unpaired surrogates.
+  const sanitized = fileName.toWellFormed().replace(/[\p{Cc}"\\]/gu, "_");
+  const asciiFallback = sanitized.replace(/[^\u0020-\u007e]/g, "_");
+  const needsExtended = asciiFallback !== sanitized;
+  const extendedName = encodeURIComponent(sanitized).replace(
+    /['()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${asciiFallback}"${
+    needsExtended ? `; filename*=UTF-8''${extendedName}` : ""
+  }`;
+}
+
+export function assetResponseHeaders(
+  filePath: string,
+  options?: {
+    readonly download?: boolean;
+    readonly fileName?: string;
+    readonly mimeType?: string;
+  },
+): Record<string, string> {
+  const lowerPath = filePath.toLowerCase();
+  const inlineMimeType = options?.mimeType?.split(";", 1)[0]?.trim();
+  return {
+    "Cache-Control": "private, max-age=3600",
+    "X-Content-Type-Options": "nosniff",
+    ...(options?.download
+      ? {
+          "Content-Disposition": downloadContentDisposition(options.fileName),
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "Content-Type":
+            options.mimeType !== undefined && isSafeDownloadMimeType(options.mimeType)
+              ? options.mimeType
+              : "application/octet-stream",
+        }
+      : inlineMimeType !== undefined && isSafeInlineMediaMimeType(inlineMimeType)
+        ? { "Content-Type": inlineMimeType }
+        : inlineMimeType !== undefined && isSafeInlineDocumentMimeType(inlineMimeType)
+          ? {
+              "Content-Type":
+                inlineMimeType.toLowerCase() === "text/html"
+                  ? "text/html; charset=utf-8"
+                  : "application/pdf",
+              ...(inlineMimeType.toLowerCase() === "text/html"
+                ? { "Content-Security-Policy": HTML_CONTENT_SECURITY_POLICY }
+                : {}),
+            }
+          : lowerPath.endsWith(".html") || lowerPath.endsWith(".htm")
+            ? {
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Security-Policy": HTML_CONTENT_SECURITY_POLICY,
+              }
+            : {}),
+    ...(!options?.download && lowerPath.endsWith(".svg")
+      ? { "Content-Security-Policy": SVG_CONTENT_SECURITY_POLICY }
+      : {}),
+  };
+}
+
+function assetByteRange(header: string, size: bigint) {
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
+  if (!match || (!match[1] && !match[2])) return null;
+  const first = match[1] ? BigInt(match[1]) : null;
+  const last = match[2] ? BigInt(match[2]) : null;
+  if (first !== null && last !== null && last < first) return null;
+  if (size === 0n || (first !== null && first >= size) || (first === null && last === 0n)) {
+    return { _tag: "Unsatisfiable" as const };
+  }
+  const start = first ?? (last! >= size ? 0n : size - last!);
+  const end = first === null || last === null || last >= size ? size - 1n : last;
+  if (!Number.isSafeInteger(Number(start)) || !Number.isSafeInteger(Number(end))) {
+    return { _tag: "Unsatisfiable" as const };
+  }
+  return {
+    _tag: "Range" as const,
+    offset: start,
+    bytesToRead: end - start + 1n,
+    contentRange: `bytes ${start}-${end}/${size}`,
+  };
+}
+
+export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
+  asset: {
+    readonly path: string;
+    readonly download?: boolean;
+    readonly fileName?: string;
+    readonly mimeType?: string;
+    readonly file?: OpenMediaFile;
+    readonly renderIntent?: "mcp-app";
+  },
+  rangeHeader?: string,
+  ifRangeHeader?: string,
+  method: "GET" | "HEAD" = "GET",
+) {
+  const headers = assetResponseHeaders(asset.path, asset);
+  if (
+    asset.renderIntent === "mcp-app" &&
+    !asset.download &&
+    headers["Content-Type"] === "text/html; charset=utf-8"
+  ) {
+    const bytes = yield* readMcpAppHtml(asset.path);
+    if (bytes === null) {
+      return HttpServerResponse.text("MCP app is too large to preview.", { status: 413 });
+    }
+    const body = new TextEncoder().encode(
+      injectMcpAppCookieBootstrap(injectMcpAppThemeBootstrap(new TextDecoder().decode(bytes))),
+    );
+    headers["Content-Length"] = String(body.byteLength);
+    return method === "HEAD"
+      ? HttpServerResponse.empty({ status: 200, headers })
+      : HttpServerResponse.uint8Array(body, { headers });
+  }
+  const mediaFile = asset.file;
+  const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
+  const isMedia = /^(?:audio|video)\//i.test(headers["Content-Type"] ?? "");
+  if (isMedia) {
+    // Do not invite conditional range requests with validators that cannot establish
+    // byte-for-byte identity. Attachment media carries no `file`, and must not
+    // outlive the signed URL that granted it either.
+    headers["Cache-Control"] = "private, no-store";
+  }
+  let status = 200;
+  let offset = 0n;
+  let bytesToRead: bigint | undefined;
+  if (isMedia) {
+    headers["Accept-Ranges"] = "bytes";
+    // If-Range requires a matching validator. A full response is safe when we cannot validate it.
+    if (method === "GET" && rangeHeader && ifRangeHeader === undefined) {
+      const fs = yield* FileSystem.FileSystem;
+      const info = mediaInfo ?? (yield* fs.stat(asset.path));
+      const range = assetByteRange(rangeHeader, info.size);
+      if (range?._tag === "Unsatisfiable") {
+        return HttpServerResponse.empty({
+          status: 416,
+          headers: { ...headers, "Content-Range": `bytes */${info.size}` },
+        });
+      }
+      if (range?._tag === "Range") {
+        status = 206;
+        offset = range.offset;
+        bytesToRead = range.bytesToRead;
+        headers["Content-Range"] = range.contentRange;
+      }
+    }
+  }
+  if (mediaFile && mediaInfo) {
+    const size = bytesToRead ?? mediaInfo.size;
+    headers["Content-Type"] ??= Option.getOrElse(
+      Mime.getType(asset.path),
+      () => "application/octet-stream",
+    );
+    headers["Content-Length"] = String(size);
+    if (!isMedia) {
+      headers["Last-Modified"] = mediaInfo.mtime.toUTCString();
+      headers.ETag = `W/"${mediaInfo.size.toString(16)}-${mediaInfo.mtimeMs.toString(16)}"`;
+    }
+    if (method === "HEAD" || size === 0n) {
+      return HttpServerResponse.empty({ status, headers });
+    }
+    const body = streamMediaFile(mediaFile, offset, size);
+    if (!body) {
+      return HttpServerResponse.text("File is too large to preview.", { status: 413 });
+    }
+    return HttpServerResponse.stream(body, {
+      status,
+      headers,
+    });
+  }
+  return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
+});
+
+export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compression(), {
+  global: true,
+});
+
+export const layerBrowserApiCors = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const devOrigin = config.devUrl?.origin;
+    // Dev uses credentialed requests from Vite or the Electron custom origin, so both must be
+    // explicit. Packaged desktop omits credentials and uses Effect's default wildcard origin.
+    return HttpRouter.cors({
+      ...(devOrigin
+        ? {
+            allowedOrigins: [devOrigin, ...DESKTOP_RENDERER_ORIGINS, ...config.devAllowedOrigins],
+            credentials: true,
+          }
+        : {}),
+      allowedMethods: browserApiCorsAllowedMethods,
+      allowedHeaders: browserApiCorsAllowedHeaders,
+      maxAge: 600,
+    });
+  }),
+);
+
+export function isLoopbackHostname(hostname: string): boolean {
+  const normalizedHostname = hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/, "$1");
+  return LOOPBACK_HOSTNAMES.has(normalizedHostname);
+}
+
+export function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
+  const redirectUrl = new URL(devUrl.toString());
+  redirectUrl.pathname = requestUrl.pathname;
+  redirectUrl.search = requestUrl.search;
+  redirectUrl.hash = requestUrl.hash;
+  return redirectUrl.toString();
+}
+
+const authenticateRawRouteWithScope = (
+  scope: typeof AuthOrchestrationReadScope | typeof AuthOrchestrationOperateScope,
+) =>
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
+      Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+        failEnvironmentAuthInvalid(
+          EnvironmentAuth.serverAuthCredentialReason(error),
+          EnvironmentAuth.serverAuthDpopFailureReason(error),
+        ),
+      ),
+      Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+        failEnvironmentInternal("internal_error", error),
+      ),
+    );
+    if (!session.scopes.includes(scope)) {
+      return yield* failEnvironmentScopeRequired(scope);
+    }
+  });
+
+export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "metadata",
+  Effect.fnUntraced(function* (handlers) {
+    const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+    return handlers.handle(
+      "descriptor",
+      Effect.fn("environment.metadata.descriptor")(function* (args) {
+        yield* annotateEnvironmentRequest(args.endpoint.name);
+        return yield* serverEnvironment.getDescriptor;
+      }, traceRelayRequest),
+    );
+  }),
+);
+
+class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{
+  readonly cause: unknown;
+}> {}
+
+// Renderers export up to once a second while they have spans buffered, so
+// tracing this proxy would add more server spans than it forwards.
+export const layerOtlpTracesProxyRoute = HttpRouter.add(
+  "POST",
+  OTLP_TRACES_PROXY_PATH,
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const config = yield* ServerConfig.ServerConfig;
+    const otlpTracesUrl = config.otlpTracesUrl;
+    const otlpHeaders = config.otlpTracesExport.headers;
+    const browserTraceCollector = yield* BrowserTraceCollector.BrowserTraceCollector;
+    const httpClient = yield* HttpClient.HttpClient;
+    const serialization = yield* OtlpSerialization.OtlpSerialization;
+    const bodyJson = cast<unknown, OtlpTracer.TraceData>(yield* request.json);
+
+    yield* Effect.try({
+      try: () => decodeOtlpTraceRecords(bodyJson),
+      catch: (cause) => new DecodeOtlpTraceRecordsError({ cause }),
+    }).pipe(
+      Effect.flatMap((records) => browserTraceCollector.record(records)),
+      Effect.catch((cause) => Effect.logWarning("Failed to decode browser OTLP traces", { cause })),
+    );
+
+    if (otlpTracesUrl === undefined) {
+      return HttpServerResponse.empty({ status: 204 });
+    }
+
+    return yield* httpClient
+      .post(otlpTracesUrl, {
+        body: serialization.traces(bodyJson),
+        headers: otlpHeaders,
+      })
+      .pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.as(HttpServerResponse.empty({ status: 204 })),
+        Effect.tapError((cause) =>
+          Effect.logWarning("Failed to export browser OTLP traces", {
+            cause,
+            otlpTracesUrl,
+          }),
+        ),
+        Effect.orElseSucceed(() =>
+          HttpServerResponse.text("Trace export failed.", { status: 502 }),
+        ),
+      );
+  }).pipe(
+    Effect.catchTags({
+      EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+      EnvironmentInternalError: HttpServerRespondable.toResponse,
+      EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+    }),
+    Effect.withTracerEnabled(false),
+  ),
+);
+
+const UNTRACED_REQUEST_PATHS: ReadonlySet<string> = new Set([OTLP_TRACES_PROXY_PATH]);
+
+// TracerDisabledWhen is one predicate for the whole server, and
+// HttpRouter.serve builds its routes privately, so it is provided to the served
+// layer, never merged into the routes.
+const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((request) => {
+  const queryIndex = request.url.indexOf("?");
+  const path = queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
+  // Webhook URLs carry their secret token in the path, so they never reach a trace.
+  return UNTRACED_REQUEST_PATHS.has(path) || path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`);
+});
+
+export const withUntracedRequests = Layer.provide(layerUntracedRequests);
+
+export const layerAssetRoute = HttpRouter.add(
   "GET",
-  `${ATTACHMENTS_ROUTE_PREFIX}/*`,
+  `${ASSET_ROUTE_PREFIX}/*`,
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
@@ -24,54 +411,52 @@ export const attachmentsRouteLayer = HttpRouter.add(
       return HttpServerResponse.text("Bad Request", { status: 400 });
     }
 
-    const config = yield* ServerConfig;
-    const rawRelativePath = url.value.pathname.slice(ATTACHMENTS_ROUTE_PREFIX.length);
-    const normalizedRelativePath = normalizeAttachmentRelativePath(rawRelativePath);
-    if (!normalizedRelativePath) {
-      return HttpServerResponse.text("Invalid attachment path", { status: 400 });
-    }
-
-    const isIdLookup =
-      !normalizedRelativePath.includes("/") && !normalizedRelativePath.includes(".");
-    const filePath = isIdLookup
-      ? resolveAttachmentPathById({
-          attachmentsDir: config.attachmentsDir,
-          attachmentId: normalizedRelativePath,
-        })
-      : resolveAttachmentRelativePath({
-          attachmentsDir: config.attachmentsDir,
-          relativePath: normalizedRelativePath,
-        });
-    if (!filePath) {
-      return HttpServerResponse.text(isIdLookup ? "Not Found" : "Invalid attachment path", {
-        status: isIdLookup ? 404 : 400,
-      });
-    }
-
-    const fileSystem = yield* FileSystem.FileSystem;
-    const fileInfo = yield* fileSystem
-      .stat(filePath)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (!fileInfo || fileInfo.type !== "File") {
+    const suffix = url.value.pathname.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+    const separatorIndex = suffix.indexOf("/");
+    if (separatorIndex <= 0) {
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
 
-    return yield* HttpServerResponse.file(filePath, {
-      status: 200,
-      headers: {
-        "Cache-Control": "public, max-age=31536000, immutable",
-      },
-    }).pipe(
-      Effect.catch(() =>
-        Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
-      ),
+    const asset = yield* resolveAsset(
+      suffix.slice(0, separatorIndex),
+      suffix.slice(separatorIndex + 1),
+    );
+    if (!asset) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    if (asset.kind === "bytes") {
+      return HttpServerResponse.uint8Array(asset.bytes, {
+        contentType: asset.mimeType,
+        headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
+      });
+    }
+    if (asset.kind === "github-media") {
+      return yield* githubMediaResponse(asset, request.headers).pipe(
+        Effect.tapError((cause) =>
+          Effect.logWarning("Failed to fetch GitHub media.", { url: asset.url, cause }),
+        ),
+        Effect.orElseSucceed(() =>
+          HttpServerResponse.empty({
+            status: 502,
+            headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+          }),
+        ),
+      );
+    }
+    return yield* assetFileResponse(
+      asset,
+      request.method === "GET" ? request.headers.range : undefined,
+      request.headers["if-range"],
+      request.method === "HEAD" ? "HEAD" : "GET",
+    ).pipe(
+      Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
   }),
 );
 
-export const projectFaviconRouteLayer = HttpRouter.add(
-  "GET",
-  "/api/project-favicon",
+export const layerAttachmentUploadRoute = HttpRouter.add(
+  "POST",
+  `${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/*`,
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
@@ -79,60 +464,122 @@ export const projectFaviconRouteLayer = HttpRouter.add(
       return HttpServerResponse.text("Bad Request", { status: 400 });
     }
 
-    const projectCwd = url.value.searchParams.get("cwd");
-    if (!projectCwd) {
-      return HttpServerResponse.text("Missing cwd parameter", { status: 400 });
+    const token = url.value.pathname.slice(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`.length);
+    if (!token) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    const claims = yield* validateAttachmentUploadToken(token);
+    if (!claims) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
     }
 
-    const faviconResolver = yield* ProjectFaviconResolver;
-    const faviconFilePath = yield* faviconResolver.resolvePath(projectCwd);
-    if (!faviconFilePath) {
-      return HttpServerResponse.text(FALLBACK_PROJECT_FAVICON_SVG, {
-        status: 200,
-        contentType: "image/svg+xml",
-        headers: {
-          "Cache-Control": PROJECT_FAVICON_CACHE_CONTROL,
-        },
+    const contentLengthHeader = request.headers["content-length"];
+    if (
+      contentLengthHeader !== undefined &&
+      (!Number.isInteger(Number(contentLengthHeader)) ||
+        Number(contentLengthHeader) !== claims.sizeBytes)
+    ) {
+      return HttpServerResponse.text("Content-Length must match the upload size.", {
+        status: 400,
       });
     }
 
-    return yield* HttpServerResponse.file(faviconFilePath, {
-      status: 200,
-      headers: {
-        "Cache-Control": PROJECT_FAVICON_CACHE_CONTROL,
-      },
-    }).pipe(
-      Effect.catch(() =>
-        Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
-      ),
-    );
+    // Keep the request stream in the route scope until the response is sent.
+    const bodyPull = yield* Stream.toPull(request.stream);
+    const stored = yield* storeAttachmentUpload(claims, Stream.fromPull(Effect.succeed(bodyPull)));
+    return stored.ok
+      ? HttpServerResponse.empty({ status: 204 })
+      : HttpServerResponse.text(stored.detail, { status: stored.status });
   }),
 );
 
-export const staticAndDevRouteLayer = HttpRouter.add(
-  "GET",
-  "*",
-  Effect.gen(function* () {
+const decodeBuildManifest = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        file: Schema.String,
+        css: Schema.optional(Schema.Array(Schema.String)),
+        assets: Schema.optional(Schema.Array(Schema.String)),
+      }),
+    ),
+  ),
+);
+
+const loadImmutableBuildAssets = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const staticDir =
+    config.staticDir ?? (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
+  if (!staticDir) return new Set<string>();
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  return yield* fileSystem.readFileString(path.join(staticDir, ".vite", "manifest.json")).pipe(
+    Effect.flatMap(decodeBuildManifest),
+    Effect.map(
+      (manifest) =>
+        new Set(
+          Object.values(manifest).flatMap((entry) => [
+            entry.file,
+            ...(entry.css ?? []),
+            ...(entry.assets ?? []),
+          ]),
+        ),
+    ),
+    Effect.orElseSucceed(() => new Set<string>()),
+  );
+});
+
+const openStaticFile = Effect.fn("openStaticFile")(function* (filePath: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const pathInfo = yield* fileSystem.stat(filePath).pipe(Effect.orElseSucceed(() => null));
+  if (pathInfo?.type !== "File") return null;
+  const file = yield* fileSystem.open(filePath, { flag: "r" });
+  const info = yield* file.stat;
+  return info.type === "File" ? { file, info } : null;
+});
+
+const streamStaticFile = (file: FileSystem.File, size: bigint) =>
+  Stream.unfold(
+    0n,
+    Effect.fnUntraced(function* (offset: bigint) {
+      if (offset >= size) return;
+      const remaining = size - offset;
+      const bytes = yield* file.readAlloc(Number(remaining < 65_536n ? remaining : 65_536n));
+      if (Option.isNone(bytes)) return;
+      return [bytes.value, offset + BigInt(bytes.value.byteLength)] as const;
+    }),
+  );
+
+const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
+  function* (immutableBuildAssets: ReadonlySet<string>) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
+
     if (Option.isNone(url)) {
       return HttpServerResponse.text("Bad Request", { status: 400 });
     }
 
-    const config = yield* ServerConfig;
-    if (config.devUrl) {
-      return HttpServerResponse.redirect(config.devUrl.href, { status: 302 });
+    const config = yield* ServerConfig.ServerConfig;
+    if (config.devUrl && isDevProxiedPath(url.value.pathname)) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
     }
 
-    if (!config.staticDir) {
+    if (config.devUrl && isLoopbackHostname(url.value.hostname)) {
+      return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
+        status: 302,
+      });
+    }
+
+    const staticDir =
+      config.staticDir ?? (config.devUrl ? yield* ServerConfig.resolveStaticDir() : undefined);
+    if (!staticDir) {
       return HttpServerResponse.text("No static directory configured and no dev URL set.", {
         status: 503,
       });
     }
 
-    const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const staticRoot = path.resolve(config.staticDir);
+    const staticRoot = path.resolve(staticDir);
     const staticRequestPath = url.value.pathname === "/" ? "/index.html" : url.value.pathname;
     const rawStaticRelativePath = staticRequestPath.replace(/^[/\\]+/, "");
     const hasRawLeadingParentSegment = rawStaticRelativePath.startsWith("..");
@@ -164,34 +611,75 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       }
     }
 
-    const fileInfo = yield* fileSystem
-      .stat(filePath)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (!fileInfo || fileInfo.type !== "File") {
-      const indexPath = path.resolve(staticRoot, "index.html");
-      const indexData = yield* fileSystem
-        .readFile(indexPath)
-        .pipe(Effect.catch(() => Effect.succeed(null)));
-      if (!indexData) {
+    let opened = yield* openStaticFile(filePath);
+    if (!opened) {
+      filePath = path.resolve(staticRoot, "index.html");
+      opened = yield* openStaticFile(filePath);
+      if (!opened) {
         return HttpServerResponse.text("Not Found", { status: 404 });
       }
-      return HttpServerResponse.uint8Array(indexData, {
-        status: 200,
-        contentType: "text/html; charset=utf-8",
+    }
+    const fileInfo = opened.info;
+    const mimeType = Option.getOrElse(Mime.getType(filePath), () => "application/octet-stream");
+    const isHtml = mimeType === "text/html";
+
+    // A hash-like name is not enough: custom static files can use the same naming pattern.
+    const relativePath = path.relative(staticRoot, filePath).replaceAll("\\", "/");
+    const immutable =
+      !isHtml &&
+      /^assets\/.+-[\w-]{8}\.[^/]+$/.test(relativePath) &&
+      immutableBuildAssets.has(relativePath);
+    const headers: Record<string, string> = {
+      "Cache-Control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    };
+    // Deployments can preserve HTML size and mtime while changing its bundle URLs.
+    const modifiedAt = isHtml ? undefined : Option.getOrUndefined(fileInfo.mtime);
+    const etag = modifiedAt
+      ? `W/"${fileInfo.size.toString(16)}-${modifiedAt.getTime().toString(16)}"`
+      : undefined;
+    if (etag !== undefined && modifiedAt !== undefined) {
+      headers.ETag = etag;
+      headers["Last-Modified"] = modifiedAt.toUTCString();
+    }
+
+    // If-None-Match takes precedence over dates and uses weak comparison for
+    // GET/HEAD, including when compression changes the transferred bytes.
+    const ifNoneMatch = request.headers["if-none-match"];
+    const ifModifiedSince = request.headers["if-modified-since"];
+    const unchanged =
+      ifNoneMatch !== undefined
+        ? ifNoneMatch.split(",").some((value) => {
+            const candidate = value.trim();
+            return (
+              candidate === "*" ||
+              (etag !== undefined && candidate.replace(/^W\//i, "") === etag.slice(2))
+            );
+          })
+        : ifModifiedSince !== undefined &&
+          modifiedAt !== undefined &&
+          Date.parse(modifiedAt.toUTCString()) <= Date.parse(ifModifiedSince);
+    if (!isHtml && unchanged) {
+      return HttpServerResponse.empty({
+        status: 304,
+        headers: { ...headers, Vary: "Accept-Encoding" },
       });
     }
 
-    const contentType = Mime.getType(filePath) ?? "application/octet-stream";
-    const data = yield* fileSystem
-      .readFile(filePath)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (!data) {
-      return HttpServerResponse.text("Internal Server Error", { status: 500 });
-    }
-
-    return HttpServerResponse.uint8Array(data, {
-      status: 200,
+    const contentType = isHtml ? "text/html; charset=utf-8" : mimeType;
+    return HttpServerResponse.stream(streamStaticFile(opened.file, fileInfo.size), {
+      headers,
       contentType,
+      contentLength: Number(fileInfo.size),
     });
+  },
+  Effect.catchTags({
+    PlatformError: () =>
+      Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
   }),
+);
+
+export const layerStaticAndDevRoute = Layer.unwrap(
+  loadImmutableBuildAssets.pipe(
+    Effect.map((assets) => HttpRouter.add("GET", "*", handleStaticAndDevRequest(assets))),
+  ),
 );

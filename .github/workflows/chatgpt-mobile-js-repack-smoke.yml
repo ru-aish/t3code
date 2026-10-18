@@ -1,0 +1,134 @@
+name: ChatGPT Mobile JS Repack Smoke
+on:
+  push:
+    branches: [build/chatgpt-production-apk-5a773cce3]
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+concurrency:
+  group: chatgpt-mobile-js-repack-smoke
+  cancel-in-progress: true
+jobs:
+  repack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[full-apk]')
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - name: Guard JS-only/native-compatible delta
+        run: |
+          set -eu
+          base=64c91dfca80b5a4f41ea2292e38e2b1fc624ea49
+          git diff --name-only "$base"...HEAD | tee js-repack-changes.txt
+          bad="$(grep -Ev '^(\.github/workflows/|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|package\.json$|apps/mobile/src/|apps/mobile/package\.json$)' js-repack-changes.txt || true)"
+          if [ -n "$bad" ]; then
+            echo "JS repack is unsafe because native-relevant files changed:"
+            echo "$bad"
+            exit 1
+          fi
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+      - name: Install Android build tools
+        run: sdkmanager --install 'build-tools;36.0.0'
+      - name: Download native-compatible base APK
+        uses: actions/download-artifact@v4
+        with:
+          name: t3-chatgpt-mobile-production-apk
+          path: base
+          run-id: 39033226092
+          github-token: ${{ github.token }}
+      - name: Create CI signing key
+        run: |
+          keytool -genkeypair -noprompt             -keystore smoke.keystore             -storepass android             -keypass android             -alias smoke             -dname 'CN=T3 JS Repack Smoke'             -keyalg RSA             -keysize 2048             -validity 3650
+      - name: Repack production APK without native compilation
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+          EXPO_NO_GIT_STATUS: '1'
+        run: |
+          set -eu
+          npx --yes @expo/repack-app             --platform android             --source-app "$GITHUB_WORKSPACE/base/T3-Code-ChatGPT-Mobile-production.apk"             --output "$GITHUB_WORKSPACE/T3-Code-ChatGPT-Mobile-js-repack.apk"             --js-bundle-only             --embed-bundle-assets             --ks "$GITHUB_WORKSPACE/smoke.keystore"             --ks-pass pass:android             --ks-key-alias smoke             --ks-key-pass pass:android             --android-build-tools-dir "$ANDROID_HOME/build-tools/36.0.0"             "$GITHUB_WORKSPACE/apps/mobile"
+      - name: Verify repacked APK
+        run: |
+          set -eu
+          test -s T3-Code-ChatGPT-Mobile-js-repack.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose T3-Code-ChatGPT-Mobile-js-repack.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging T3-Code-ChatGPT-Mobile-js-repack.apk | tee apk-badging.txt
+          grep -F "package: name='com.t3tools.t3code'" apk-badging.txt
+          sha256sum T3-Code-ChatGPT-Mobile-js-repack.apk > SHA256SUMS.txt
+          git rev-parse HEAD > source-commit.txt
+      - name: Enable KVM
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+      - name: Smoke-test repacked APK
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -eu
+            mkdir -p smoke-js-repack
+            adb install T3-Code-ChatGPT-Mobile-js-repack.apk | tee smoke-js-repack/install.txt
+            adb shell pm path com.t3tools.t3code | tee smoke-js-repack/package-path.txt
+            adb logcat -c
+            adb shell am force-stop com.t3tools.t3code
+            adb shell am start -W -n com.t3tools.t3code/.MainActivity | tee smoke-js-repack/start.txt
+            sleep 8
+            adb shell dumpsys activity activities > smoke-js-repack/activities.txt
+            adb shell dumpsys window windows > smoke-js-repack/windows.txt
+            adb shell dumpsys package com.t3tools.t3code > smoke-js-repack/package.txt
+            adb shell dumpsys dropbox --print data_app_crash > smoke-js-repack/dropbox-data-app-crash.txt || true
+            adb logcat -d -v threadtime > smoke-js-repack/logcat.txt
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml smoke-js-repack/window.xml || true
+            adb exec-out screencap -p > smoke-js-repack/screenshot.png
+            adb shell pidof com.t3tools.t3code | tr -d '\r' | tee smoke-js-repack/process.txt
+            test -s smoke-js-repack/process.txt
+            grep -m1 -E '(topResumedActivity|ResumedActivity|mResumedActivity).*com.t3tools.t3code' smoke-js-repack/activities.txt > smoke-js-repack/resumed-activity.txt
+            cat smoke-js-repack/resumed-activity.txt
+            ! grep -E 'FATAL EXCEPTION|Unable to load script|Could not connect to development server|UnsatisfiedLinkError|constructor cannot be null|TypeError: undefined is not a function' smoke-js-repack/logcat.txt
+      - name: Upload JS-repack evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-js-repack-smoke
+          path: |
+            smoke-js-repack/
+            js-repack-changes.txt
+            apk-badging.txt
+            SHA256SUMS.txt
+            source-commit.txt
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+      - name: Upload JS-repacked APK
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: t3-chatgpt-mobile-js-repack-apk
+          path: |
+            T3-Code-ChatGPT-Mobile-js-repack.apk
+            SHA256SUMS.txt
+            apk-badging.txt
+            source-commit.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

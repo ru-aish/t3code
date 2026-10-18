@@ -1,122 +1,125 @@
+import { imageMimeType } from "@t3tools/shared/image";
 import type {
-  ModelSelection,
-  OrchestrationLatestTurn,
-  OrchestrationProposedPlanId,
-  OrchestrationSessionStatus,
-  OrchestrationThreadActivity,
-  ProjectScript as ContractProjectScript,
-  ThreadId,
-  ProjectId,
-  TurnId,
+  ChatFileAttachment as ContractChatFileAttachment,
+  ChatImageAttachment as ContractChatImageAttachment,
+  ChatUnknownAttachment as ContractChatUnknownAttachment,
   MessageId,
-  ProviderKind,
-  CheckpointRef,
+  OrchestrationV2Actor,
+  OrchestrationV2CreationSource,
+  OrchestrationV2PlanArtifact,
+  OrchestrationV2UserMessageInputIntent,
+  PlanId,
+  ProjectScript as ContractProjectScript,
   ProviderInteractionMode,
+  RunId,
   RuntimeMode,
+  ScheduledTaskId,
+  ThreadId,
 } from "@t3tools/contracts";
+import type {
+  EnvironmentProject,
+  EnvironmentThreadShell,
+  ThreadRunSummary,
+  ThreadRuntimeSummary,
+} from "@t3tools/client-runtime/state/shell";
+import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { videoMimeType } from "@t3tools/shared/video";
+
+export { videoMimeType } from "@t3tools/shared/video";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 
 export const DEFAULT_INTERACTION_MODE: ProviderInteractionMode = "default";
 export const DEFAULT_THREAD_TERMINAL_HEIGHT = 280;
-export const DEFAULT_THREAD_TERMINAL_ID = "default";
+export const DEFAULT_THREAD_TERMINAL_ID = "term-1";
 export const MAX_TERMINALS_PER_GROUP = 4;
 export type ProjectScript = ContractProjectScript;
 
 export interface ThreadTerminalGroup {
   id: string;
   terminalIds: string[];
+  splitDirection?: "horizontal" | "vertical";
 }
 
-export interface ChatImageAttachment {
-  type: "image";
-  id: string;
-  name: string;
-  mimeType: string;
-  sizeBytes: number;
-  previewUrl?: string;
+export interface ChatImageAttachment extends ContractChatImageAttachment {
+  readonly previewUrl?: string;
 }
 
-export type ChatAttachment = ChatImageAttachment;
+export interface ChatFileAttachment extends ContractChatFileAttachment {
+  readonly previewUrl?: string;
+  readonly downloadable?: boolean;
+  readonly htmlRender?: boolean;
+}
+
+// Attachment types this build does not know pass through with the contract
+// shape. The UI renders them as inert rows so a newer server cannot crash an
+// older client.
+export type ChatUnknownAttachment = ContractChatUnknownAttachment;
+
+export type ChatAttachment = ChatImageAttachment | ChatFileAttachment | ChatUnknownAttachment;
+
+// The union has an open member (`type: string`), so a literal comparison does
+// not narrow. Use these guards wherever type-specific fields are read.
+export function isImageAttachment(attachment: ChatAttachment): attachment is ChatImageAttachment {
+  // Messages sent before pictures were typed by content carry `file`; they are still
+  // pictures, and reading them as such is what lets them render instead of listing. Only
+  // `file` is reclassified: an attachment type this client does not know yet is not a
+  // picture by default, whatever its name says.
+  if (attachment.type === "image") return true;
+  return attachment.type === "file" && imageMimeType(attachment) !== null;
+}
+
+export function isFileAttachment(attachment: ChatAttachment): attachment is ChatFileAttachment {
+  // Disjoint from `isImageAttachment` on purpose: a legacy `file` carrying an image reads as a
+  // picture, and callers filter both sets independently, so overlap renders it twice.
+  return attachment.type === "file" && !isImageAttachment(attachment);
+}
+
+export function isVideoAttachment(attachment: ChatFileAttachment): boolean {
+  return videoMimeType(attachment) !== null;
+}
+
+export function isBrowserPreviewAttachment(attachment: ChatFileAttachment): boolean {
+  const mimeType = attachment.mimeType.split(";", 1)[0]?.trim().toLowerCase();
+  return (
+    /\.(?:html?|pdf)$/i.test(attachment.name) ||
+    mimeType === "application/pdf" ||
+    mimeType === "text/html"
+  );
+}
 
 export interface ChatMessage {
-  id: MessageId;
-  role: "user" | "assistant" | "system";
-  text: string;
-  attachments?: ChatAttachment[];
-  turnId?: TurnId | null;
-  createdAt: string;
-  completedAt?: string | undefined;
-  streaming: boolean;
+  readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
+  readonly id: MessageId;
+  readonly role: "user" | "assistant" | "system";
+  readonly text: string;
+  readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  readonly runId: RunId | null;
+  readonly streaming: boolean;
+  readonly createdBy?: OrchestrationV2Actor;
+  readonly creationSource?: OrchestrationV2CreationSource;
+  readonly scheduledTaskId?: ScheduledTaskId;
+  readonly senderThreadId?: ThreadId;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
 }
 
 export interface ProposedPlan {
-  id: OrchestrationProposedPlanId;
-  turnId: TurnId | null;
-  planMarkdown: string;
-  implementedAt: string | null;
-  implementationThreadId: ThreadId | null;
-  createdAt: string;
-  updatedAt: string;
+  readonly id: PlanId;
+  readonly runId: RunId | null;
+  readonly planMarkdown: string;
+  readonly status: OrchestrationV2PlanArtifact["status"];
+  readonly createdAt: string;
+  readonly updatedAt: string;
 }
+export type TurnDiffFileChange = ThreadCheckpointSummary["files"][number];
+export type TurnDiffSummary = ThreadCheckpointSummary;
 
-export interface TurnDiffFileChange {
-  path: string;
-  kind?: string | undefined;
-  additions?: number | undefined;
-  deletions?: number | undefined;
-}
+export type Project = EnvironmentProject;
+export type Thread = EnvironmentThreadShell;
+export type ThreadShell = EnvironmentThreadShell;
 
-export interface TurnDiffSummary {
-  turnId: TurnId;
-  completedAt: string;
-  status?: string | undefined;
-  files: TurnDiffFileChange[];
-  checkpointRef?: CheckpointRef | undefined;
-  assistantMessageId?: MessageId | undefined;
-  checkpointTurnCount?: number | undefined;
-}
-
-export interface Project {
-  id: ProjectId;
-  name: string;
-  cwd: string;
-  defaultModelSelection: ModelSelection | null;
-  createdAt?: string | undefined;
-  updatedAt?: string | undefined;
-  scripts: ProjectScript[];
-}
-
-export interface Thread {
-  id: ThreadId;
-  codexThreadId: string | null;
-  projectId: ProjectId;
-  title: string;
-  modelSelection: ModelSelection;
-  runtimeMode: RuntimeMode;
-  interactionMode: ProviderInteractionMode;
-  session: ThreadSession | null;
-  messages: ChatMessage[];
-  proposedPlans: ProposedPlan[];
-  error: string | null;
-  createdAt: string;
-  archivedAt: string | null;
-  updatedAt?: string | undefined;
-  latestTurn: OrchestrationLatestTurn | null;
-  pendingSourceProposedPlan?: OrchestrationLatestTurn["sourceProposedPlan"];
-  branch: string | null;
-  worktreePath: string | null;
-  turnDiffSummaries: TurnDiffSummary[];
-  activities: OrchestrationThreadActivity[];
-}
-
-export interface ThreadSession {
-  provider: ProviderKind;
-  status: SessionPhase | "error" | "closed";
-  activeTurnId?: TurnId | undefined;
-  createdAt: string;
-  updatedAt: string;
-  lastError?: string;
-  orchestrationStatus: OrchestrationSessionStatus;
-}
+export type SidebarThreadSummary = EnvironmentThreadShell;
+export type ThreadSession = ThreadRuntimeSummary;
