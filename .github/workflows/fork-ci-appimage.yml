@@ -1,6 +1,9 @@
 name: Fork CI and AppImage
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feat/chatgpt-t3-subagents-v2
 permissions:
   contents: read
 jobs:
