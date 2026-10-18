@@ -1,4 +1,4 @@
-name: ChatGPT Terminal preview
+name: ChatGPT web and server preview
 on:
   push:
     branches: [feat/chatgpt-terminal-provider]
@@ -23,16 +23,31 @@ jobs:
         with:
           node-version-file: package.json
           run-install: false
-      - run: vp install --frozen-lockfile --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+      - run: vp install --frozen-lockfile --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
       - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
-      - run: vp test run apps/server/src/chatgpt/connection.test.ts apps/server/src/chatgpt/adapter.test.ts apps/server/src/chatgpt/protocol.test.ts apps/server/src/chatgpt/driver.test.ts apps/web/src/components/chat/ModelPickerContent.test.ts
+      - name: Test ChatGPT thread reconciliation
+        run: >-
+          vp test run
+          apps/server/src/chatgpt/connection.test.ts
+          apps/server/src/chatgpt/adapter.test.ts
+          apps/server/src/chatgpt/protocol.test.ts
+          apps/server/src/chatgpt/driver.test.ts
+          apps/web/src/components/chat/ModelPickerContent.test.ts
+          apps/web/src/components/chat/ChatGPTThreadControls.test.tsx
+          apps/web/src/components/chat/ThreadDetailsPanel.test.tsx
+          apps/server/src/auth/RpcAuthorization.test.ts
+          packages/client-runtime/src/state/commandPermissions.test.ts
       - run: vp run --filter t3 --filter @t3tools/web typecheck
-      - run: vp run build:desktop
+      - name: Build production web and server bundles
+        run: |
+          vp run --filter @t3tools/web build
+          vp run --filter t3 build:bundle
+          mkdir -p apps/server/dist/client
+          cp -a apps/web/dist/. apps/server/dist/client/
+          printf 'commit=%s\nworkflow_run=%s\nrepository=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > apps/server/dist/BUILD_INFO.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: t3-chatgpt-nightly-bundle
-          path: |
-            apps/server/dist
-            apps/desktop/dist-electron
+          name: t3-chatgpt-thread-refresh-web
+          path: apps/server/dist
           if-no-files-found: error
           retention-days: 7
