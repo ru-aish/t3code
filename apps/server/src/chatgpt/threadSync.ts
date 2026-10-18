@@ -81,7 +81,17 @@ export const layer = Layer.effect(
           }
           for (const item of snapshot.turnItems ?? []) {
             const previous = knownItems.get(item.id);
-            if (previous && JSON.stringify(previous) === JSON.stringify(item)) continue;
+            if (
+              previous &&
+              (previous.type === "reasoning" || previous.type === "assistant_message") &&
+              (item.type === "reasoning" || item.type === "assistant_message") &&
+              previous.type === item.type &&
+              previous.text === item.text &&
+              previous.streaming === item.streaming &&
+              previous.status === item.status &&
+              previous.nativeItemRef?.nativeId === item.nativeItemRef?.nativeId
+            )
+              continue;
             changes.push({ type: "turn_item.updated", driver: runtime.driver, turnItem: item });
           }
           const events: OrchestrationV2DomainEvent[] = [];

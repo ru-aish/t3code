@@ -112,7 +112,11 @@ it.effect(
         yield* Effect.gen(function* () {
           const sync = yield* ThreadSync.ChatGPTThreadSync;
           const run = yield* sync.refresh(ThreadId.make("thread")).pipe(
-            Effect.tap(() => Effect.sync(() => { succeeded = true; })),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                succeeded = true;
+              }),
+            ),
             Effect.forkChild,
           );
           yield* Deferred.await(entered);
