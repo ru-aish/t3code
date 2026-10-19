@@ -69,7 +69,8 @@ export const layer: Layer.Layer<
         yield* projections.getCheckpointCaptureContext(input.threadId, input);
       // A stopped run is already terminal. Its checkpoint is the rollback point
       // for the message after it, so capture leaves its status alone.
-      const stopped = run?.status === "interrupted" || run?.status === "cancelled";
+      const stopped =
+        run?.status === "forced" || run?.status === "interrupted" || run?.status === "cancelled";
 
       // The effect is at-least-once. A settled run with a checkpoint proves
       // that an earlier execution committed its result.

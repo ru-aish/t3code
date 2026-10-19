@@ -1082,7 +1082,7 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
-  it.effect.each(["completed", "interrupted", "failed", "cancelled", "control"] as const)(
+  it.effect.each(["completed", "forced", "interrupted", "failed", "cancelled", "control"] as const)(
     "dismisses only native questions when a provider turn ends with %s",
     (terminal) =>
       Effect.gen(function* () {

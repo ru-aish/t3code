@@ -3658,11 +3658,11 @@ it.effect("emits run_interrupt_result when hard-stop finalizes the active attemp
   }),
 );
 
-it.effect.each(["completed", "interrupted", "cancelled", "failed"] as const)(
+it.effect.each(["completed", "forced", "interrupted", "cancelled", "failed"] as const)(
   "refreshes pull requests after the current root run %s",
   (status) =>
     Effect.gen(function* () {
-      const { observed } = yield* captureRootRunTermination({
+      const { observed, committedEffects } = yield* captureRootRunTermination({
         key: `pull-request-refresh:${status}`,
         shouldFinalizeRun: () => Effect.succeed(true),
         events: (ids) => Stream.make(rootTerminalEvent(ids, status)),
@@ -3671,6 +3671,10 @@ it.effect.each(["completed", "interrupted", "cancelled", "failed"] as const)(
         `run:${status === "completed" ? "waiting" : status}`,
         "pull-requests-refreshed",
       ]);
+      assert.deepEqual(
+        committedEffects.map((effect) => effect.request.type),
+        status === "failed" ? [] : ["checkpoint.capture"],
+      );
     }),
 );
 
@@ -4324,7 +4328,7 @@ function makeRunOwnedSubagentChildNodeFixture(input: {
 
 function rootTerminalEvent(
   ids: BackgroundScenarioIds,
-  status: "completed" | "interrupted" | "cancelled" | "failed",
+  status: "completed" | "forced" | "interrupted" | "cancelled" | "failed",
 ): ProviderAdapter.ProviderAdapterV2Event {
   const common = {
     type: "turn.terminal" as const,

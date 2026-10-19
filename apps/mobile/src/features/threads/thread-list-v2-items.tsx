@@ -86,6 +86,12 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
     className: "text-foreground-muted",
     iconTintClassName: "accent-foreground-muted",
   },
+  forced: {
+    label: "Forced",
+    icon: "checkmark.circle",
+    className: "text-adaptive-emerald-700-300",
+    iconTintClassName: "accent-adaptive-emerald-700-300",
+  },
   failed: {
     label: "Failed",
     icon: "exclamationmark.circle",

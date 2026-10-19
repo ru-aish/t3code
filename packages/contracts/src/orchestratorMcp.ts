@@ -255,6 +255,7 @@ export const OrchestratorMcpCreatedThreadStatus = Schema.Union([
   Schema.Literal("idle"),
   Schema.Literal("preparing"),
   Schema.Literal("starting"),
+  Schema.Literal("forced"),
   OrchestratorMcpDelegatedTaskStatus,
   Schema.Literal("rolled_back"),
 ]);
@@ -469,7 +470,7 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
   status: Schema.Union([
     Schema.Literal("interrupt_requested"),
     Schema.Literal("no_active_run"),
-    Schema.Literals(["completed", "failed", "cancelled", "interrupted", "rolled_back"]),
+    Schema.Literals(["completed", "forced", "failed", "cancelled", "interrupted", "rolled_back"]),
   ]),
 });
 export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;

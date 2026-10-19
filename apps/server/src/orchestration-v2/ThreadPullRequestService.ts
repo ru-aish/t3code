@@ -372,6 +372,7 @@ export const make = Effect.gen(function* () {
       case "run.updated":
         if (
           event.payload.status === "completed" ||
+          event.payload.status === "forced" ||
           event.payload.status === "failed" ||
           event.payload.status === "cancelled" ||
           event.payload.status === "interrupted"

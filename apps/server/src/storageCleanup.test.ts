@@ -124,14 +124,19 @@ describe("V2 storage cleanup eligibility", () => {
     },
   );
 
-  it.each(["idle", "completed", "interrupted", "failed", "cancelled", "rolled_back"] as const)(
-    "allows cleanup once its thread is %s",
-    (status) => {
-      expect(storageCleanupThreadIdle(candidateWithStatus(status), NOW_MS)).toBe(true);
-    },
-  );
+  it.each([
+    "idle",
+    "completed",
+    "forced",
+    "interrupted",
+    "failed",
+    "cancelled",
+    "rolled_back",
+  ] as const)("allows cleanup once its thread is %s", (status) => {
+    expect(storageCleanupThreadIdle(candidateWithStatus(status), NOW_MS)).toBe(true);
+  });
 
-  it.each(["completed", "interrupted", "cancelled", "rolled_back"] as const)(
+  it.each(["completed", "forced", "interrupted", "cancelled", "rolled_back"] as const)(
     "retains %s while background work is pending",
     (status) => {
       expect(
@@ -146,7 +151,7 @@ describe("V2 storage cleanup eligibility", () => {
     },
   );
 
-  it.each(["completed", "interrupted", "cancelled", "rolled_back"] as const)(
+  it.each(["completed", "forced", "interrupted", "cancelled", "rolled_back"] as const)(
     "retains %s while a runtime request is pending",
     (status) => {
       expect(

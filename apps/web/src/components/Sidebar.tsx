@@ -1211,31 +1211,37 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 icon: "input" as const,
                 className: "text-indigo-600 dark:text-indigo-300",
               }
-            : status === "limited"
+            : status === "forced"
               ? {
-                  label: "Limited",
-                  icon: "failed" as const,
-                  className: "text-warning",
+                  label: "Forced",
+                  icon: "done" as const,
+                  className: "text-success",
                 }
-              : status === "failed"
+              : status === "limited"
                 ? {
-                    label: "Failed",
+                    label: "Limited",
                     icon: "failed" as const,
-                    className: "text-error",
+                    className: "text-warning",
                   }
-                : isWoke
+                : status === "failed"
                   ? {
-                      label: "Woke",
-                      icon: "woke" as const,
-                      className: "text-warning",
+                      label: "Failed",
+                      icon: "failed" as const,
+                      className: "text-error",
                     }
-                  : isUnread
+                  : isWoke
                     ? {
-                        label: "Done",
-                        icon: "done" as const,
-                        className: "text-success",
+                        label: "Woke",
+                        icon: "woke" as const,
+                        className: "text-warning",
                       }
-                    : null;
+                    : isUnread
+                      ? {
+                          label: "Done",
+                          icon: "done" as const,
+                          className: "text-success",
+                        }
+                      : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({

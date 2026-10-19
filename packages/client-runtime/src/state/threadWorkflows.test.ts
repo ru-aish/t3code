@@ -397,6 +397,17 @@ describe("thread workflows", () => {
     expect(resolveLatestMergeBackRun(projection)?.id).toBe("newest-finished");
   });
 
+  it("uses a forced run as the latest merge-back source", () => {
+    const projection = {
+      runs: [
+        { id: "older-completed", status: "completed", ordinal: 1 },
+        { id: "newest-forced", status: "forced", ordinal: 2 },
+      ],
+    } as never;
+
+    expect(resolveLatestMergeBackRun(projection)?.id).toBe("newest-forced");
+  });
+
   it("does not let a stale completed run later in storage order hide the waiting checkpoint", () => {
     const projection = {
       runs: [

@@ -62,6 +62,7 @@ export type ThreadListV2Status =
   | "input"
   | "working"
   | "waiting"
+  | "forced"
   | "failed"
   | "limited"
   | "ready";
@@ -171,6 +172,9 @@ export function resolveThreadListV2Status(
   }
   if (thread.runtime?.status === "idle") {
     return "waiting";
+  }
+  if (thread.runtime?.status === "forced") {
+    return "forced";
   }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";

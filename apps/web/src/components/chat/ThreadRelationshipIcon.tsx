@@ -19,6 +19,8 @@ export function threadRelationshipStatusLabel(status: string | null): string {
       return "Waiting";
     case "completed":
       return "Done";
+    case "forced":
+      return "Forced";
     case "failed":
     case "error":
       return "Failed";
@@ -40,6 +42,20 @@ export function threadRelationshipStatusLabel(status: string | null): string {
     default:
       return "Unknown";
   }
+}
+
+export function threadRelationshipStatusIndicatorClassName(status: string | null): string {
+  if (
+    status === "running" ||
+    status === "in_progress" ||
+    status === "pending" ||
+    status === "waiting"
+  ) {
+    return "bg-info";
+  }
+  if (status === "failed" || status === "error") return "bg-destructive";
+  if (status === "completed" || status === "forced") return "bg-success";
+  return "bg-muted-foreground/45";
 }
 
 export function ThreadRelationshipIcon({
@@ -70,16 +86,7 @@ export function ThreadRelationshipIcon({
       <span
         className={cn(
           "absolute -bottom-1 -right-1 size-2 rounded-full border-2 border-card",
-          status === "running" ||
-            status === "in_progress" ||
-            status === "pending" ||
-            status === "waiting"
-            ? "bg-info"
-            : status === "failed" || status === "error"
-              ? "bg-destructive"
-              : status === "completed"
-                ? "bg-success"
-                : "bg-muted-foreground/45",
+          threadRelationshipStatusIndicatorClassName(status),
         )}
         aria-hidden="true"
       />

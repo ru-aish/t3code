@@ -1298,173 +1298,177 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
-  it.effect("merges an explicit provider-finished run while checkpoint capture is pending", () =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const eventSink = yield* EventSink.EventSinkV2;
-      const now = yield* DateTime.now;
-      const projectId = ProjectId.make("runtime-layer-waiting-merge-project");
-      const targetThreadId = ThreadId.make("runtime-layer-waiting-merge-target");
-      const sourceThreadId = ThreadId.make("runtime-layer-waiting-merge-source");
-      const baseRunId = RunId.make("runtime-layer-waiting-merge-base-run");
-      const sourceRunId = RunId.make("runtime-layer-waiting-merge-source-run");
-      const sourceProviderThreadId = ProviderThreadId.make(
-        "runtime-layer-waiting-merge-provider-thread",
-      );
-      const forkTransferId = ContextTransferId.make("runtime-layer-waiting-merge-fork-transfer");
+  it.effect.each(["waiting", "forced"] as const)(
+    "merges an explicit %s provider-finished run while checkpoint capture is pending",
+    (status) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const fixture = `runtime-layer-${status}-merge`;
+        const projectId = ProjectId.make(`${fixture}-project`);
+        const targetThreadId = ThreadId.make(`${fixture}-target`);
+        const sourceThreadId = ThreadId.make(`${fixture}-source`);
+        const baseRunId = RunId.make(`${fixture}-base-run`);
+        const sourceRunId = RunId.make(`${fixture}-source-run`);
+        const sourceProviderThreadId = ProviderThreadId.make(`${fixture}-provider-thread`);
+        const forkTransferId = ContextTransferId.make(`${fixture}-fork-transfer`);
 
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        createdBy: "user",
-        creationSource: "web",
-        commandId: CommandId.make("runtime-layer-waiting-merge-create-target"),
-        threadId: targetThreadId,
-        projectId,
-        title: "Waiting merge target",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-      });
-      const target = yield* orchestrator.getThreadProjection(targetThreadId);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${fixture}-create-target`),
+          threadId: targetThreadId,
+          projectId,
+          title: "Waiting merge target",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        const target = yield* orchestrator.getThreadProjection(targetThreadId);
 
-      yield* eventSink.write({
-        commandId: CommandId.make("runtime-layer-waiting-merge-seed"),
-        events: [
-          {
-            id: EventId.make("runtime-layer-waiting-merge-source-thread-event"),
-            type: "thread.created",
-            threadId: sourceThreadId,
-            providerInstanceId: modelSelection.instanceId,
-            occurredAt: now,
-            payload: {
-              ...target.thread,
-              id: sourceThreadId,
-              title: "Waiting merge source",
-              activeProviderThreadId: null,
-              lineage: {
-                parentThreadId: targetThreadId,
-                relationshipToParent: "fork",
-                rootThreadId: targetThreadId,
+        yield* eventSink.write({
+          commandId: CommandId.make(`${fixture}-seed`),
+          events: [
+            {
+              id: EventId.make(`${fixture}-source-thread-event`),
+              type: "thread.created",
+              threadId: sourceThreadId,
+              providerInstanceId: modelSelection.instanceId,
+              occurredAt: now,
+              payload: {
+                ...target.thread,
+                id: sourceThreadId,
+                title: "Waiting merge source",
+                activeProviderThreadId: null,
+                lineage: {
+                  parentThreadId: targetThreadId,
+                  relationshipToParent: "fork",
+                  rootThreadId: targetThreadId,
+                },
+                forkedFrom: {
+                  type: "run",
+                  threadId: targetThreadId,
+                  runId: baseRunId,
+                },
+                createdAt: now,
+                updatedAt: now,
               },
-              forkedFrom: {
-                type: "run",
-                threadId: targetThreadId,
-                runId: baseRunId,
+            },
+            {
+              id: EventId.make(`${fixture}-fork-transfer-event`),
+              type: "context-transfer.created",
+              threadId: sourceThreadId,
+              providerInstanceId: modelSelection.instanceId,
+              occurredAt: now,
+              payload: {
+                id: forkTransferId,
+                type: "fork",
+                sourceThreadId: targetThreadId,
+                targetThreadId: sourceThreadId,
+                sourcePoint: { threadId: targetThreadId, runId: baseRunId },
+                basePoint: null,
+                sourceProviderInstanceId: modelSelection.instanceId,
+                targetProviderInstanceId: modelSelection.instanceId,
+                targetRunId: null,
+                status: "consumed",
+                resolution: null,
+                createdBy: "user",
+                error: null,
+                createdAt: now,
+                updatedAt: now,
+                consumedAt: now,
               },
-              createdAt: now,
-              updatedAt: now,
             },
-          },
-          {
-            id: EventId.make("runtime-layer-waiting-merge-fork-transfer-event"),
-            type: "context-transfer.created",
-            threadId: sourceThreadId,
-            providerInstanceId: modelSelection.instanceId,
-            occurredAt: now,
-            payload: {
-              id: forkTransferId,
-              type: "fork",
-              sourceThreadId: targetThreadId,
-              targetThreadId: sourceThreadId,
-              sourcePoint: { threadId: targetThreadId, runId: baseRunId },
-              basePoint: null,
-              sourceProviderInstanceId: modelSelection.instanceId,
-              targetProviderInstanceId: modelSelection.instanceId,
-              targetRunId: null,
-              status: "consumed",
-              resolution: null,
-              createdBy: "user",
-              error: null,
-              createdAt: now,
-              updatedAt: now,
-              consumedAt: now,
-            },
-          },
-          {
-            id: EventId.make("runtime-layer-waiting-merge-provider-thread-event"),
-            type: "provider-thread.updated",
-            threadId: sourceThreadId,
-            driver,
-            providerInstanceId: modelSelection.instanceId,
-            occurredAt: now,
-            payload: {
-              id: sourceProviderThreadId,
+            {
+              id: EventId.make(`${fixture}-provider-thread-event`),
+              type: "provider-thread.updated",
+              threadId: sourceThreadId,
               driver,
               providerInstanceId: modelSelection.instanceId,
-              providerSessionId: null,
-              appThreadId: sourceThreadId,
-              ownerNodeId: null,
-              nativeThreadRef: {
+              occurredAt: now,
+              payload: {
+                id: sourceProviderThreadId,
                 driver,
-                nativeId: "native-waiting-merge-source",
-                strength: "strong",
+                providerInstanceId: modelSelection.instanceId,
+                providerSessionId: null,
+                appThreadId: sourceThreadId,
+                ownerNodeId: null,
+                nativeThreadRef: {
+                  driver,
+                  nativeId: `native-${status}-merge-source`,
+                  strength: "strong",
+                },
+                nativeConversationHeadRef: null,
+                status: "idle",
+                firstRunOrdinal: 1,
+                lastRunOrdinal: 1,
+                handoffIds: [],
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
               },
-              nativeConversationHeadRef: null,
-              status: "idle",
-              firstRunOrdinal: 1,
-              lastRunOrdinal: 1,
-              handoffIds: [],
-              forkedFrom: null,
-              createdAt: now,
-              updatedAt: now,
             },
-          },
-          {
-            id: EventId.make("runtime-layer-waiting-merge-source-run-event"),
-            type: "run.created",
-            threadId: sourceThreadId,
-            runId: sourceRunId,
-            providerInstanceId: modelSelection.instanceId,
-            occurredAt: now,
-            payload: {
-              id: sourceRunId,
+            {
+              id: EventId.make(`${fixture}-source-run-event`),
+              type: "run.created",
               threadId: sourceThreadId,
-              ordinal: 1,
+              runId: sourceRunId,
               providerInstanceId: modelSelection.instanceId,
-              modelSelection,
-              providerThreadId: sourceProviderThreadId,
-              userMessageId: MessageId.make("runtime-layer-waiting-merge-message"),
-              rootNodeId: null,
-              activeAttemptId: null,
-              status: "waiting",
-              queuePosition: null,
-              requestedAt: now,
-              startedAt: now,
-              completedAt: null,
-              checkpointId: null,
-              contextHandoffId: null,
+              occurredAt: now,
+              payload: {
+                id: sourceRunId,
+                threadId: sourceThreadId,
+                ordinal: 1,
+                providerInstanceId: modelSelection.instanceId,
+                modelSelection,
+                providerThreadId: sourceProviderThreadId,
+                userMessageId: MessageId.make(`${fixture}-message`),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status,
+                queuePosition: null,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: status === "forced" ? now : null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
             },
-          },
-        ],
-      });
+          ],
+        });
 
-      yield* orchestrator.dispatch({
-        type: "thread.merge_back",
-        createdBy: "user",
-        creationSource: "mobile",
-        commandId: CommandId.make("runtime-layer-waiting-merge"),
-        sourceThreadId,
-        targetThreadId,
-        sourcePoint: { type: "run", runId: sourceRunId },
-        createdAt: now,
-      });
+        yield* orchestrator.dispatch({
+          type: "thread.merge_back",
+          createdBy: "user",
+          creationSource: "mobile",
+          commandId: CommandId.make(fixture),
+          sourceThreadId,
+          targetThreadId,
+          sourcePoint: { type: "run", runId: sourceRunId },
+          createdAt: now,
+        });
 
-      const mergedTarget = yield* orchestrator.getThreadProjection(targetThreadId);
-      const transfer = mergedTarget.contextTransfers.find(
-        (candidate) => candidate.type === "merge_back",
-      );
-      assert.isDefined(transfer);
-      assert.equal(transfer.status, "pending");
-      assert.equal(transfer.sourceThreadId, sourceThreadId);
-      assert.equal(transfer.targetThreadId, targetThreadId);
-      assert.equal(transfer.sourcePoint.runId, sourceRunId);
-      assert.isUndefined(transfer.sourcePoint.checkpointId);
-      assert.equal(transfer.sourcePoint.providerThreadRef?.nativeId, "native-waiting-merge-source");
-      assert.equal(transfer.basePoint?.runId, baseRunId);
-      assert.isNull(transfer.error);
-    }),
+        const mergedTarget = yield* orchestrator.getThreadProjection(targetThreadId);
+        const transfer = mergedTarget.contextTransfers.find(
+          (candidate) => candidate.type === "merge_back",
+        );
+        assert.isDefined(transfer);
+        assert.equal(transfer.status, "pending");
+        assert.equal(transfer.sourceThreadId, sourceThreadId);
+        assert.equal(transfer.targetThreadId, targetThreadId);
+        assert.equal(transfer.sourcePoint.runId, sourceRunId);
+        assert.isUndefined(transfer.sourcePoint.checkpointId);
+        assert.equal(
+          transfer.sourcePoint.providerThreadRef?.nativeId,
+          `native-${status}-merge-source`,
+        );
+        assert.equal(transfer.basePoint?.runId, baseRunId);
+        assert.isNull(transfer.error);
+      }),
   );
 });
 

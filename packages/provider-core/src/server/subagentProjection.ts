@@ -199,7 +199,7 @@ export function subagentResultForRun(
     (failure?.type === "error" ? failure.failure.message : undefined) ??
     message?.text ??
     turnItem?.text ??
-    (run.status === "completed"
+    (run.status === "completed" || run.status === "forced"
       ? "Child task completed without an assistant result."
       : `Child task ended with status ${run.status}.`);
   return {
@@ -222,7 +222,7 @@ export function delegatedTaskProgress(projection: {
   >;
 }) {
   const terminal = (status: string) =>
-    ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
+    ["completed", "forced", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
   const monitorRuns = new Set(
     projection.messages
       .filter((message) => message.notification?.source.kind === "monitor")

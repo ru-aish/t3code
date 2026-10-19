@@ -169,6 +169,7 @@ const SUBAGENT_STATUS_LABELS: Record<OrchestrationV2ExecutionNode["status"], str
   running: "Working",
   waiting: "Waiting",
   completed: "Completed",
+  forced: "Completed",
   interrupted: "Interrupted",
   failed: "Failed",
   cancelled: "Cancelled",

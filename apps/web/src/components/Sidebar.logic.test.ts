@@ -954,6 +954,24 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe(false);
   });
 
+  it("reports forced with the green completion status", () => {
+    const status = resolveSidebarThreadStatus({
+      ...idle,
+      runtime: { ...runtime, status: "forced" as const },
+    });
+    expect(status).toBe("forced");
+    expect(resolveSidebarV2TopStatus({ status, isUnread: false, isWoke: false })).toBe("forced");
+    expect(
+      shouldRecedeSidebarThread({
+        status,
+        isUnread: false,
+        isWoke: false,
+        isActive: false,
+        isSelected: false,
+      }),
+    ).toBe(true);
+  });
+
   it("reports failed only while the latest run failed", () => {
     expect(
       resolveSidebarThreadStatus({

@@ -140,6 +140,23 @@ describe("resolveThreadListV2Status", () => {
     ).toBe("ready");
   });
 
+  it("reports forced as its own successful terminal status", () => {
+    const thread = makeThread({
+      id: ThreadId.make("forced"),
+      title: "Forced",
+      runtime: {
+        status: "forced",
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("chatgpt"),
+        providerName: "ChatGPT",
+        lastError: null,
+        updatedAt: NOW,
+      },
+    });
+
+    expect(resolveThreadListV2Status(thread)).toBe("forced");
+  });
+
   it("prioritizes approval over a running runtime", () => {
     const thread = makeThread({
       id: ThreadId.make("t"),

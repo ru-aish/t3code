@@ -585,6 +585,8 @@ function delegatedTaskTerminalStatus(
     case "cancelled":
     case "interrupted":
       return status;
+    case "forced":
+      return "completed";
     case "rolled_back":
       return "cancelled";
     case "preparing":
@@ -607,7 +609,10 @@ function latestStableRun(
 ): OrchestrationV2Run | null {
   return (
     projection.runs
-      .filter((run) => run.status === "completed" && run.checkpointId !== null)
+      .filter(
+        (run) =>
+          (run.status === "completed" || run.status === "forced") && run.checkpointId !== null,
+      )
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null
   );
 }
@@ -774,7 +779,12 @@ function rootProviderThreadsForProvider(
 }
 
 function isHandoffSourceRun(run: OrchestrationV2Run): boolean {
-  return run.status === "completed" || run.status === "failed" || run.status === "interrupted";
+  return (
+    run.status === "completed" ||
+    run.status === "forced" ||
+    run.status === "failed" ||
+    run.status === "interrupted"
+  );
 }
 
 function lastDeliveredRunForProviderThread(
@@ -1445,7 +1455,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
-      const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
+      const latestCompletedRun = projection.runs.findLast(
+        (run) => run.status === "completed" || run.status === "forced",
+      );
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
       const targetLastCompletedRun = lastDeliveredRunForProviderThread(
         projection,
@@ -3691,7 +3703,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `No stable source run was found for merge-back source ${command.sourcePoint.type}.`,
       });
     }
-    if (sourceRun.status !== "completed" && sourceRun.status !== "waiting") {
+    if (
+      sourceRun.status !== "completed" &&
+      sourceRun.status !== "waiting" &&
+      sourceRun.status !== "forced"
+    ) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
@@ -4698,6 +4714,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         if (
           target !== undefined &&
           (target.status === "completed" ||
+            target.status === "forced" ||
             ((target.status === "running" || target.status === "waiting") &&
               turn !== undefined &&
               turn.status === "completed"))
@@ -5222,7 +5239,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const ordinal = nextRunOrdinal(projection);
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
-      const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
+      const latestCompletedRun = projection.runs.findLast(
+        (run) => run.status === "completed" || run.status === "forced",
+      );
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
       const legacyImportItems =
         projection.thread.historyOrigin === "v1_import"
@@ -11204,6 +11223,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           stored.event.type === "run.updated" &&
           !String(stored.commandId).startsWith("command:runtime-reconcile:") &&
           (stored.event.payload.status === "completed" ||
+            stored.event.payload.status === "forced" ||
             stored.event.payload.status === "interrupted" ||
             stored.event.payload.status === "failed" ||
             stored.event.payload.status === "cancelled" ||

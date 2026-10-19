@@ -115,7 +115,7 @@ export function existingThreadIdsForCommand(
 
 export type ThreadManagementTerminalRunStatus = Extract<
   OrchestrationV2Run["status"],
-  "completed" | "failed" | "cancelled" | "interrupted" | "rolled_back"
+  "completed" | "forced" | "failed" | "cancelled" | "interrupted" | "rolled_back"
 >;
 
 export interface ThreadManagementSendInput {
@@ -455,6 +455,7 @@ export function isTerminalRunStatus(
 ): status is ThreadManagementTerminalRunStatus {
   return (
     status === "completed" ||
+    status === "forced" ||
     status === "failed" ||
     status === "cancelled" ||
     status === "interrupted" ||
@@ -931,7 +932,7 @@ const make = Effect.gen(function* () {
     "orchestrationV2.threadManagement.settleAfterRun",
   )(function* (input) {
     const { run } = yield* waitForThread({ ...input, timeoutMs: SETTLE_AFTER_RUN_WAIT_MS });
-    if (run?.status !== "completed") return;
+    if (run?.status !== "completed" && run?.status !== "forced") return;
     yield* dispatch({
       type: "thread.settle",
       commandId: CommandId.make(`server:settle-after-run:${input.runId}`),

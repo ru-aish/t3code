@@ -106,6 +106,7 @@ export function isRestartNoteSource(
     // A failed or interrupted turn is never continued. Recovery cancels a
     // waiting run it cannot checkpoint, so a cancelled one still qualifies.
     (source.status === "completed" ||
+      source.status === "forced" ||
       source.status === "waiting" ||
       source.status === "cancelled") &&
     (source.restartCancelledBackgroundWork?.length ?? 0) > 0 &&
@@ -126,7 +127,7 @@ export function isAwaitedWork(work: Pick<Work, "kind">): boolean {
 export function runOutcome(
   run: Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork">,
 ): OrchestrationV2Run["status"] {
-  return (run.status === "completed" || run.status === "cancelled") &&
+  return (run.status === "completed" || run.status === "forced" || run.status === "cancelled") &&
     (run.restartCancelledBackgroundWork ?? []).some(isAwaitedWork)
     ? "interrupted"
     : run.status;

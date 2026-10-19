@@ -374,6 +374,8 @@ function providerTurnStatusToTerminal(
   switch (status) {
     case "completed":
       return "completed";
+    case "forced":
+      return "forced";
     case "interrupted":
       return "interrupted";
     case "failed":
@@ -5765,7 +5767,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     itemOrdinal: providerRetry.itemOrdinal,
                     failure: providerRetry.failure,
                     retry: providerRetry.retry,
-                    status: providerTurnStatusToTerminal(input.status),
+                    status: (() => {
+                      const terminalStatus = providerTurnStatusToTerminal(input.status);
+                      return terminalStatus === "forced" ? "completed" : terminalStatus;
+                    })(),
                     startedAt: providerRetry.startedAt,
                     updatedAt: input.completedAt,
                   }),
@@ -5879,7 +5884,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 });
                 yield* emitSubagentTaskUpdate({
                   subagent: input.context.subagent,
-                  status: input.status,
+                  status: input.status === "forced" ? "completed" : input.status,
                   completedAt: input.completedAt,
                 });
               }

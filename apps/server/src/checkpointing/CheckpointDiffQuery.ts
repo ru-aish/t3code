@@ -117,7 +117,9 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("checkpoint.turnDiff.lookupContext"),
       );
       const completedRunIds = new Set(
-        projection.runs.filter((run) => run.status === "completed").map((run) => run.id),
+        projection.runs
+          .filter((run) => run.status === "completed" || run.status === "forced")
+          .map((run) => run.id),
       );
       const readyCheckpoints = projection.checkpoints.filter(
         (checkpoint) =>
