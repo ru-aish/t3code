@@ -149,6 +149,7 @@ function nullableIso(value: DateTime.Utc | null): string | null {
 function terminalRunStatus(status: OrchestrationV2RunStatus): boolean {
   return (
     status === "completed" ||
+    status === "forced" ||
     status === "interrupted" ||
     status === "failed" ||
     status === "cancelled" ||

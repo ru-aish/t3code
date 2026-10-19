@@ -30,7 +30,7 @@ export function isUndeliveredMailboxSteer(
   return (
     run !== undefined &&
     run.userMessageId !== message.id &&
-    (["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status) ||
+    (["completed", "forced", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status) ||
       latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId)?.status ===
         "completed")
   );

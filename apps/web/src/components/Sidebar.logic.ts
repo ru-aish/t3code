@@ -879,6 +879,7 @@ export type SidebarThreadStatus =
   | "input"
   | "working"
   | "waiting"
+  | "forced"
   | "failed"
   | "limited"
   | "ready";
@@ -892,7 +893,7 @@ export function shouldRecedeSidebarThread(input: {
 }): boolean {
   if (input.isActive || input.isSelected || input.status === "input") return false;
   if (input.status === "working" || input.status === "waiting") return true;
-  if (input.status === "ready" || input.status === "approval") {
+  if (input.status === "ready" || input.status === "approval" || input.status === "forced") {
     return !input.isUnread && !input.isWoke;
   }
   return false;
@@ -919,6 +920,9 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if (thread.runtime?.status === "idle") {
     return "waiting";
   }
+  if (thread.runtime?.status === "forced") {
+    return "forced";
+  }
   if (thread.runtime?.status === "failed") {
     return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
   }
@@ -928,6 +932,7 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
 export type SidebarV2TopStatusKind =
   | "approval"
   | "done"
+  | "forced"
   | "failed"
   | "limited"
   | "input"
@@ -951,6 +956,9 @@ export function resolveSidebarV2TopStatus(input: {
   }
   if (input.status === "input") {
     return "input";
+  }
+  if (input.status === "forced") {
+    return "forced";
   }
   if (input.status === "failed" || input.status === "limited") {
     return input.status;

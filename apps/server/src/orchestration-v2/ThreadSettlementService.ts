@@ -170,7 +170,7 @@ export function isSnoozed(
     thread.status === "failed" &&
     (snoozedAtMs === null || (completedAtMs !== null && completedAtMs > snoozedAtMs));
   const wokeOnCompletion =
-    thread.status === "completed" &&
+    (thread.status === "completed" || thread.status === "forced") &&
     snoozedAtMs !== null &&
     completedAtMs !== null &&
     completedAtMs > snoozedAtMs;
@@ -587,7 +587,7 @@ export const make = Effect.gen(function* () {
           ? worker.enqueue(event.threadId)
           : Effect.void;
       case "run.updated":
-        return ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+        return ["completed", "forced", "interrupted", "failed", "cancelled", "rolled_back"].includes(
           event.payload.status,
         )
           ? worker.enqueue(event.threadId)

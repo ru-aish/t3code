@@ -36,6 +36,7 @@ export class ThreadForkPlanError extends Schema.TaggedError<ThreadForkPlanError>
 export function isForkableSourceRunStatus(status: OrchestrationV2Run["status"]): boolean {
   return (
     status === "completed" ||
+    status === "forced" ||
     status === "waiting" ||
     status === "failed" ||
     status === "interrupted" ||
