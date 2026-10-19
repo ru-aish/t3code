@@ -1039,6 +1039,7 @@ it.effect.each([
 
 it.effect.each([
   { status: "completed" as const, settles: true },
+  { status: "forced" as const, settles: true },
   { status: "failed" as const, settles: false },
   { status: "interrupted" as const, settles: false },
 ])("settleAfterRun settles only when the run $status", ({ status, settles }) =>
