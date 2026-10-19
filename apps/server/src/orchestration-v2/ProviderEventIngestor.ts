@@ -204,6 +204,7 @@ function withPlanStepDurations(
 
 const CONVERSATION_RUN_STATUSES = new Set<OrchestrationV2Run["status"]>([
   "completed",
+  "forced",
   "interrupted",
   "failed",
 ]);
@@ -578,7 +579,7 @@ export const layer: Layer.Layer<
           }
           case "provider_turn.updated":
             return [
-              ...(["completed", "interrupted", "failed", "cancelled"].includes(
+              ...(["completed", "forced", "interrupted", "failed", "cancelled"].includes(
                 input.event.providerTurn.status,
               )
                 ? yield* dismissNativeUserInputs(
@@ -823,6 +824,7 @@ export const layer: Layer.Layer<
               const providerTurn = input.event.providerTurn;
               if (
                 providerTurn.status !== "completed" &&
+                providerTurn.status !== "forced" &&
                 providerTurn.status !== "failed" &&
                 providerTurn.status !== "interrupted" &&
                 providerTurn.status !== "cancelled"

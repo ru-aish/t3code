@@ -19,6 +19,7 @@ const BACKGROUND_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
 const TERMINAL_RUN_STATUSES = new Set<OrchestrationV2Run["status"]>([
   "cancelled",
   "completed",
+  "forced",
   "failed",
   "interrupted",
   "rolled_back",
@@ -33,6 +34,7 @@ const TERMINAL_RUN_STATUSES = new Set<OrchestrationV2Run["status"]>([
 const SETTLED_FOR_BACKGROUND_WAIT_RUN_STATUSES = new Set<OrchestrationV2Run["status"]>([
   "cancelled",
   "completed",
+  "forced",
   "failed",
   "interrupted",
   "waiting",

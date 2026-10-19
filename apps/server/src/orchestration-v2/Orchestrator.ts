@@ -585,6 +585,8 @@ function delegatedTaskTerminalStatus(
     case "cancelled":
     case "interrupted":
       return status;
+    case "forced":
+      return "completed";
     case "rolled_back":
       return "cancelled";
     case "preparing":
@@ -774,7 +776,12 @@ function rootProviderThreadsForProvider(
 }
 
 function isHandoffSourceRun(run: OrchestrationV2Run): boolean {
-  return run.status === "completed" || run.status === "failed" || run.status === "interrupted";
+  return (
+    run.status === "completed" ||
+    run.status === "forced" ||
+    run.status === "failed" ||
+    run.status === "interrupted"
+  );
 }
 
 function lastDeliveredRunForProviderThread(
@@ -4698,6 +4705,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         if (
           target !== undefined &&
           (target.status === "completed" ||
+            target.status === "forced" ||
             ((target.status === "running" || target.status === "waiting") &&
               turn !== undefined &&
               turn.status === "completed"))
@@ -11204,6 +11212,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           stored.event.type === "run.updated" &&
           !String(stored.commandId).startsWith("command:runtime-reconcile:") &&
           (stored.event.payload.status === "completed" ||
+            stored.event.payload.status === "forced" ||
             stored.event.payload.status === "interrupted" ||
             stored.event.payload.status === "failed" ||
             stored.event.payload.status === "cancelled" ||

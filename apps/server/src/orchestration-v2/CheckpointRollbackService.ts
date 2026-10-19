@@ -253,6 +253,7 @@ export const layer: Layer.Layer<
         (run) =>
           run.ordinal > targetOrdinal &&
           (run.status === "completed" ||
+            run.status === "forced" ||
             run.status === "interrupted" ||
             run.status === "failed" ||
             run.status === "cancelled"),
