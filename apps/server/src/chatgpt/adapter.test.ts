@@ -31,6 +31,7 @@ const fakes = vi.hoisted(() => ({
     idle: boolean;
     idleChecks: number;
     onCompletionRead?: () => void;
+    onDoneAcknowledged?: () => void;
     state: string;
     conversationReads: number;
     options: { orchestrationCommand?: string | undefined };
@@ -118,6 +119,7 @@ vi.mock("./connection.ts", () => ({
       return this.sent.at(-1);
     }
     onCompletionRead?: () => void;
+    onDoneAcknowledged?: () => void;
     async readCompletion(requestId: string): Promise<ChatGPTUpdate[] | null> {
       this.idleChecks++;
       this.onCompletionRead?.();
@@ -137,7 +139,9 @@ vi.mock("./connection.ts", () => ({
           ]
         : null;
     }
-    async acknowledge() {}
+    async acknowledge(event: TerminalEvent) {
+      if (event.kind === "state" && event.payload.state === "done") this.onDoneAcknowledged?.();
+    }
     publish(event: TerminalEvent) {
       this.pending.push(event);
       this.wake?.();
@@ -376,6 +380,53 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
+  it.live("settles reasoning from an earlier submission when a continued run completes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "analysis",
+          messageId: "old-reasoning",
+          text: "Reasoning before continue",
+          status: "in_progress",
+        });
+        fake.publish(terminal("continue"));
+        yield* Effect.sleep("20 millis");
+        expect(fake.sent).toContain("continue-1");
+        fake.callback?.({
+          kind: "update",
+          requestId: "continue-1",
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "continued-final",
+          text: "Continued work finished",
+          status: "finished_successfully",
+        });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId: "continue-1", conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const reasoning = recorded.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "reasoning" &&
+          event.turnItem.text === "Reasoning before continue"
+            ? [event.turnItem]
+            : [],
+        );
+        expect(reasoning.at(-1)?.status).toBe("completed");
+        expect(reasoning.at(-1)?.streaming).toBe(false);
+      }),
+    ),
+  );
+
   it.live("pauses recovery when a submission fails before the generation starts", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -595,47 +646,56 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
-  it.live(
-    "recovers a missing stream-complete callback once Terminal MCP is done and ChatGPT is idle",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const { events, fake, requestId } = yield* fixture;
-          yield* Queue.take(events);
-          fake.callback?.({
-            kind: "update",
-            requestId,
-            conversationId: null,
-            role: "assistant",
-            recipient: "api_tool.call_tool",
-            text: "fedora_t3code.thread_task",
-          });
-          fake.idle = true;
-          fake.publish(terminal("state", "done"));
-          const ended = yield* Stream.fromQueue(events).pipe(
-            Stream.filter((event) => event.type === "turn.terminal"),
-            Stream.take(1),
-            Stream.runCollect,
-          );
-          expect(ended[0]?.status).toBe("completed");
-          expect(fake.idleChecks).toBeGreaterThan(0);
-        }),
-      ),
+  it.effect("recovers an idle ChatGPT completion at three minutes after done", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          recipient: "api_tool.call_tool",
+          text: "fedora_t3code.thread_task",
+        });
+        fake.idle = true;
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        yield* TestClock.adjust("179 seconds");
+        expect(fake.idleChecks).toBe(0);
+        yield* TestClock.adjust("1 second");
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)?.type).toBe("turn.terminal");
+        const terminalEvent = recorded.at(-1);
+        if (terminalEvent?.type !== "turn.terminal") throw new Error("Missing completion");
+        expect(terminalEvent.status).toBe("completed");
+        expect(fake.idleChecks).toBe(1);
+        expect(fake.sent).toEqual([requestId]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("recovers the saved final answer more than five minutes after done", () =>
+  it.effect("retries five minutes after the first incomplete refresh", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { events, fake } = yield* fixture;
         yield* Queue.take(events);
-        const started = Promise.withResolvers<void>();
-        fake.onCompletionRead = () => started.resolve();
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
         fake.publish(terminal("state", "done"));
-        yield* Effect.promise(() => started.promise);
-        yield* TestClock.adjust("6 minutes");
-        expect(yield* Queue.size(events)).toBe(0);
+        yield* Effect.promise(() => acknowledged.promise);
+        yield* TestClock.adjust("3 minutes");
+        expect(fake.idleChecks).toBe(1);
         fake.idle = true;
-        yield* TestClock.adjust("30 seconds");
+        yield* TestClock.adjust("299 seconds");
+        expect(fake.idleChecks).toBe(1);
+        yield* TestClock.adjust("1 second");
         const recorded = yield* Stream.fromQueue(events).pipe(
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runCollect,
@@ -644,7 +704,62 @@ describe("ChatGPT task authority", () => {
           recorded.filter((event) => event.type === "message.updated").at(-1)?.message.text,
         ).toBe("Recovered final answer");
         expect(recorded.at(-1)?.type).toBe("turn.terminal");
-        expect(fake.idleChecks).toBeGreaterThan(2);
+        const terminalEvent = recorded.at(-1);
+        if (terminalEvent?.type !== "turn.terminal") throw new Error("Missing completion");
+        expect(terminalEvent.status).toBe("completed");
+        expect(fake.idleChecks).toBe(2);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("fails visibly after both refreshes instead of leaving a run spinning", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        yield* TestClock.adjust("8 minutes");
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const failed = recorded.at(-1);
+        expect(failed?.type).toBe("turn.terminal");
+        if (failed?.type !== "turn.terminal") throw new Error("Missing terminal failure");
+        expect(failed.status).toBe("failed");
+        if (failed.status !== "failed") throw new Error("Expected a failed run");
+        expect(failed.failure.code).toBe("chatgpt_completion_recovery_timeout");
+        expect(fake.idleChecks).toBe(2);
+        expect(fake.sent).toEqual([requestId]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("cancels delayed refresh when the real stream finishes first", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        yield* TestClock.adjust("2 minutes");
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)?.type).toBe("turn.terminal");
+        const terminalEvent = recorded.at(-1);
+        if (terminalEvent?.type !== "turn.terminal") throw new Error("Missing completion");
+        expect(terminalEvent.status).toBe("completed");
+        yield* TestClock.adjust("10 minutes");
+        expect(fake.idleChecks).toBe(0);
+        expect(yield* Queue.size(events)).toBe(0);
       }),
     ).pipe(Effect.provide(TestClock.layer())),
   );

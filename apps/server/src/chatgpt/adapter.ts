@@ -301,12 +301,15 @@ export const makeChatGPTAdapter = (
           }
         });
         const finish = Effect.fnUntraced(function* (
-          status: "completed" | "interrupted" | "cancelled",
+          status: "completed" | "interrupted" | "cancelled" | "failed",
         ) {
           if (!active || !thread) return;
           const completed = active;
           active = null;
-          yield* settleReasoning(completed);
+          // Interrupted submissions can leave reasoning open in the same run.
+          for (const turn of new Set(outputTurns.values())) {
+            if (turn.input.runId === completed.input.runId) yield* settleReasoning(turn);
+          }
           const timestamp = yield* DateTime.now;
           const finalKey = `${completed.turn.id}:${completed.requestId}:final`;
           const finalMessage = messages.get(finalKey);
@@ -345,37 +348,76 @@ export const makeChatGPTAdapter = (
             threadId: input.threadId,
             providerTurn: { ...completed.turn, status, completedAt: timestamp },
           });
-          yield* emit({
-            type: "turn.terminal",
-            driver: CHATGPT_DRIVER,
-            providerThreadId: thread.id,
-            providerTurnId: completed.turn.id,
-            runOrdinal: completed.input.runOrdinal,
-            status,
-            failure: null,
-            threadDisposition: "reusable",
-          });
+          if (status === "failed") {
+            yield* emit({
+              type: "turn.terminal",
+              driver: CHATGPT_DRIVER,
+              providerThreadId: thread.id,
+              providerTurnId: completed.turn.id,
+              runOrdinal: completed.input.runOrdinal,
+              status,
+              failureItemOrdinal: ++nextOrdinal,
+              failure: {
+                class: "transport_error",
+                message:
+                  "ChatGPT completion could not be confirmed after refreshes at 3 and 8 minutes. Refresh the conversation to recover any later answer.",
+                code: "chatgpt_completion_recovery_timeout",
+                // Retrying the original submission is unsafe if ChatGPT is still generating.
+                retryable: false,
+              },
+              threadDisposition: "reusable",
+            });
+          } else {
+            yield* emit({
+              type: "turn.terminal",
+              driver: CHATGPT_DRIVER,
+              providerThreadId: thread.id,
+              providerTurnId: completed.turn.id,
+              runOrdinal: completed.input.runOrdinal,
+              status,
+              failure: null,
+              threadDisposition: "reusable",
+            });
+          }
         });
-        const recoverMissingCompletion = Effect.fnUntraced(function* (requestId: string) {
+        const recoverMissingCompletion = Effect.fnUntraced(function* (
+          requestId: string,
+          recoveringAfterRestart = false,
+        ) {
           if (completionRecoveryRequestId === requestId) return;
           completionRecoveryRequestId = requestId;
           yield* Effect.gen(function* () {
-            let delay = 250;
-            while (active?.requestId === requestId && !streamComplete && binding.state === "done") {
+            // Normal streaming wins. Only refresh if Terminal MCP is done and
+            // the completion callback is still missing at 3 and then 8 minutes.
+            // A restarted session has already lost its stream callback; reconcile
+            // immediately rather than waiting another three minutes.
+            const delays = recoveringAfterRestart
+              ? (["0 millis", "3 minutes", "5 minutes"] as const)
+              : (["3 minutes", "5 minutes"] as const);
+            for (const delay of delays) {
+              yield* Effect.sleep(delay);
+              if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
+                return;
               const updates = yield* attempt(() => connection.readCompletion(requestId)).pipe(
                 Effect.catch(() => Effect.succeed(null)),
               );
               if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
-                break;
+                return;
               if (updates) {
-                // Keep recovered text ahead of completion on the same serialized
-                // update path as live output, including after a renderer restart.
+                // Recovered text must be ingested before the completion event.
                 for (const update of updates)
                   yield* Queue.offer(incoming, { kind: "chat", update });
-                break;
+                return;
               }
-              yield* Effect.sleep(delay);
-              delay = Math.min(delay * 2, 30_000);
+            }
+            if (active?.requestId === requestId && !streamComplete && binding.state === "done") {
+              yield* Effect.logWarning(
+                "ChatGPT completion remained unconfirmed after two refreshes",
+                {
+                  threadId: input.threadId,
+                },
+              );
+              yield* finish("failed");
             }
           }).pipe(
             Effect.ensuring(
@@ -837,7 +879,9 @@ export const makeChatGPTAdapter = (
             providerTurn: turn,
           });
           if (recoveryRequestId) {
-            yield* recoverMissingCompletion(recoveryRequestId).pipe(Effect.forkIn(sessionScope));
+            yield* recoverMissingCompletion(recoveryRequestId, true).pipe(
+              Effect.forkIn(sessionScope),
+            );
             return;
           }
           yield* attempt(() =>
