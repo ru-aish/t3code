@@ -84,6 +84,7 @@ type ProviderTerminalEvent = Extract<
 function isTerminalProviderTurnStatus(status: OrchestrationV2ProviderTurn["status"]): boolean {
   return (
     status === "completed" ||
+    status === "forced" ||
     status === "interrupted" ||
     status === "failed" ||
     status === "cancelled"
@@ -105,7 +106,9 @@ function isSettledTurnItemStatus(status: OrchestrationV2TurnItem["status"]): boo
 }
 
 function isSettledRunEligibleForInheritedBackground(status: OrchestrationV2Run["status"]): boolean {
-  return status === "interrupted" || status === "failed" || status === "cancelled";
+  return (
+    status === "forced" || status === "interrupted" || status === "failed" || status === "cancelled"
+  );
 }
 
 /**
@@ -160,10 +163,11 @@ function isOpenExecutionNodeStatus(status: OrchestrationV2ExecutionNode["status"
   return status === "pending" || status === "running" || status === "waiting";
 }
 
-function isRunOwnedSubagentTerminalStatus(
+function runOwnedSubagentTerminalStatus(
   status: ProviderTerminalEvent["status"],
-): status is RunOwnedSubagentTerminalStatus {
-  return status === "interrupted" || status === "failed" || status === "cancelled";
+): RunOwnedSubagentTerminalStatus | null {
+  if (status === "forced") return "interrupted";
+  return status === "interrupted" || status === "failed" || status === "cancelled" ? status : null;
 }
 
 /**
@@ -641,12 +645,13 @@ export const layer: Layer.Layer<
           open.turnItems.size > 0 ||
           open.childTurnItems.size > 0 ||
           open.nodes.size > 0;
+        const childTerminalStatus = runOwnedSubagentTerminalStatus(input.terminal.status);
         const cascadedSubagentEvents =
-          isRunOwnedSubagentTerminalStatus(input.terminal.status) && hasOpenSubagentProjection
+          childTerminalStatus !== null && hasOpenSubagentProjection
             ? yield* cascadeTerminalizeRunOwnedSubagents({
                 run: input.run,
                 open,
-                status: input.terminal.status,
+                status: childTerminalStatus,
                 completedAt,
                 allocateEventId,
               })
@@ -686,6 +691,7 @@ export const layer: Layer.Layer<
         const finalization = {
           effects:
             input.terminal.status === "completed" ||
+            input.terminal.status === "forced" ||
             input.terminal.status === "interrupted" ||
             input.terminal.status === "cancelled"
               ? [
@@ -1008,7 +1014,7 @@ export const layer: Layer.Layer<
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
                 ),
               );
-              if (isRunOwnedSubagentTerminalStatus(terminal.status)) {
+              if (runOwnedSubagentTerminalStatus(terminal.status) !== null) {
                 yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
               }
               yield* Ref.set(rootRunFinalized, true);

@@ -308,6 +308,7 @@ const settledLeafNodeKinds: ReadonlySet<ProjectionNode["kind"]> = new Set([
 ]);
 const settledNodeStatuses: ReadonlySet<ProjectionNode["status"]> = new Set([
   "completed",
+  "forced",
   "interrupted",
   "failed",
   "cancelled",
@@ -584,12 +585,17 @@ function needsRecovery(
             projection.runs.some(
               (run) =>
                 run.delegatedTaskId === task.id &&
-                ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
-                  run.status,
-                ),
+                [
+                  "completed",
+                  "forced",
+                  "interrupted",
+                  "failed",
+                  "cancelled",
+                  "rolled_back",
+                ].includes(run.status),
             ),
         ) ||
-          (["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+          (["completed", "forced", "interrupted", "failed", "cancelled", "rolled_back"].includes(
             latestUnheldRun(projection.runs)?.status ?? "idle",
           ) &&
             ![...projection.contextTransfers, ...(parent?.contextTransfers ?? [])].some(
@@ -1631,6 +1637,7 @@ function shellStatusFromStoredRunStatus(status: string | null): OrchestrationV2S
     case "running":
     case "waiting":
     case "completed":
+    case "forced":
     case "interrupted":
     case "failed":
     case "cancelled":
@@ -3041,7 +3048,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 filter?.omitSettledLeafNodes === true
                   ? sql`AND NOT (
                       node.kind IN ('tool_call', 'assistant_message', 'reasoning')
-                      AND node.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                      AND node.status IN ('completed', 'forced', 'interrupted', 'failed', 'cancelled', 'rolled_back')
                       AND node.run_id IS NOT NULL
                       AND NOT EXISTS (
                         SELECT 1 FROM orchestration_v2_projection_runs AS run
@@ -3649,7 +3656,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     JOIN orchestration_v2_projection_subagents AS task
                       ON task.subagent_id = json_extract(requested.payload_json, '$.delegatedTaskId')
                     WHERE requested.thread_id = child.thread_id
-                      AND requested.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                      AND requested.status IN ('completed', 'forced', 'interrupted', 'failed', 'cancelled', 'rolled_back')
                       AND task.child_thread_id = child.thread_id
                       AND json_extract(task.payload_json, '$.origin') = 'app_owned'
                       AND json_extract(task.payload_json, '$.result') IS NULL
@@ -3659,7 +3666,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                      WHERE thread_id = child.thread_id
                        AND NOT (status = 'queued' AND json_extract(payload_json, '$.queueHeld') IS 1)
                      ORDER BY ordinal DESC LIMIT 1
-                    ) IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                    ) IN ('completed', 'forced', 'interrupted', 'failed', 'cancelled', 'rolled_back')
                     AND NOT EXISTS (
                     SELECT 1 FROM orchestration_v2_projection_context_transfers
                     WHERE source_thread_id = child.thread_id

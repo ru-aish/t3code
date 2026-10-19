@@ -143,8 +143,8 @@ function EnvironmentNotifications({
           : null;
       const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
       const completion =
-        status === "ready" &&
-        thread.latestRun?.status === "completed" &&
+        (status === "ready" || status === "forced") &&
+        (thread.latestRun?.status === "completed" || thread.latestRun?.status === "forced") &&
         Number.isFinite(completedAt)
           ? completedAt
           : (prior?.completion ?? null);
@@ -159,7 +159,9 @@ function EnvironmentNotifications({
       if (!kind) continue;
       const title =
         kind === "completion"
-          ? "Thread completed"
+          ? thread.latestRun?.status === "forced"
+            ? "Thread forced"
+            : "Thread completed"
           : status === "approval"
             ? "Approval needed"
             : status === "limited"

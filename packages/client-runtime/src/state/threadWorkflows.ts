@@ -12,7 +12,7 @@ type Message = Projection["messages"][number];
 type ProviderSession = Projection["providerSessions"][number];
 
 const ACTIVE_RUN_STATUSES = new Set<Run["status"]>(["preparing", "starting", "running", "waiting"]);
-const MERGE_BACK_RUN_STATUSES = new Set<Run["status"]>(["waiting", "completed"]);
+const MERGE_BACK_RUN_STATUSES = new Set<Run["status"]>(["waiting", "completed", "forced"]);
 const MERGE_BACK_BLOCKING_RUN_STATUSES = new Set<Run["status"]>([
   "preparing",
   "starting",

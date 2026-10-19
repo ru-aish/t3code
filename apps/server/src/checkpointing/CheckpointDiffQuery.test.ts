@@ -95,6 +95,31 @@ it.effect("computes V2 run diffs from projected checkpoint scopes", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("includes ready checkpoints from forced runs", () => {
+  const projection = makeProjection();
+  const diffCheckpoints = vi.fn((_input: CheckpointStore.DiffCheckpointsInput) =>
+    Effect.succeed("forced diff"),
+  );
+  const layer = layerFor({
+    projection: Effect.succeed({
+      ...projection,
+      runs: projection.runs.map((run) =>
+        run.id === secondRunId ? { ...run, status: "forced" as const } : run,
+      ),
+    }),
+    diffCheckpoints,
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const result = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
+
+    assert.equal(result.diff, "forced diff");
+    assert.equal(result.toTurnCount, 2);
+    assert.equal(diffCheckpoints.mock.calls.length, 1);
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("leaves Git imports out of large turn diffs", () => {
   const ownPaths = Array.from({ length: 1_000 }, (_, index) => `src/module-${index}/file.ts`);
   const diffCheckpoints = vi.fn((input: CheckpointStore.DiffCheckpointsInput) =>

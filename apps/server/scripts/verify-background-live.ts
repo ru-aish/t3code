@@ -363,7 +363,9 @@ try {
       return (
         acknowledged &&
         projection.runs.every((run) =>
-          ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(run.status),
+          ["completed", "forced", "failed", "cancelled", "interrupted", "rolled_back"].includes(
+            run.status,
+          ),
         )
       );
     };

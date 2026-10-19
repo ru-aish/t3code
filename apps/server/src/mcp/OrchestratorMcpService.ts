@@ -322,6 +322,7 @@ function taskStatusForRun(
     case "waiting":
       return "waiting";
     case "completed":
+    case "forced":
       return "completed";
     case "failed":
       return "failed";

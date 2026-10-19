@@ -92,7 +92,9 @@ export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean 
   }
   if (
     shell.snoozedAt != null &&
-    (latestRun?.state === "completed" || latestRun?.status === "completed") &&
+    (latestRun?.state === "completed" ||
+      latestRun?.status === "completed" ||
+      latestRun?.status === "forced") &&
     latestRun.completedAt != null &&
     Date.parse(latestRun.completedAt) > Date.parse(shell.snoozedAt)
   ) {
@@ -148,7 +150,9 @@ export function threadWokeAt(
     const runtime = shell.runtime ?? shell.session ?? null;
     if (
       shell.snoozedAt != null &&
-      (latestRun?.state === "completed" || latestRun?.status === "completed") &&
+      (latestRun?.state === "completed" ||
+        latestRun?.status === "completed" ||
+        latestRun?.status === "forced") &&
       latestRun.completedAt != null &&
       Date.parse(latestRun.completedAt) > Date.parse(shell.snoozedAt)
     ) {

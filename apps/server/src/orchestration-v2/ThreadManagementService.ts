@@ -115,7 +115,7 @@ export function existingThreadIdsForCommand(
 
 export type ThreadManagementTerminalRunStatus = Extract<
   OrchestrationV2Run["status"],
-  "completed" | "failed" | "cancelled" | "interrupted" | "rolled_back"
+  "completed" | "forced" | "failed" | "cancelled" | "interrupted" | "rolled_back"
 >;
 
 export interface ThreadManagementSendInput {
@@ -455,6 +455,7 @@ export function isTerminalRunStatus(
 ): status is ThreadManagementTerminalRunStatus {
   return (
     status === "completed" ||
+    status === "forced" ||
     status === "failed" ||
     status === "cancelled" ||
     status === "interrupted" ||

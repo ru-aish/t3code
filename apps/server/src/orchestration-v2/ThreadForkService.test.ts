@@ -128,6 +128,7 @@ const planFork = (sourceRun: OrchestrationV2Run) =>
 
 it("treats usage-limited and other provider-finished runs as forkable", () => {
   assert.isTrue(ThreadForkService.isForkableSourceRunStatus("completed"));
+  assert.isTrue(ThreadForkService.isForkableSourceRunStatus("forced"));
   assert.isTrue(ThreadForkService.isForkableSourceRunStatus("waiting"));
   assert.isTrue(ThreadForkService.isForkableSourceRunStatus("failed"));
   assert.isTrue(ThreadForkService.isForkableSourceRunStatus("interrupted"));

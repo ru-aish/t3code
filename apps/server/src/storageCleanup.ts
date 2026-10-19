@@ -112,6 +112,7 @@ export function storageCleanupThreadIdle(thread: OrchestrationV2ThreadShell, now
     thread.activeRunId === null &&
     (thread.status === "idle" ||
       thread.status === "completed" ||
+      thread.status === "forced" ||
       thread.status === "interrupted" ||
       thread.status === "failed" ||
       thread.status === "cancelled" ||
