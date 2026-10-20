@@ -3,6 +3,8 @@ import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudge
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
+  ContextHandoffId,
+  ContextTransferId,
   type ChatAttachment,
   EventId,
   MessageId,
@@ -21,11 +23,14 @@ import {
   TurnItemId,
   ProviderDriverKind,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -3539,3 +3544,155 @@ describe("orchestration v2 provider switching", () => {
     ),
   );
 });
+
+
+it.live("replays persisted legacy child handoffs without sending their summaries to the provider", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temp = yield* fs.makeTempDirectoryScoped({ prefix: "t3-legacy-handoff-replay-" });
+      const cwd = yield* checkpointWorkspace("legacy-handoff-disk-replay");
+      const databaseLayer = SqlitePersistence.layerFromPath(path.join(temp, "orchestration.sqlite")).pipe(
+        Layer.provide(NodeServices.layer),
+      );
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const registry = ProviderAdapterRegistry.layerFromAdapters([
+        makeTestAdapter({
+          instanceId: CODEX_MODEL_SELECTION.instanceId,
+          driver: CODEX_DRIVER,
+          capabilities: CodexProviderCapabilitiesV2,
+          modelSelection: CODEX_MODEL_SELECTION,
+          responseByRunOrdinal: { 1: "Genuine initial provider context", 3: "After restart result" },
+          capturedTurns,
+        }),
+        makeTestAdapter({
+          instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+          driver: CLAUDE_DRIVER,
+          capabilities: ClaudeProviderCapabilitiesV2,
+          modelSelection: CLAUDE_MODEL_SELECTION,
+          responseByRunOrdinal: { 2: "Provider accepted clean input" },
+          capturedTurns,
+          injectedHistory,
+        }),
+      ]);
+      const scenario = { name: "persisted-legacy-child-handoff", runtimePolicyOverride: { cwd } };
+      const layer = (runEffectWorker: boolean) =>
+        ProviderReplayHarness.layerWithRegistry(scenario, registry, {
+          databaseLayer,
+          runEffectWorker,
+          recoverOnStartup: runEffectWorker,
+        });
+      const dispatch = (selection: ModelSelection, ordinal: number) =>
+        Orchestrator.OrchestratorV2.use((orchestrator) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("persisted-legacy:" + ordinal),
+            threadId: ThreadId.make("thread:persisted-legacy-result"),
+            messageId: MessageId.make("message:persisted-legacy:" + ordinal),
+            createdBy: "user",
+            creationSource: "web",
+            text: ordinal === 1 ? "Initial context" : ordinal === 2 ? "Switch to Claude" : "Continue after restart",
+            attachments: [],
+            modelSelection: selection,
+            dispatchMode: { type: "start_immediately" },
+          }),
+        );
+      const targetThread = ThreadId.make("thread:persisted-legacy-result");
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("persisted-legacy:create"),
+          threadId: targetThread,
+          projectId: ProjectId.make("project:persisted-legacy"),
+          createdBy: "user",
+          creationSource: "web",
+          title: "Persisted legacy acceptance",
+          modelSelection: CODEX_MODEL_SELECTION,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* dispatch(CODEX_MODEL_SELECTION, 1);
+        yield* orchestrator.streamStoredEvents.pipe(
+          Stream.filter(({ event }) =>
+            event.type === "run.updated" && event.payload.ordinal === 1 && event.payload.status === "completed"),
+          Stream.runHead,
+        );
+        yield* worker.drain();
+        yield* dispatch(CLAUDE_MODEL_SELECTION, 2);
+        yield* orchestrator.streamStoredEvents.pipe(
+          Stream.filter(({ event }) =>
+            event.type === "run.updated" && event.payload.ordinal === 2 && event.payload.status === "completed"),
+          Stream.runHead,
+        );
+        yield* worker.drain();
+      }).pipe(Effect.provide(layer(true)));
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const projection = yield* orchestrator.getThreadProjection(targetThread);
+        const genuine = projection.contextHandoffs.find((handoff) => handoff.targetRunId === projection.runs[1]?.id);
+        const genuineTransfer = projection.contextTransfers.find((transfer) => transfer.type === "provider_handoff");
+        assert.isDefined(genuine);
+        assert.isDefined(genuineTransfer);
+        const now = yield* DateTime.now;
+        const legacy = Array.from({ length: 18 }, (_, i) => ({
+          ...genuine,
+          id: ("legacy-child-handoff:" + i) as typeof genuine.id,
+          targetRunId: i < 13 ? projection.runs[0]!.id : projection.runs[1]!.id,
+          summaryText: `CHILD_FULL_RESULT__` + "x".repeat(12000),
+          status: "ready" as const,
+          delivery: undefined,
+        }));
+        yield* sink.write({ events: legacy.flatMap((handoff, i) => [
+          {
+            id: EventId.make("event:legacy-child-handoff:" + i),
+            type: "context-handoff.updated" as const,
+            threadId: targetThread,
+            occurredAt: now,
+            payload: handoff,
+          },
+          {
+            id: EventId.make("event:legacy-child-transfer:" + i),
+            type: "context-transfer.created" as const,
+            threadId: targetThread,
+            occurredAt: now,
+            payload: {
+              ...genuineTransfer,
+              id: ContextTransferId.make("transfer:legacy-child:" + i),
+              type: "subagent_result" as const,
+              resolution: { strategy: "portable_context" as const, contextHandoffId: handoff.id },
+              status: i % 2 ? "consumed" as const : "pending" as const,
+            },
+          },
+        ]) });
+        const persisted = yield* orchestrator.getThreadProjection(targetThread);
+        assert.lengthOf(persisted.contextHandoffs.filter((h) => h.id.startsWith("legacy-child-handoff:")), 18);
+      }).pipe(Effect.provide(layer(false)));
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* dispatch(CLAUDE_MODEL_SELECTION, 3);
+        yield* orchestrator.streamStoredEvents.pipe(
+          Stream.filter(({ event }) => event.type === "run.updated" && event.payload.ordinal === 3 && event.payload.status === "completed"),
+          Stream.runHead,
+        );
+        yield* worker.drain();
+        const projection = yield* orchestrator.getThreadProjection(targetThread);
+        assert.equal(projection.runs.at(-1)?.status, "completed");
+        assert.lengthOf(projection.contextTransfers.filter((t) => t.type === "subagent_result"), 18);
+      }).pipe(Effect.provide(layer(true)));
+      const turns = yield* Ref.get(capturedTurns);
+      assert.lengthOf(turns, 3);
+      const received = JSON.stringify([turns[2], yield* Ref.get(injectedHistory)]);
+      assert.notInclude(received, "CHILD_FULL_RESULT_");
+      assert.include(received, "Genuine initial provider context");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
