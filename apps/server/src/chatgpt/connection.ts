@@ -42,7 +42,9 @@ export type TerminalEvent = {
     paused?: boolean | undefined;
     prompt?: string | undefined;
     processId?: string | undefined;
-    result?: string | undefined;
+    result?: string | { readonly status?: string; readonly exit_code?: number | null } | undefined;
+    status?: string | undefined;
+    exitCode?: number | null | undefined;
     url?: string;
   };
 };
@@ -281,7 +283,8 @@ export class ChatGPTConnection {
       let detail = raw.trim();
       try {
         const decoded = JSON.parse(raw) as { error?: unknown };
-        if (typeof decoded.error === "string" && decoded.error.trim()) detail = decoded.error.trim();
+        if (typeof decoded.error === "string" && decoded.error.trim())
+          detail = decoded.error.trim();
       } catch {}
       throw new Error(
         `Terminal MCP control request failed (${response.status})${detail ? `: ${detail}` : ""}`,
@@ -576,7 +579,8 @@ export class ChatGPTConnection {
     await this.persist();
     // A stop may have started during image upload or parent lookup. Join the
     // native barrier at submission, not just at send() entry.
-    const nativeSubmission = this.nativeStopBarrier.then(() => cdp.evaluate(`(async()=>{${rendererDiscovery}
+    const nativeSubmission = this.nativeStopBarrier.then(() =>
+      cdp.evaluate(`(async()=>{${rendererDiscovery}
       const resolved=await resolveClient();
       const key=Symbol.for('t3.chatgpt.streams.v1');window[key] ||= new Map();
       const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true};
@@ -595,8 +599,12 @@ export class ChatGPTConnection {
         Promise.resolve(handle).then(h=>{state.handle=h;},e=>emit('error',e));
         return {submitted:true};
       }catch(e){emit('error',e);throw e;}
-    })()`));
-    this.nativeStopBarrier = nativeSubmission.then(() => {}, () => {});
+    })()`),
+    );
+    this.nativeStopBarrier = nativeSubmission.then(
+      () => {},
+      () => {},
+    );
     await nativeSubmission;
     dispatch.state = "submitted";
     await this.persist();
