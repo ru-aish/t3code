@@ -43,7 +43,8 @@ jobs:
             apps/web/src/components/chat/ChatGPTThreadControls.test.tsx \
             apps/web/src/components/chat/ThreadDetailsPanel.test.tsx \
             apps/server/src/auth/RpcAuthorization.test.ts \
-            packages/client-runtime/src/state/commandPermissions.test.ts
+            packages/client-runtime/src/state/commandPermissions.test.ts \
+            packages/client-runtime/src/state/threadExecution.test.ts
       - name: Typecheck server and web
         run: vp run --filter t3 --filter @t3tools/web typecheck
       - name: Package AppImage

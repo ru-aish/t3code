@@ -267,8 +267,9 @@ const BACKGROUND_WORK_KINDS: Record<
 > = {
   subagent: { order: 0, singular: "subagent", plural: "subagents" },
   command: { order: 1, singular: "command", plural: "commands" },
-  monitor: { order: 2, singular: "monitor", plural: "monitors" },
-  background_task: { order: 3, singular: "background task", plural: "background tasks" },
+  process: { order: 2, singular: "process", plural: "processes" },
+  monitor: { order: 3, singular: "monitor", plural: "monitors" },
+  background_task: { order: 4, singular: "background task", plural: "background tasks" },
 };
 
 export interface PendingBackgroundWorkItem {
