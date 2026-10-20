@@ -19,6 +19,88 @@ const decodeThreadSend = Schema.decodeUnknownSync(
   Schema.fromJsonString(OrchestratorMcpThreadSendInput),
 );
 
+
+describe("CDP transport recovery", () => {
+
+  it("cleans pending commands after a synchronous WebSocket send failure", async () => {
+    class ThrowSocket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      static CLOSING = 2;
+      readyState = 1;
+      constructor() { super(); queueMicrotask(() => this.dispatchEvent(new Event("open"))); }
+      send() { throw new Error("send failed"); }
+      close() { this.readyState = 3; this.dispatchEvent(new Event("close")); }
+    }
+    vi.stubGlobal("WebSocket", ThrowSocket);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify([
+      { type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://127.0.0.1/test" },
+    ])));
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cdp-throw-"));
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234", controlEndpoint: "http://127.0.0.1:8022",
+      token: "test", environmentId: "test", providerId: "chatgpt",
+      threadId: "send-throw", cacheDir: directory,
+    });
+    try {
+      await expect(connection.health()).rejects.toThrow("send failed");
+      expect(Reflect.get(connection, "connecting")).toBeUndefined();
+    } finally {
+      connection.close();
+      fetch.mockRestore();
+      vi.unstubAllGlobals();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("rejects close before open and allows a subsequent successful connection", async () => {
+    const sockets: FakeSocket[] = [];
+    class FakeSocket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      static CLOSING = 2;
+      readyState = 0;
+      constructor() { super(); sockets.push(this); }
+      send(raw: string) {
+        const command = JSON.parse(raw);
+        queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ id: command.id, result: command.method === "Runtime.evaluate" ? { result: { value: true } } : {} }),
+        })));
+      }
+      close() { this.readyState = 3; this.dispatchEvent(new Event("close")); }
+      open() { this.readyState = 1; this.dispatchEvent(new Event("open")); }
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify([
+      { type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://127.0.0.1/test" },
+    ])));
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cdp-recovery-"));
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234", controlEndpoint: "http://127.0.0.1:8022",
+      token: "test", environmentId: "test", providerId: "chatgpt", threadId: "recovery",
+      cacheDir: directory,
+    });
+    try {
+      const first = connection.health();
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0]!.close();
+      await expect(first).rejects.toThrow("closed during handshake");
+      const concurrent = Array.from({ length: 24 }, () => connection.health());
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      sockets[1]!.open();
+      await Promise.all(concurrent);
+      expect(sockets).toHaveLength(2);
+      sockets[0]!.dispatchEvent(new Event("close"));
+      await connection.health();
+      expect(sockets).toHaveLength(2);
+    } finally {
+      connection.close();
+      fetch.mockRestore();
+      vi.unstubAllGlobals();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Conversation-scoped stop ordering", () => {
   it("does not submit a newer request before an earlier native stop settles", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "chatgpt-stop-order-"));
@@ -569,6 +651,10 @@ describe("ChatGPT handoff submission boundary", () => {
     const bindings: string[] = [];
     const sockets: EventTarget[] = [];
     class TestSocket extends EventTarget {
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+      readyState = 1;
       constructor() {
         super();
         sockets.push(this);
@@ -580,7 +666,7 @@ describe("ChatGPT handoff submission boundary", () => {
         queueMicrotask(() =>
           this.dispatchEvent(
             new MessageEvent("message", {
-              data: JSON.stringify({ id: command.id, result: {} }),
+              data: JSON.stringify({ id: command.id, result: command.method === "Runtime.evaluate" ? { result: { value: true } } : {} }),
             }),
           ),
         );
