@@ -360,7 +360,9 @@ describe("ProviderContinuationService", () => {
             Effect.flatMap((attempt) =>
               attempt === 0
                 ? Effect.fail(new Error("transient database failure") as never)
-                : Queue.offer(accepted, command.messageId).pipe(Effect.as({} as never)),
+                : command.type === "message.dispatch"
+                  ? Queue.offer(accepted, command.messageId).pipe(Effect.as({} as never))
+                  : Effect.die("Expected a process notification dispatch"),
             ),
           ),
       });

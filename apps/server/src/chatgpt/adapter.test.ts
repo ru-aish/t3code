@@ -38,6 +38,7 @@ const fakes = vi.hoisted(() => ({
     onStop?: () => void | Promise<void>;
     onSend?: (id: string) => void;
     state: string;
+    conversationId: string | null;
     conversationReads: number;
     options: { orchestrationCommand?: string | undefined };
   }>,
@@ -45,7 +46,7 @@ const fakes = vi.hoisted(() => ({
 vi.mock("./connection.ts", () => ({
   ChatGPTSubmissionNotStartedError: class ChatGPTSubmissionNotStartedError extends Error {},
   ChatGPTConnection: class {
-    conversationId = null;
+    conversationId: string | null = null;
     messages = [];
     callback?: (update: ChatGPTUpdate) => void;
     sent: string[] = [];
@@ -296,7 +297,7 @@ describe("ChatGPT task authority", () => {
   it.live("replaces a poisoned cached native conversation but fences active generation", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { session, fake, turnInput, requestId } = yield* fixture;
+        const { session, fake, turnInput, requestId, events } = yield* fixture;
         fake.conversationId = "poisoned";
         const oldThread = {
           ...turnInput.providerThread,
@@ -319,7 +320,11 @@ describe("ChatGPT task authority", () => {
         expect(refused._tag).toBe("ProviderAdapterTurnStartError");
         expect(fake.controls).not.toContain("reset");
         fake.callback?.({ kind: "complete", requestId, conversationId: "poisoned" });
-        yield* Effect.sleep("10 millis");
+        for (;;) {
+          const event = yield* Queue.take(events);
+          if (event.type === "provider_turn.updated" && event.providerTurn.status === "completed")
+            break;
+        }
         const replacement = yield* session.ensureThread(request);
         expect(fake.controls).toContain("reset");
         expect(replacement.id).toBe(oldThread.id);
