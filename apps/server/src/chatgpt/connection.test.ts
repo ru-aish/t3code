@@ -68,6 +68,68 @@ describe("Conversation-scoped stop ordering", () => {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
+  it("orders a stop arriving during conversation preparation before native submission", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "chatgpt-stop-mid-send-"));
+    try {
+      const connection = new ChatGPTConnection({
+        cdpEndpoint: "http://127.0.0.1:9234",
+        controlEndpoint: "http://127.0.0.1:8022",
+        token: "test",
+        environmentId: "test",
+        providerId: "chatgpt",
+        threadId: "thread",
+        cacheDir: directory,
+      });
+      await connection.adoptConversation("existing-conversation");
+      const parentEntered = Promise.withResolvers<void>();
+      const releaseParent = Promise.withResolvers<void>();
+      const stopEntered = Promise.withResolvers<void>();
+      const releaseStop = Promise.withResolvers<void>();
+      const prepared = Promise.withResolvers<void>();
+      const operations: string[] = [];
+      Object.assign(connection, {
+        persist: async () => {
+          const cache = Reflect.get(connection, "cache");
+          if (cache.dispatches["next-request"]?.state === "dispatching") prepared.resolve();
+        },
+        renderer: async () => ({
+          evaluate: async (expression: string) => {
+            if (expression.includes("const raw=await r.client.get(")) {
+              operations.push("parent-read");
+              parentEntered.resolve();
+              await releaseParent.promise;
+              return { current_node: "parent", gizmo_id: null };
+            }
+            if (expression.includes("await r.client.stopCompletion(")) {
+              operations.push("stop-start");
+              stopEntered.resolve();
+              await releaseStop.promise;
+              operations.push("stop-finish");
+              return true;
+            }
+            if (expression.includes("startCompletionStream")) {
+              operations.push("send");
+              return { submitted: true };
+            }
+            throw new Error("Unexpected CDP evaluation");
+          },
+        }),
+      });
+      const sending = connection.send("next-request", "next", "gpt-6-thinking", directory);
+      await parentEntered.promise;
+      const stopping = connection.stop();
+      await stopEntered.promise;
+      releaseParent.resolve();
+      await prepared.promise;
+      await Promise.resolve();
+      expect(operations).toEqual(["parent-read", "stop-start"]);
+      releaseStop.resolve();
+      await Promise.all([sending, stopping]);
+      expect(operations).toEqual(["parent-read", "stop-start", "stop-finish", "send"]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ChatGPT submission identity", () => {
