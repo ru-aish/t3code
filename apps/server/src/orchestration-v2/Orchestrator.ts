@@ -10118,46 +10118,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         targetThreadId: parentThreadId,
         type: "subagent_result",
       });
-      const childProviderThread =
-        childRun.providerThreadId === null
-          ? undefined
-          : childProjection.providerThreads.find(
-              (candidate) => candidate.id === childRun.providerThreadId,
-            );
-      const parentProviderThread =
-        parentRun?.providerThreadId === null || parentRun?.providerThreadId === undefined
-          ? undefined
-          : parentProjection.providerThreads.find(
-              (candidate) => candidate.id === parentRun.providerThreadId,
-            );
-      const resultHandoff: OrchestrationV2ContextHandoff | null =
-        parentRun === undefined ||
-        childProviderThread === undefined ||
-        parentProviderThread === undefined
-          ? null
-          : {
-              id: yield* idAllocator.allocate.contextHandoff({
-                threadId: parentThreadId,
-                fromProviderInstanceId: childRun.providerInstanceId,
-                toProviderInstanceId: parentRun.providerInstanceId,
-              }),
-              transferId: resultTransferId,
-              threadId: parentThreadId,
-              targetRunId: parentRun.id,
-              fromProviderThreadIds: [childProviderThread.id],
-              toProviderThreadId: parentProviderThread.id,
-              coveredRunOrdinals: {
-                from: childRun.ordinal,
-                to: childRun.ordinal,
-              },
-              strategy: "manual_context",
-              status: "ready",
-              summaryMessageId: result.messageId,
-              summaryText: result.text,
-              createdByProviderInstanceId: childRun.providerInstanceId,
-              createdAt: now,
-              updatedAt: now,
-            };
       const resultTransfer: OrchestrationV2ContextTransfer = {
         id: resultTransferId,
         type: "subagent_result",
@@ -10173,13 +10133,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           parentRun?.providerInstanceId ?? parentProjection.thread.providerInstanceId,
         targetRunId: parentRun?.id ?? null,
         status: "consumed",
-        resolution:
-          resultHandoff === null
-            ? null
-            : {
-                strategy: "portable_context",
-                contextHandoffId: resultHandoff.id,
-              },
+        resolution: null,
         createdBy: "system",
         error: null,
         createdAt: now,
@@ -10282,18 +10236,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   completedAt: now,
                   updatedAt: now,
                 },
-              },
-            ]),
-        ...(resultHandoff === null
-          ? []
-          : [
-              {
-                type: "context-handoff.updated" as const,
-                threadId: parentThreadId,
-                ...(parentRun === undefined ? {} : { runId: parentRun.id }),
-                providerInstanceId: childRun.providerInstanceId,
-                occurredAt: now,
-                payload: resultHandoff,
               },
             ]),
         {
