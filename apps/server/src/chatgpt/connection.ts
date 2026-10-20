@@ -320,12 +320,8 @@ export class ChatGPTConnection {
     await this.cdp.call("Runtime.addBinding", { name: this.binding });
     return this.cdp;
   }
-  private acceptRendererUpdate(update: ChatGPTUpdate, epoch = this.conversationEpoch) {
-    if (
-      epoch !== this.conversationEpoch ||
-      (update.requestId && this.retiredRequestIds.has(update.requestId))
-    )
-      return;
+  private acceptRendererUpdate(update: ChatGPTUpdate) {
+    if (update.requestId && this.retiredRequestIds.has(update.requestId)) return;
     const conversationChanged =
       update.conversationId !== null && update.conversationId !== this.cache.conversationId;
     if (update.conversationId) this.cache.conversationId = update.conversationId;
@@ -429,6 +425,10 @@ export class ChatGPTConnection {
     const binding = await this.control<TerminalBinding>("reset", {});
     if (binding.conversation_id !== null)
       throw new Error("Terminal control plane did not detach the native conversation");
+    // Renderer callbacks retain the binding name used at submission. Retiring
+    // that name also fences delayed updates which lack a known request ID.
+    this.binding = "__t3_chatgpt_" + NodeCrypto.randomUUID().replaceAll("-", "");
+    if (this.cdp) await this.cdp.call("Runtime.addBinding", { name: this.binding });
     for (const id of Object.keys(this.cache.dispatches)) this.retiredRequestIds.add(id);
     this.cache = { conversationId: null, messages: {}, dispatches: {}, handledEvents: [] };
     this.snapshotRead = undefined;

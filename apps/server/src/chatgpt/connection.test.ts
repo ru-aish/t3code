@@ -564,6 +564,90 @@ describe("ChatGPT handoff submission boundary", () => {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
+  it("ignores old renderer callbacks without request IDs after a native reset", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "chatgpt-wire-reset-"));
+    const bindings: string[] = [];
+    const sockets: EventTarget[] = [];
+    class TestSocket extends EventTarget {
+      constructor() {
+        super();
+        sockets.push(this);
+        queueMicrotask(() => this.dispatchEvent(new Event("open")));
+      }
+      send(raw: string) {
+        const command = JSON.parse(raw);
+        if (command.method === "Runtime.addBinding") bindings.push(command.params.name);
+        queueMicrotask(() =>
+          this.dispatchEvent(
+            new MessageEvent("message", {
+              data: JSON.stringify({ id: command.id, result: {} }),
+            }),
+          ),
+        );
+      }
+      close() {
+        this.dispatchEvent(new Event("close"));
+      }
+    }
+    vi.stubGlobal("WebSocket", TestSocket);
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            type: "page",
+            url: "https://chatgpt.com/",
+            webSocketDebuggerUrl: "ws://127.0.0.1/test",
+          },
+        ]),
+        { status: 200 },
+      ),
+    );
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "reset-wire",
+      cacheDir: directory,
+    });
+    try {
+      await connection.adoptConversation("poisoned");
+      await connection.health();
+      const oldBinding = bindings[0]!;
+      Object.assign(connection, { control: async () => ({ conversation_id: null }) });
+      await connection.resetNativeConversation();
+      const updates: ChatGPTUpdate[] = [];
+      connection.onUpdate((update) => updates.push(update));
+      const publish = (name: string, conversationId: string) =>
+        sockets[0]!.dispatchEvent(
+          new MessageEvent("message", {
+            data: JSON.stringify({
+              method: "Runtime.bindingCalled",
+              params: {
+                name,
+                payload: JSON.stringify({ kind: "complete", conversationId }),
+              },
+            }),
+          }),
+        );
+      publish(oldBinding, "poisoned");
+      await Reflect.get(connection, "deliveryBarrier");
+      expect(connection.conversationId).toBeNull();
+      expect(updates).toHaveLength(0);
+      expect(bindings[1]).not.toBe(oldBinding);
+      publish(bindings[1]!, "replacement");
+      await Reflect.get(connection, "deliveryBarrier");
+      expect(connection.conversationId).toBe("replacement");
+      expect(updates).toHaveLength(1);
+    } finally {
+      connection.close();
+      fetch.mockRestore();
+      vi.unstubAllGlobals();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a fresh native reset without terminal detachment, and fences retired streams", async () => {
     const directory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "chatgpt-handoff-reset-"),

@@ -809,7 +809,7 @@ export const makeChatGPTAdapter = (
               return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
                 driver: CHATGPT_DRIVER,
                 threadId: input.threadId,
-                providerThreadId: thread.id,
+                providerThreadId: active.turn.providerThreadId,
                 runId: active.input.runId,
               });
             binding = yield* attempt(() => connection.resetNativeConversation());
@@ -963,7 +963,13 @@ export const makeChatGPTAdapter = (
           ).pipe(
             Effect.mapError((error) =>
               error.cause instanceof ChatGPTSubmissionNotStartedError
-                ? new ChatGPTTurnNotSubmittedError(error)
+                ? new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: CHATGPT_DRIVER,
+                    threadId: input.threadId,
+                    providerThreadId: request.providerThread.id,
+                    runId: request.runId,
+                    cause: new ChatGPTTurnNotSubmittedError(error),
+                  })
                 : error,
             ),
             Effect.tapError(() =>
