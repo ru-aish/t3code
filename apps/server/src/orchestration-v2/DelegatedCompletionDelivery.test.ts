@@ -37,6 +37,8 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as Option from "effect/Option";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -104,7 +106,11 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  EffectOutbox.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
@@ -965,6 +971,14 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             now,
           });
           yield* orchestrator.recoverDelegatedTasks;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const obligation = yield* outbox.get(
+            `effect:delegated-completion:${child.taskId}:${child.childRunId}`,
+          );
+          assert.isTrue(Option.isSome(obligation));
+          if (Option.isSome(obligation)) {
+            assert.equal(obligation.value.request.type, "delegated-completion.dispatch");
+          }
           let firstWake = yield* requests.take;
           while (firstWake.threadId !== parentThreadId) firstWake = yield* requests.take;
           assert.equal(firstWake.delegatedCompletion?.parentRunId, parentRunId);

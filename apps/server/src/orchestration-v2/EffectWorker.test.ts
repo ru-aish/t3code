@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
+  type OrchestrationV2ThreadProjection,
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
@@ -161,6 +163,85 @@ function layerExecutorFor(input: {
     ),
   );
 }
+
+it.effect("replays one delegated completion obligation without a duplicate native dispatch", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const taskId = NodeId.make("node:mailbox-persisted-task");
+    const parentRunId = RunId.make("run:mailbox-persisted-parent");
+    const completionMessageId = MessageId.make("message:mailbox-persisted-completion");
+    const calls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const accepted = yield* Ref.make(false);
+    const layer = layerExecutorFor({
+      events: calls,
+      threads: {
+        getThreadRecords: () =>
+          Ref.get(accepted).pipe(
+            Effect.map(
+              (done) =>
+                ({
+                  thread: { archivedAt: null, deletedAt: null },
+                  runs: [
+                    {
+                      id: parentRunId,
+                      delegatedCompletion: {
+                        disposition: "open",
+                        delivery: {
+                          generation: 1,
+                          messageId: completionMessageId,
+                          taskIds: [taskId],
+                        },
+                      },
+                    },
+                  ],
+                  subagents: [
+                    {
+                      id: taskId,
+                      origin: "app_owned",
+                      runId: parentRunId,
+                      completionDelivery: { state: "claimed" },
+                    },
+                  ],
+                  messages: done ? [{ id: completionMessageId, runId: parentRunId }] : [],
+                  providerTurns: [],
+                }) as unknown as OrchestrationV2ThreadProjection,
+            ),
+          ),
+        dispatch: (command) =>
+          Effect.gen(function* () {
+            yield* Ref.update(calls, (old) => [...old, command.type]);
+            if (command.type === "message.dispatch") {
+              assert.equal(command.messageId, completionMessageId);
+              assert.include(command.text, String(taskId));
+              yield* Ref.set(accepted, true);
+            }
+            return { sequence: 1, storedEvents: [] };
+          }),
+      },
+    });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: `effect:delegated-completion:${taskId}`,
+      commandId: CommandId.make(`command:delegated-completion:${taskId}`),
+      threadId,
+      request: { type: "delegated-completion.dispatch", taskId },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute(effect);
+      yield* executor.execute({ ...effect, attemptCount: 2 });
+    }).pipe(Effect.provide(layer));
+    assert.deepEqual(yield* Ref.get(calls), ["message.dispatch"]);
+  }),
+);
 
 it("does not retry pure interrupt races where the turn is already gone", () => {
   assert.isTrue(

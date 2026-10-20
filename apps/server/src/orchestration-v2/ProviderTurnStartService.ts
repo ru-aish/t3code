@@ -28,6 +28,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventSink from "./EventSink.ts";
+import { mailboxMessageAtSend } from "./NotificationMailbox.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
@@ -1137,6 +1138,21 @@ export const layer: Layer.Layer<
               }),
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
+          // A queued mailbox message can absorb other completed children while
+          // provider setup runs. Snapshot its committed payload at the actual
+          // send boundary, never from the earlier turn-start projection.
+          const latestMessage =
+            message.delegatedCompletion === undefined
+              ? undefined
+              : yield* projectionStore.getRunMessage(input.threadId, run.id);
+          const effectiveMessage = mailboxMessageAtSend(message, latestMessage);
+          const finalUserText =
+            effectiveMessage === message
+              ? userText
+              : projectComposerContextForProvider({
+                  text: effectiveMessage.text,
+                  records: effectiveMessage.context?.records ?? [],
+                });
           const start = compact ? session.compactThread! : session.startTurn;
           const context = [delivery.context, restartNote]
             .filter((part) => part !== "")
@@ -1146,7 +1162,8 @@ export const layer: Layer.Layer<
             ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
-              text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
+              text:
+                context === "" ? finalUserText : `${context}\n\nUser message:\n${finalUserText}`,
             },
           }).pipe(
             // A pending marker would make the next turn abandon this native

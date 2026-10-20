@@ -10187,7 +10187,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         consumedAt: now,
       };
 
-      yield* writeSystemEvents([
+      const completionEffects: ReadonlyArray<PendingOrchestrationEffectV2> =
+        completionPlan.task.completionDelivery?.state === "claimed"
+          ? [
+              {
+                // Persist one effect per terminal child in the same transaction as
+                // its result events. Process loss cannot drop this obligation.
+                id: `effect:delegated-completion:${task.id}:${childRun.id}`,
+                commandId: CommandId.make(`command:delegated-completion:${task.id}:${childRun.id}`),
+                threadId: parentThreadId,
+                request: { type: "delegated-completion.dispatch", taskId: task.id },
+              },
+            ]
+          : [];
+      const writeCompletionEvents = (events: Parameters<typeof writeSystemEvents>[0]) =>
+        writeSystemEvents(events, completionEffects);
+
+      yield* writeCompletionEvents([
         {
           type: "subagent.updated",
           threadId: parentThreadId,
