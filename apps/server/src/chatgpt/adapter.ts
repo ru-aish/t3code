@@ -251,6 +251,11 @@ export const makeChatGPTAdapter = (
           yield* attempt(() => connection.adoptConversation(binding.conversation_id!));
         let thread: OrchestrationV2ProviderThread | null = null;
         const pendingProcessEvents: TerminalEvent[] = [];
+        const flushPendingProcessEvents = Effect.gen(function* () {
+          for (const pending of pendingProcessEvents.splice(0)) {
+            yield* Queue.offer(incoming, { kind: "terminal", event: pending });
+          }
+        });
         let active: ActiveTurn | null = null;
         const outputTurns = new Map<string, ActiveTurn>();
         const messages = new Map<string, OrchestrationV2ConversationMessage>();
@@ -876,9 +881,7 @@ export const makeChatGPTAdapter = (
                 createdAt: timestamp,
                 updatedAt: timestamp,
               };
-          for (const pending of pendingProcessEvents.splice(0)) {
-            yield* Queue.offer(incoming, { kind: "terminal", event: pending });
-          }
+          yield* flushPendingProcessEvents;
           return thread;
         });
         const startTurn = Effect.fnUntraced(function* (
@@ -1004,8 +1007,9 @@ export const makeChatGPTAdapter = (
           events: Stream.fromQueue(events),
           ensureThread,
           resumeThread: ({ providerThread }) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               thread = providerThread;
+              yield* flushPendingProcessEvents;
               return providerThread;
             }),
           startTurn,

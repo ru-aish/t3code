@@ -80,9 +80,11 @@ export const layer = Layer.effectDiscard(
           ["messages", "runs", "providerTurns"],
           {
             messageIds:
-              request.delegatedCompletion === undefined
-                ? []
-                : [request.delegatedCompletion.messageId],
+              request.delegatedCompletion !== undefined
+                ? [request.delegatedCompletion.messageId]
+                : request.messageId !== undefined
+                  ? [request.messageId]
+                  : [],
           },
         );
         if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
@@ -100,6 +102,19 @@ export const layer = Layer.effectDiscard(
           } else if (request.dispatchIfCurrent !== undefined) {
             yield* request.dispatchIfCurrent(Effect.void);
           }
+          return;
+        }
+        if (
+          request.delegatedCompletion === undefined &&
+          request.messageId !== undefined &&
+          projection.messages.some((message) => message.id === request.messageId)
+        ) {
+          // Dispatch committed before its source event was acknowledged.
+          // Reconcile the durable receipt instead of creating another message.
+          if (request.dispatchIfCurrent !== undefined) {
+            yield* request.dispatchIfCurrent(Effect.void);
+          }
+          yield* clearRetryAttempt(`${request.threadId}:process:${request.messageId}`);
           return;
         }
         if (request.delegatedCompletion !== undefined) {
@@ -186,7 +201,13 @@ export const layer = Layer.effectDiscard(
             threadId: request.threadId,
             ordinal: projection.messages.length + 1,
           }));
-        const commandId = CommandId.make(`provider-continuation:${messageId}`);
+        const commandId =
+          request.messageId === undefined
+            ? CommandId.make(`provider-continuation:${messageId}`)
+            : yield* ids.allocate.command({
+                fixtureName: "durable-process-notification",
+                commandName: "dispatch",
+              });
         const dispatch = threads.dispatch({
           type: "message.dispatch",
           commandId,
