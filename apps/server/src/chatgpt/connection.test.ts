@@ -68,7 +68,7 @@ describe("CDP transport recovery", () => {
     }
   });
 
-  it("rejects inflight health on renderer close, then reconnects after negative health", async () => {
+  it.each(["close", "Runtime.executionContextsCleared", "Inspector.detached"])("notifies recovery and reconnects after %s without accepting stale disconnects", async (event) => {
     const sockets: Socket[] = [];
     class Socket extends EventTarget {
       static OPEN = 1;
@@ -98,14 +98,18 @@ describe("CDP transport recovery", () => {
       cdpEndpoint: "http://127.0.0.1:9234", controlEndpoint: "http://127.0.0.1:8022",
       token: "test", environmentId: "test", providerId: "chatgpt", threadId: "inflight", cacheDir: directory,
     });
+    const updates: ChatGPTUpdate[] = [];
+    connection.onUpdate((update) => updates.push(update));
+    const disconnect = (socket: Socket) => event === "close" ? socket.close() : socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ method: event, params: {} }) }));
     try {
       await connection.health();
       sockets[0]!.respond = false;
       const inflight = connection.health();
       const assertion = expect(inflight).rejects.toThrow("renderer disconnected");
       await Promise.resolve();
-      sockets[0]!.close();
+      disconnect(sockets[0]!);
       await assertion;
+      expect(updates.map((update) => update.kind)).toEqual(["disconnected"]);
       Socket.nextHealthy = false;
       const second = connection.health();
       const unhealthy = expect(second).rejects.toThrow("Authenticated ChatGPT client is unavailable");
@@ -115,11 +119,13 @@ describe("CDP transport recovery", () => {
       Socket.nextHealthy = true;
       await connection.health();
       expect(sockets).toHaveLength(3);
+      expect(updates.map((update) => update.kind)).toEqual(["disconnected", "disconnected"]);
       sockets[0]!.dispatchEvent(new Event("close"));
       await connection.health();
       expect(sockets).toHaveLength(3);
     } finally {
       connection.close();
+      expect(updates).toHaveLength(2);
       fetched.mockRestore();
       vi.unstubAllGlobals();
       await NodeFSP.rm(directory, { recursive: true, force: true });
@@ -680,6 +686,17 @@ describe("ChatGPT conversation reconciliation", () => {
         { kind: "complete", requestId: "request" },
       ]);
       expect(client.startCompletionStream).not.toHaveBeenCalled();
+      // GenUI may end with a hidden copy; recover the canonical visible answer.
+      Object.assign(snapshot.mapping, { hidden: {
+        parent: "final", message: { ...snapshot.mapping.final.message,
+          id: "hidden-ending", metadata: { is_visually_hidden_from_conversation: true },
+        },
+      } });
+      snapshot.current_node = "hidden";
+      expect(await connection.readCompletion("request")).toMatchObject([
+        { messageId: "native-final", text: "Recovered answer" }, { kind: "complete" },
+      ]);
+      snapshot.current_node = "final";
       snapshot.async_status = "running";
       expect(await connection.readCompletion("request")).toBeNull();
       snapshot.async_status = null;

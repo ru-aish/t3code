@@ -384,7 +384,14 @@ export const layerProduction = Layer.mergeAll(
   ),
   layerProviderContinuationWorkerProvided,
   ChatGPTActions.layerWorker.pipe(
-    Layer.provide(Layer.merge(ChatGPTActions.layer, layerOrchestratorProvided)),
+    Layer.provide(
+      Layer.mergeAll(
+        ChatGPTActions.layer,
+        layerOrchestratorProvided,
+        layerChatGPTThreadSyncProvided,
+      ),
+    ),
+    Layer.provide(layerProjectService),
   ),
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
