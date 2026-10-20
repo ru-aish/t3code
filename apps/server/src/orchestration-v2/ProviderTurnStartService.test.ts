@@ -1042,3 +1042,19 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+it("excludes only legacy child-result handoffs, preserving genuine history migration", () => {
+  const transfers = [
+    ...Array.from({ length: 18 }, (_, i) => ({
+      type: "subagent_result" as const,
+      resolution: { strategy: "portable_context" as const, contextHandoffId: "child-handoff-" + i },
+    })),
+    { type: "provider_handoff" as const, resolution: { strategy: "portable_context" as const, contextHandoffId: "migration" } },
+    { type: "subagent_result" as const, resolution: null },
+  ] as unknown as OrchestrationV2ThreadProjection["contextTransfers"];
+  const ignored = ProviderTurnStart.legacyAppOwnedResultHandoffIds(transfers);
+  expect(ignored.size).toBe(18);
+  expect(ignored.has("child-handoff-0" as never)).toBe(true);
+  expect(ignored.has("child-handoff-17" as never)).toBe(true);
+  expect(ignored.has("migration" as never)).toBe(false);
+});

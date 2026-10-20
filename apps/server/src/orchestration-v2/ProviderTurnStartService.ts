@@ -9,6 +9,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2ThreadProjection,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -52,6 +53,20 @@ import {
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
 } from "./RestartBackgroundNote.ts";
+
+/** Identify only handoffs linked to completed app-owned child transfers. */
+export const legacyAppOwnedResultHandoffIds = (
+  transfers: OrchestrationV2ThreadProjection["contextTransfers"],
+) =>
+  new Set(
+    transfers
+      .filter((transfer) => transfer.type === "subagent_result")
+      .map((transfer) =>
+        transfer.resolution !== null && "contextHandoffId" in transfer.resolution
+          ? transfer.resolution.contextHandoffId
+          : undefined)
+      .filter((id) => id !== undefined),
+  );
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
   "ProviderTurnStartError",
@@ -233,8 +248,10 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
+      const legacyChildHandoffIds = legacyAppOwnedResultHandoffIds(projection.contextTransfers);
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
+          !legacyChildHandoffIds.has(handoff.id) &&
           handoff.status === "ready" &&
           (handoff.targetRunId === run.id ||
             (handoff.toProviderThreadId === run.providerThreadId &&
@@ -644,6 +661,7 @@ export const layer: Layer.Layer<
         }
         const uncertainDelivery = projection.contextHandoffs.some(
           (handoff) =>
+            !legacyChildHandoffIds.has(handoff.id) &&
             handoff.toProviderThreadId === providerThread.id &&
             handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
             handoff.delivery?.status === "pending",
@@ -960,6 +978,7 @@ export const layer: Layer.Layer<
       );
       const settledHandoffs = projection.contextHandoffs.filter(
         (handoff) =>
+          !legacyChildHandoffIds.has(handoff.id) &&
           handoff.toProviderThreadId === providerThread.id &&
           handoff.delivery?.nativeThreadId === runningProviderThread.nativeThreadRef?.nativeId &&
           handoff.delivery?.status !== "pending",
