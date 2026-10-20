@@ -447,6 +447,62 @@ describe("ProviderContinuationService", () => {
     }),
   );
 
+  it.effect("retains an unacknowledged process event while its provider is disabled", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const acknowledged = yield* Ref.make(false);
+      const processMessageId = MessageId.make("process:disabled-then-enabled");
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () => Effect.succeed(projection),
+        dispatch: () =>
+          Ref.getAndUpdate(attempts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 0
+                ? Effect.fail(
+                    new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+                      projectId: ProjectId.make("project-disabled"),
+                      instanceId: ProviderInstanceId.make("instance-disabled"),
+                    }) as never,
+                  )
+                : Effect.succeed({} as never),
+            ),
+          ),
+      });
+      const worker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process completed",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            Effect.gen(function* () {
+              const value = yield* effect;
+              yield* Ref.set(acknowledged, true);
+              return Option.some(value);
+            }),
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 1);
+        assert.isFalse(yield* Ref.get(acknowledged));
+        yield* TestClock.adjust("100 millis");
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 2);
+        assert.isTrue(yield* Ref.get(acknowledged));
+      }).pipe(
+        Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("backs off repeated delegated completion dispatch failures", () => {
     return Effect.gen(function* () {
       const attempts = yield* Ref.make(0);
