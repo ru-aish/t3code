@@ -2909,6 +2909,129 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("retries a durable delegated completion after seven failures without restart", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const workerId = "mailbox-continuation-retry-worker";
+      const effectId = "effect:mailbox-retry-through-seventh-failure";
+      const threadId = ThreadId.make("thread:mailbox-retry-through-seventh-failure");
+      const taskId = NodeId.make("node:mailbox-retry-through-seventh-failure");
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make("command:mailbox-retry-through-seventh-failure"),
+          threadId,
+          request: { type: "delegated-completion.dispatch", taskId },
+        },
+      ]);
+      const attempts = yield* Ref.make<ReadonlyArray<number>>([]);
+      const retryFlags = yield* Ref.make<ReadonlyArray<boolean>>([]);
+      const executor = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({
+          execute: (effect, options) =>
+            Effect.gen(function* () {
+              yield* Ref.update(attempts, (counts) => [...counts, effect.attemptCount]);
+              yield* Ref.update(retryFlags, (flags) => [...flags, options?.willRetry ?? false]);
+              if (effect.attemptCount <= 7) {
+                return yield* new EffectWorker.OrchestrationEffectExecutionError({
+                  effectId,
+                  effectType: effect.request.type,
+                  cause: "simulated transient mailbox delivery failure",
+                });
+              }
+            }),
+        }),
+      );
+      const workerLayer = EffectWorker.layerWithOptions({
+        workerId,
+        maxAttempts: 5,
+      }).pipe(
+        Layer.provide(Layer.merge(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox), executor)),
+      );
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        for (let attempt = 1; attempt <= 8; attempt += 1) {
+          if (attempt > 1) {
+            assert.isFalse(yield* worker.runOnce);
+            const previousAttempt = attempt - 1;
+            const backoffMs = Math.min(30_000, 100 * 2 ** (previousAttempt - 1));
+            yield* TestClock.adjust(Duration.millis(backoffMs));
+          }
+          assert.isTrue(yield* worker.runOnce);
+          const record = yield* outbox.get(effectId);
+          assert.isTrue(Option.isSome(record));
+          if (Option.isSome(record)) {
+            assert.equal(record.value.attemptCount, attempt);
+            assert.equal(record.value.status, attempt === 8 ? "succeeded" : "pending");
+          }
+        }
+        assert.deepEqual(yield* Ref.get(attempts), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert.deepEqual(
+          yield* Ref.get(retryFlags),
+          Array.from({ length: 8 }, () => true),
+        );
+        assert.isFalse(yield* worker.runOnce);
+      }).pipe(Effect.provide(workerLayer));
+    }),
+  );
+
+  it.effect("cancels a retrying delegated completion instead of reviving it", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const workerId = "mailbox-cancel-retry-worker";
+      const effectId = "effect:mailbox-retry-cancelled";
+      const threadId = ThreadId.make("thread:mailbox-retry-cancelled");
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make("command:mailbox-retry-cancelled"),
+          threadId,
+          request: {
+            type: "delegated-completion.dispatch",
+            taskId: NodeId.make("node:mailbox-retry-cancelled"),
+          },
+        },
+      ]);
+      const attempts = yield* Ref.make(0);
+      const executor = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({
+          execute: (effect) =>
+            Ref.update(attempts, (count) => count + 1).pipe(
+              Effect.andThen(
+                new EffectWorker.OrchestrationEffectExecutionError({
+                  effectId,
+                  effectType: effect.request.type,
+                  cause: "temporarily unable to dispatch",
+                }),
+              ),
+            ),
+        }),
+      );
+      const workerLayer = EffectWorker.layerWithOptions({ workerId, maxAttempts: 1 }).pipe(
+        Layer.provide(Layer.merge(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox), executor)),
+      );
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        assert.isTrue(yield* worker.runOnce);
+        const cancelled = yield* outbox.cancelUnsettled({
+          threadId,
+          effectTypes: ["delegated-completion.dispatch"],
+          reason: "Parent thread was disposed",
+        });
+        assert.deepEqual(cancelled, [effectId]);
+        yield* outbox.signalCancellations(cancelled);
+        yield* TestClock.adjust("10 minutes");
+        assert.isFalse(yield* worker.runOnce);
+        assert.equal(yield* Ref.get(attempts), 1);
+        const record = yield* outbox.get(effectId);
+        assert.isTrue(Option.isSome(record));
+        if (Option.isSome(record)) assert.equal(record.value.status, "cancelled");
+      }).pipe(Effect.provide(workerLayer));
+    }),
+  );
+
   it.effect.each([
     { type: "terminal.cleanup" },
     { type: "provider-runtime.continue", sourceRunId: RunId.make("run:restart-replay") },
