@@ -335,6 +335,29 @@ describe("ChatGPT interruption", () => {
     );
   });
 
+  it("clears the cancellation marker when every stop mechanism fails", async () => {
+    await withHarness(
+      {
+        stopCompletion: vi.fn(async () => {
+          throw new Error("native stop failed");
+        }),
+        startCompletionStream: () => Promise.resolve({}),
+      },
+      async ({ connection, window, stopCompletion, cancelStream, directory }) => {
+        await connection.adoptConversation("conversation");
+        await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        await expect(connection.stop("request")).rejects.toThrow("native stop failed");
+
+        expect(stopCompletion).toHaveBeenCalledOnce();
+        expect(cancelStream).not.toHaveBeenCalled();
+        const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
+        expect(cancelled.has("request")).toBe(false);
+      },
+    );
+  });
+
   it("keeps a successful native stop successful when local stream cleanup fails", async () => {
     await withHarness(
       {
@@ -509,7 +532,7 @@ describe("ChatGPT interruption", () => {
         },
       ],
     ]);
-    await withHarness({ streams }, async ({ connection, stopCompletion, cancelStream }) => {
+    await withHarness({ streams }, async ({ connection, window, stopCompletion, cancelStream }) => {
       await loadDispatches(connection, {
         "request-a": { messageId: stableMessageId("request-a"), state: "submitted" },
         "request-b": { messageId: stableMessageId("request-b"), state: "dispatching" },
@@ -520,11 +543,13 @@ describe("ChatGPT interruption", () => {
       );
       expect(stopCompletion).not.toHaveBeenCalled();
       expect(cancelStream).not.toHaveBeenCalled();
+      const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
+      expect(cancelled.has("request-a")).toBe(false);
     });
   });
 
   it("does not use cached fallback while another request is dispatching", async () => {
-    await withHarness({}, async ({ connection, stopCompletion, cancelStream }) => {
+    await withHarness({}, async ({ connection, window, stopCompletion, cancelStream }) => {
       await loadDispatches(connection, {
         "request-a": { messageId: stableMessageId("request-a"), state: "submitted" },
         "request-b": { messageId: stableMessageId("request-b"), state: "dispatching" },
@@ -533,11 +558,13 @@ describe("ChatGPT interruption", () => {
       await expect(connection.stop("request-a")).rejects.toThrow("renderer state is unavailable");
       expect(stopCompletion).not.toHaveBeenCalled();
       expect(cancelStream).not.toHaveBeenCalled();
+      const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
+      expect(cancelled.has("request-a")).toBe(false);
     });
   });
 
   it("fails closed when a dispatching request loses renderer state", async () => {
-    await withHarness({}, async ({ connection, stopCompletion, cancelStream }) => {
+    await withHarness({}, async ({ connection, window, stopCompletion, cancelStream }) => {
       await loadDispatches(connection, {
         request: { messageId: stableMessageId("request"), state: "dispatching" },
       });
@@ -545,6 +572,8 @@ describe("ChatGPT interruption", () => {
       await expect(connection.stop("request")).rejects.toThrow("renderer state is unavailable");
       expect(stopCompletion).not.toHaveBeenCalled();
       expect(cancelStream).not.toHaveBeenCalled();
+      const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
+      expect(cancelled.has("request")).toBe(false);
     });
   });
 

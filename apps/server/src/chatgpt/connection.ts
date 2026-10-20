@@ -620,17 +620,18 @@ export class ChatGPTConnection {
     await cdp.evaluate(
       `(async()=>{${rendererDiscovery}
 const cancelKey=Symbol.for('t3.chatgpt.cancelled.v1');window[cancelKey] ||= new Set();window[cancelKey].add(${JSON.stringify(requestId)});
+const fail=(error)=>{window[cancelKey].delete(${JSON.stringify(requestId)});throw error;};
 const state=window[Symbol.for('t3.chatgpt.streams.v1')]?.get(${JSON.stringify(this.options.threadId)});
 const stateMatches=state?.requestId===${JSON.stringify(requestId)};
 const dispatchState=${JSON.stringify(dispatchState)};
 const cachedConversationId=${JSON.stringify(cachedConversationId)};
 if(state&&!stateMatches){
   if(dispatchState==='prepared')return true;
-  throw new Error('Cannot stop the requested ChatGPT generation while another request owns the renderer stream');
+  fail(new Error('Cannot stop the requested ChatGPT generation while another request owns the renderer stream'));
 }
 if(!state&&!cachedConversationId){
   if(dispatchState==='prepared'||dispatchState===undefined)return true;
-  throw new Error('Cannot confirm ChatGPT cancellation because renderer state is unavailable');
+  fail(new Error('Cannot confirm ChatGPT cancellation because renderer state is unavailable'));
 }
 const conversationId=(stateMatches?state.conversationId:null)||cachedConversationId;
 const handlePromise=stateMatches?(state.handlePromise||(state.handle?Promise.resolve(state.handle):null)):null;
@@ -666,8 +667,8 @@ let streamCancelled=false;
 if(stateMatches&&state.handle?.streamRequestId)streamCancelled=await cancelHandle();
 else if(handlePending)void cancelHandle();
 if(!nativeStopped&&!streamCancelled&&!startupAborted){
-  if(nativeError)throw nativeError;
-  throw new Error('Cannot stop a generation before its conversation or stream identity is known');
+  if(nativeError)fail(nativeError);
+  fail(new Error('Cannot stop a generation before its conversation or stream identity is known'));
 }
 window[cancelKey].delete(${JSON.stringify(requestId)});
 if(stateMatches)state.active=false;
