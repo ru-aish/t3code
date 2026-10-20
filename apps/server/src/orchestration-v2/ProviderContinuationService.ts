@@ -244,7 +244,11 @@ export const layer = Layer.effectDiscard(
             instanceId: error.instanceId,
           }).pipe(
             Effect.andThen(
-              request.clearIfCurrent !== undefined ? request.clearIfCurrent() : Effect.void,
+              request.messageId !== undefined && request.delegatedCompletion === undefined
+                ? Effect.fail(error)
+                : request.clearIfCurrent !== undefined
+                  ? request.clearIfCurrent()
+                  : Effect.void,
             ),
           );
         if (request.dispatchIfCurrent === undefined) {
