@@ -16,6 +16,7 @@ import {
   orchestrationEffectClaimsTotal,
   orchestrationEffectQueueWait,
 } from "../observability/Metrics.ts";
+import { delegatedCompletionWakeDetail } from "./delegatedCompletionWake.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -144,11 +145,7 @@ export const layerExecutor: Layer.Layer<
               const current = currentDelivery(projection);
               if (current === undefined) return;
               const { parentRunId, delivery } = current;
-              const taskList = delivery.taskIds.join(", ");
-              const prompt =
-                delivery.taskIds.length === 1
-                  ? `Delegated task ${taskList} reached a terminal state. Use task_status with taskId ${taskList} to read the result.`
-                  : `Delegated tasks ${taskList} reached terminal states. Use task_status with each taskId to read the results.`;
+              const prompt = delegatedCompletionWakeDetail(delivery.taskIds);
               // A rejected dispatch receipt must not poison retries. The effect
               // identity stays stable while each actual attempt has a fresh ID.
               const commandId = CommandId.make(

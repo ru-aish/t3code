@@ -249,6 +249,12 @@ it.effect("retains a disabled-provider obligation until delivery is accepted", (
   Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);
     const taskId = NodeId.make("node:disabled-provider-task");
+    const taskIds = [
+      taskId,
+      ...Array.from({ length: 79 }, (_, i) =>
+        NodeId.make(`node:recovered-${i}-${"x".repeat(150)}`),
+      ),
+    ];
     const parentRunId = RunId.make("run:disabled-provider-parent");
     const messageId = MessageId.make("message:disabled-provider-completion");
     const enabled = yield* Ref.make(false);
@@ -268,7 +274,7 @@ it.effect("retains a disabled-provider obligation until delivery is accepted", (
                       id: parentRunId,
                       delegatedCompletion: {
                         disposition: "open",
-                        delivery: { generation: 1, messageId, taskIds: [taskId] },
+                        delivery: { generation: 1, messageId, taskIds },
                       },
                     },
                   ],
@@ -297,6 +303,8 @@ it.effect("retains a disabled-provider obligation until delivery is accepted", (
                   },
                 );
               assert.equal(command.messageId, messageId);
+              assert.isBelow(command.text.length, 600);
+              assert.deepEqual(command.delegatedCompletion?.taskIds, taskIds);
               yield* Ref.set(accepted, true);
             }
             return { sequence: 1, storedEvents: [] };
