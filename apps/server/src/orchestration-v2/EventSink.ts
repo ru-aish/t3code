@@ -4,6 +4,7 @@ import {
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
+  OrchestrationV2ProviderTurnJson,
   ProviderThreadId,
   RunAttemptId,
   RunId,
@@ -33,6 +34,10 @@ import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+
+const decodeProviderTurnPayload = Schema.decodeEffect(
+  Schema.fromJsonString(OrchestrationV2ProviderTurnJson),
+);
 
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
   "EventSinkWriteError",
@@ -78,6 +83,8 @@ export interface EventSinkV2Shape {
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
+    /** Settle only an already-recorded provider turn when steering has replaced its attempt. */
+    readonly allowHistoricalProviderTurnSettlement?: boolean;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly threadId: ThreadId;
@@ -421,6 +428,59 @@ const layerBase: Layer.Layer<
               current.status !== input.expectedStatus ||
               current.active_attempt_id !== input.activeAttemptId
             ) {
+              // Steering supersedes the attempt before asking its adapter to stop.
+              // Its stop confirmation must settle the old turn, without admitting
+              // stale output, run state, or effects into the replacement attempt.
+              const terminalEvents: Array<OrchestrationV2DomainEvent> = [];
+              if (
+                current !== undefined &&
+                input.allowHistoricalProviderTurnSettlement === true &&
+                (input.effects?.length ?? 0) === 0
+              ) {
+                for (const event of input.events) {
+                  if (
+                    event.type !== "provider-turn.updated" ||
+                    event.threadId !== input.threadId ||
+                    event.payload.runAttemptId !== input.activeAttemptId ||
+                    event.payload.status === "running" ||
+                    event.payload.completedAt === null
+                  )
+                    continue;
+                  const turns = yield* sql<{ readonly payload_json: string }>`
+                    SELECT t.payload_json
+                    FROM orchestration_v2_projection_provider_turns t
+                    JOIN orchestration_v2_projection_run_attempts a
+                      ON a.attempt_id = t.run_attempt_id AND a.thread_id = t.thread_id
+                    WHERE t.thread_id = ${input.threadId}
+                      AND t.provider_turn_id = ${event.payload.id}
+                      AND t.provider_thread_id = ${event.payload.providerThreadId}
+                      AND t.node_id = ${event.payload.nodeId}
+                      AND t.run_attempt_id = ${input.activeAttemptId}
+                      AND a.run_id = ${input.runId}
+                      AND a.root_node_id = t.node_id
+                      AND t.status = 'running'
+                    LIMIT 1
+                  `;
+                  if (turns[0] === undefined) continue;
+                  const recorded = yield* decodeProviderTurnPayload(turns[0].payload_json);
+                  terminalEvents.push({
+                    ...event,
+                    payload: {
+                      ...recorded,
+                      status: event.payload.status,
+                      completedAt: event.payload.completedAt,
+                    },
+                  });
+                }
+              }
+              if (terminalEvents.length > 0) {
+                const storedEvents = yield* eventStore.append({
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  events: yield* normalizeEvents(terminalEvents),
+                });
+                yield* applyStoredEvents(storedEvents);
+                return { committed: true as const, storedEvents };
+              }
               return {
                 committed: false as const,
                 storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,

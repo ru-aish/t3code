@@ -12,6 +12,7 @@ import {
   ThreadId,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderTurnId,
   RunId,
   RunAttemptId,
   NodeId,
@@ -299,6 +300,75 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("ignores late output and completion from a steering-interrupted request", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, fake, turnInput, requestId, events } = yield* fixture;
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: ProviderTurnId.make("chatgpt:attempt"),
+        });
+        for (;;) {
+          const event = yield* Queue.take(events);
+          if (event.type === "turn.terminal") break;
+        }
+        const replacementId = MessageId.make("steering-request");
+        yield* session.startTurn({
+          ...turnInput,
+          attemptId: RunAttemptId.make("steering-attempt"),
+          rootNodeId: NodeId.make("steering-root"),
+          providerTurnOrdinal: 2,
+          message: { ...turnInput.message, messageId: replacementId },
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: "retired-conversation",
+          messageId: "late-old-final",
+          role: "assistant",
+          channel: "final",
+          text: "Retired answer",
+          status: "finished_successfully",
+          endTurn: true,
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: "retired-conversation" });
+        fake.callback?.({
+          kind: "update",
+          requestId: replacementId,
+          conversationId: "replacement-conversation",
+          messageId: "replacement-final",
+          role: "assistant",
+          channel: "final",
+          text: "Steered answer",
+          status: "finished_successfully",
+          endTurn: true,
+        });
+        fake.callback?.({
+          kind: "complete",
+          requestId: replacementId,
+          conversationId: "replacement-conversation",
+        });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(
+          recorded
+            .filter((event) => event.type === "message.updated")
+            .map((event) => event.message.text),
+        ).toEqual(["Steered answer"]);
+        expect(
+          new Set(
+            recorded
+              .filter((event) => event.type === "provider_thread.updated")
+              .map((event) => event.providerThread.nativeThreadRef?.nativeId),
+          ),
+        ).toEqual(new Set(["replacement-conversation"]));
+        expect(recorded.filter((event) => event.type === "turn.terminal")).toHaveLength(1);
+      }),
+    ),
+  );
+
   it.live("replaces a poisoned cached native conversation but fences active generation", () =>
     Effect.scoped(
       Effect.gen(function* () {

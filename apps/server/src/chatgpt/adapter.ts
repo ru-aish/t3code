@@ -261,7 +261,7 @@ export const makeChatGPTAdapter = (
         const reasoningKeys = new Set<string>();
         let streamComplete = false;
         let completionRecoveryRequestId: string | null = null;
-        const forcedRequestIds = new Set<string>();
+        const retiredRequestIds = new Set<string>();
         let usedTerminalTools = false;
         let generation = 0;
         let nextOrdinal = 0;
@@ -314,6 +314,9 @@ export const makeChatGPTAdapter = (
         ) {
           if (!active || !thread) return;
           const completed = active;
+          // Stop acknowledgments can precede late renderer callbacks. Retire the
+          // old request before a steering replacement reuses this adapter.
+          if (status !== "completed") retiredRequestIds.add(completed.requestId);
           active = null;
           // Interrupted submissions can leave reasoning open in the same run.
           for (const turn of new Set(outputTurns.values())) {
@@ -421,7 +424,7 @@ export const makeChatGPTAdapter = (
                   threadId: input.threadId,
                 },
               );
-              forcedRequestIds.add(requestId);
+              retiredRequestIds.add(requestId);
               yield* attempt(() => connection.stop()).pipe(
                 Effect.catch((cause) =>
                   Effect.logWarning("Failed to stop ChatGPT while forcing the turn closed", {
@@ -449,7 +452,7 @@ export const makeChatGPTAdapter = (
           );
         });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
-          if (update.requestId && forcedRequestIds.has(update.requestId)) return;
+          if (update.requestId && retiredRequestIds.has(update.requestId)) return;
           if (
             update.role === "assistant" &&
             (update.recipient?.includes("fedora_t3code") ||
@@ -815,7 +818,7 @@ export const makeChatGPTAdapter = (
             binding = yield* attempt(() => connection.resetNativeConversation());
             generation++;
             outputTurns.clear();
-            forcedRequestIds.clear();
+            retiredRequestIds.clear();
             messages.clear();
             finalFragments.clear();
             reasoningKeys.clear();
