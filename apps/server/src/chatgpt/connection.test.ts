@@ -39,6 +39,8 @@ describe("Conversation-scoped stop ordering", () => {
         renderer: async () => ({
           evaluate: async (expression: string) => {
             if (expression.includes("await r.client.stopCompletion(")) {
+              expect(expression).toContain("terminal-mcp.chat-runtime.client.v5");
+              expect(expression).toContain('conversationId:"existing-conversation"');
               operations.push("stop-start");
               enteredStop.resolve();
               await releaseStop.promise;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -29,6 +30,7 @@ const fakes = vi.hoisted(() => ({
     sent: string[];
     stops: number;
     controls: string[];
+    acknowledged: string[];
     idle: boolean;
     idleChecks: number;
     onCompletionRead?: () => void;
@@ -48,6 +50,7 @@ vi.mock("./connection.ts", () => ({
     sent: string[] = [];
     stops = 0;
     controls: string[] = [];
+    acknowledged: string[] = [];
     idle = false;
     idleChecks = 0;
     epoch = 0;
@@ -151,6 +154,7 @@ vi.mock("./connection.ts", () => ({
         : null;
     }
     async acknowledge(event: TerminalEvent) {
+      this.acknowledged.push(event.event_id);
       if (event.kind === "state" && event.payload.state === "done") this.onDoneAcknowledged?.();
     }
     publish(event: TerminalEvent) {
@@ -765,6 +769,49 @@ describe("ChatGPT task authority", () => {
         expect(terminalEvent.status).toBe("completed");
       }),
     ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("delivers a detached process after its parent epoch ends and acknowledges only after durable dispatch", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const offered = yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+        const requests = {
+          offer: (request: ProviderContinuationRequests.ProviderContinuationRequest) =>
+            Queue.offer(offered, request).pipe(Effect.asVoid),
+          take: Effect.never,
+        };
+        yield* Effect.gen(function* () {
+          const { events, fake } = yield* fixture;
+          yield* Queue.take(events);
+          fake.publish({
+            ...terminal("process.completed", undefined, 0),
+            event_id: "durable-process-event",
+            payload: { processId: "proc-123", result: "exit_code=0" },
+          });
+          const offeredRequest = yield* Queue.take(offered);
+          expect(offeredRequest.messageId).toBe(MessageId.make("process:durable-process-event"));
+          expect(offeredRequest.delivery).toBe("message_text");
+          expect(offeredRequest.notification?.outcome).toBe("completed");
+          expect(fake.acknowledged).not.toContain("durable-process-event");
+          const dispatch = offeredRequest.dispatchIfCurrent;
+          if (!dispatch) throw new Error("Expected durable event acknowledgment boundary");
+          yield* Effect.exit(dispatch(Effect.fail("temporary database error")));
+          expect(fake.acknowledged).not.toContain("durable-process-event");
+          const committed = yield* dispatch(Effect.succeed("T3 command receipt committed"));
+          expect(committed._tag).toBe("Some");
+          expect(fake.acknowledged).toContain("durable-process-event");
+          fake.publish({
+            ...terminal("process.completed", undefined, 0),
+            event_id: "durable-process-event",
+            acknowledged: 1,
+            payload: { processId: "proc-123", result: "exit_code=0" },
+          });
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          expect(yield* Queue.size(offered)).toBe(0);
+        }).pipe(Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, requests));
+      }),
+    ),
   );
 
   it.effect("still forces the turn when native stop fails", () =>

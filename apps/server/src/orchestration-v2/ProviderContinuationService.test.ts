@@ -346,6 +346,55 @@ describe("ProviderContinuationService", () => {
     });
   });
 
+  it.effect("retries a durable process event after a transient command-commit failure", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const accepted = yield* Queue.unbounded<string>();
+      const processMessageId = MessageId.make("process:durable-event");
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () => Effect.succeed(projection),
+        dispatch: (command) =>
+          Ref.getAndUpdate(attempts, (count) => count + 1).pipe(
+            Effect.flatMap((attempt) =>
+              attempt === 0
+                ? Effect.fail(new Error("transient database failure") as never)
+                : Queue.offer(accepted, command.messageId).pipe(Effect.as({} as never)),
+            ),
+          ),
+      });
+      const worker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        const acknowledged = yield* Ref.make(false);
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process finished",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            Effect.gen(function* () {
+              const result = yield* effect;
+              yield* Ref.set(acknowledged, true);
+              return Option.some(result);
+            }),
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 1);
+        assert.isFalse(yield* Ref.get(acknowledged));
+        yield* TestClock.adjust("100 millis");
+        assert.equal(yield* Queue.take(accepted), processMessageId);
+        assert.equal(yield* Ref.get(attempts), 2);
+        assert.isTrue(yield* Ref.get(acknowledged));
+      }).pipe(Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)), Effect.scoped);
+    }),
+  );
+
   it.effect("backs off repeated delegated completion dispatch failures", () => {
     return Effect.gen(function* () {
       const attempts = yield* Ref.make(0);
