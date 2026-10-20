@@ -21,6 +21,111 @@ const decodeThreadSend = Schema.decodeUnknownSync(
 
 
 describe("CDP transport recovery", () => {
+  it("times out an unopened renderer and reconnects rather than caching the failed attempt", async () => {
+    const sockets: Socket[] = [];
+    class Socket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      static CLOSING = 2;
+      readyState = 0;
+      constructor() { super(); sockets.push(this); }
+      send(raw: string) {
+        const { id, method } = JSON.parse(raw);
+        queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ id, result: method === "Runtime.evaluate" ? { result: { value: true } } : {} }),
+        })));
+      }
+      close() { this.readyState = 3; this.dispatchEvent(new Event("close")); }
+      open() { this.readyState = 1; this.dispatchEvent(new Event("open")); }
+    }
+    vi.stubGlobal("WebSocket", Socket);
+    const fetched = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify([
+      { type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://127.0.0.1/test" },
+    ])));
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cdp-timeout-"));
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234", controlEndpoint: "http://127.0.0.1:8022",
+      token: "test", environmentId: "test", providerId: "chatgpt", threadId: "timeout", cacheDir: directory,
+    });
+    try {
+      vi.useFakeTimers();
+      const timedOut = connection.health();
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      const assertion = expect(timedOut).rejects.toThrow("handshake timed out");
+      await vi.advanceTimersByTimeAsync(10_001);
+      await assertion;
+      expect(sockets[0]!.readyState).toBe(Socket.CLOSED);
+      const recovered = connection.health();
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      sockets[1]!.open();
+      await recovered;
+    } finally {
+      connection.close();
+      vi.useRealTimers();
+      fetched.mockRestore();
+      vi.unstubAllGlobals();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects inflight health on renderer close, then reconnects after negative health", async () => {
+    const sockets: Socket[] = [];
+    class Socket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      static CLOSING = 2;
+      static nextHealthy = true;
+      readyState = 0;
+      respond = true;
+      healthy = Socket.nextHealthy;
+      constructor() { super(); sockets.push(this); queueMicrotask(() => this.open()); }
+      send(raw: string) {
+        const { id, method } = JSON.parse(raw);
+        if (method === "Runtime.evaluate" && !this.respond) return;
+        queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ id, result: method === "Runtime.evaluate" ? { result: { value: this.healthy } } : {} }),
+        })));
+      }
+      close() { this.readyState = 3; this.dispatchEvent(new Event("close")); }
+      open() { this.readyState = 1; this.dispatchEvent(new Event("open")); }
+    }
+    vi.stubGlobal("WebSocket", Socket);
+    const fetched = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify([
+      { type: "page", url: "https://chatgpt.com/", webSocketDebuggerUrl: "ws://127.0.0.1/test" },
+    ])));
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cdp-inflight-"));
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234", controlEndpoint: "http://127.0.0.1:8022",
+      token: "test", environmentId: "test", providerId: "chatgpt", threadId: "inflight", cacheDir: directory,
+    });
+    try {
+      await connection.health();
+      sockets[0]!.respond = false;
+      const inflight = connection.health();
+      const assertion = expect(inflight).rejects.toThrow("renderer disconnected");
+      await Promise.resolve();
+      sockets[0]!.close();
+      await assertion;
+      Socket.nextHealthy = false;
+      const second = connection.health();
+      const unhealthy = expect(second).rejects.toThrow("Authenticated ChatGPT client is unavailable");
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await unhealthy;
+      sockets[1]!.close();
+      Socket.nextHealthy = true;
+      await connection.health();
+      expect(sockets).toHaveLength(3);
+      sockets[0]!.dispatchEvent(new Event("close"));
+      await connection.health();
+      expect(sockets).toHaveLength(3);
+    } finally {
+      connection.close();
+      fetched.mockRestore();
+      vi.unstubAllGlobals();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
 
   it("cleans pending commands after a synchronous WebSocket send failure", async () => {
     class ThrowSocket extends EventTarget {
