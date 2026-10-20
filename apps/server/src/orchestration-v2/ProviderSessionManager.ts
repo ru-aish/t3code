@@ -12,11 +12,14 @@ import {
   ProviderSessionId,
   ThreadId,
   type ProviderThreadId,
+  type ProviderTurnId,
+  type RunAttemptId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -207,10 +210,22 @@ interface LiveSessionEntry {
   readonly scope: Scope.Closeable;
   readonly idleGeneration: number;
   readonly busyTurns: ReadonlySet<string>;
+  readonly activeTurnByThread: ReadonlyMap<ProviderThreadId, ActiveTurnAdmission>;
+  readonly lastTerminalByThread: ReadonlyMap<ProviderThreadId, ProviderTurnId>;
   readonly lastActivityAtMs: number;
   readonly idleFiber: Fiber.Fiber<void, never> | null;
   readonly pinnedSinceMs: number | null;
   readonly idleThreadUnloads: ReadonlyMap<ThreadId, IdleThreadUnload>;
+}
+
+interface ActiveTurnAdmission {
+  readonly attemptId: RunAttemptId;
+  readonly runOrdinal: number;
+  readonly providerTurnId?: ProviderTurnId;
+  readonly finished: Deferred.Deferred<void>;
+  readonly submitted: Deferred.Deferred<void>;
+  readonly nativeSendSettled: boolean;
+  readonly pendingTerminal?: ProviderTurnId;
 }
 
 interface IdleThreadUnload {
@@ -937,6 +952,17 @@ export const layerWithOptions = (
             DateTime.now,
           ).pipe(candidate.requestEventPermit.withPermits(1));
           const [outcome, releasedAt] = removed;
+          if (outcome === "removed") {
+            yield* Effect.forEach(
+              candidate.activeTurnByThread.values(),
+              (turn) =>
+                Effect.all([
+                  Deferred.succeed(turn.finished, undefined),
+                  Deferred.succeed(turn.submitted, undefined),
+                ]),
+              { discard: true },
+            );
+          }
           if (outcome === "changed") return yield* removeLiveEntry(input);
           return [
             outcome === "removed" ? Option.some(candidate) : Option.none<LiveSessionEntry>(),
@@ -1431,56 +1457,202 @@ export const layerWithOptions = (
             .pipe(Effect.ensuring(Effect.sync(dropReservation)));
         });
 
-      const markBusy = (providerSessionId: ProviderSessionId, turnKey: string) =>
-        withActivityError(
-          providerSessionId,
-          Effect.gen(function* () {
-            const key = sessionKey(providerSessionId);
-            const now = yield* Clock.currentTimeMillis;
-            const idleFiber = yield* Ref.modify(sessions, (current) => {
+      const acquireTurn = (
+        input: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>[0],
+        runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      ): Effect.Effect<boolean, ProviderAdapter.ProviderAdapterV2Error> =>
+        Effect.gen(function* () {
+          const providerSessionId = runtime.providerSessionId;
+          const key = sessionKey(providerSessionId);
+          const finished = yield* Deferred.make<void>();
+          const submitted = yield* Deferred.make<void>();
+          const now = yield* Clock.currentTimeMillis;
+          const outcome = yield* Ref.modify(
+            sessions,
+            (
+              current,
+            ): readonly [
+              (
+                | { readonly type: "closed" }
+                | { readonly type: "busy"; readonly existing: ActiveTurnAdmission }
+                | { readonly type: "acquired"; readonly idleFiber: Fiber.Fiber<void, never> | null }
+              ),
+              Map<string, LiveSessionEntry>,
+            ] => {
               const entry = current.get(key);
-              if (entry === undefined) {
-                return [null, current] as const;
+              if (entry?.runtime !== runtime)
+                return [{ type: "closed" as const }, current] as const;
+              const existing = entry.activeTurnByThread.get(input.providerThread.id);
+              if (existing !== undefined) {
+                return [{ type: "busy" as const, existing }, current] as const;
               }
+              const activeTurnByThread = new Map(entry.activeTurnByThread);
+              activeTurnByThread.set(input.providerThread.id, {
+                attemptId: input.attemptId,
+                runOrdinal: input.runOrdinal,
+                finished,
+                submitted,
+                nativeSendSettled: false,
+              });
               const updated = new Map(current);
               updated.set(key, {
                 ...entry,
-                busyTurns: new Set(entry.busyTurns).add(turnKey),
+                activeTurnByThread,
+                busyTurns: new Set(entry.busyTurns).add(
+                  busyTurnKey(input.providerThread.id, input.runOrdinal),
+                ),
                 idleFiber: null,
                 lastActivityAtMs: now,
                 pinnedSinceMs: null,
               });
-              return [entry.idleFiber, updated] as const;
+              return [{ type: "acquired" as const, idleFiber: entry.idleFiber }, updated] as const;
+            },
+          );
+          if (outcome.type === "closed") {
+            return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+              driver: runtime.driver,
+              threadId: input.threadId,
+              providerThreadId: input.providerThread.id,
+              runId: input.runId,
+              cause: "Provider session closed while acquiring the native generation",
             });
-            yield* cancelIdleFiber(idleFiber);
-          }),
-        );
+          }
+          if (outcome.type === "busy") {
+            // A replay of the same admitted attempt must never submit twice.
+            if (outcome.existing.attemptId === input.attemptId) return false;
+            const released = yield* Deferred.await(outcome.existing.finished).pipe(
+              Effect.timeoutOption("30 seconds"),
+            );
+            if (Option.isNone(released)) {
+              return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                driver: runtime.driver,
+                threadId: input.threadId,
+                providerThreadId: input.providerThread.id,
+                runId: input.runId,
+                cause:
+                  "Previous native generation has no verified terminal event. " +
+                  "Use a fresh provider conversation rather than submitting a competing generation.",
+              });
+            }
+            return yield* acquireTurn(input, runtime);
+          }
+          yield* cancelIdleFiber(outcome.idleFiber);
+          return true;
+        });
+
+      const markSubmitted = (
+        providerSessionId: ProviderSessionId,
+        providerThreadId: ProviderThreadId,
+        attemptId: RunAttemptId,
+        runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      ) =>
+        Effect.gen(function* () {
+          const key = sessionKey(providerSessionId);
+          const active = yield* Ref.modify(sessions, (current) => {
+            const entry = current.get(key);
+            const turn = entry?.activeTurnByThread.get(providerThreadId);
+            if (entry?.runtime !== runtime || turn?.attemptId !== attemptId) {
+              return [undefined, current] as const;
+            }
+            const turns = new Map(entry.activeTurnByThread);
+            turns.set(providerThreadId, { ...turn, nativeSendSettled: true });
+            return [
+              turn,
+              new Map(current).set(key, { ...entry, activeTurnByThread: turns }),
+            ] as const;
+          });
+          if (active === undefined) return;
+          yield* Deferred.succeed(active.submitted, undefined);
+          if (active.pendingTerminal !== undefined) {
+            yield* markIdle(
+              providerSessionId,
+              providerThreadId,
+              active.runOrdinal,
+              active.pendingTerminal,
+              runtime,
+            );
+          }
+        });
+
+      const noteProviderTurn = (
+        providerSessionId: ProviderSessionId,
+        providerThreadId: ProviderThreadId,
+        attemptId: RunAttemptId | null,
+        providerTurnId: ProviderTurnId,
+        runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      ) =>
+        Ref.update(sessions, (current) => {
+          const key = sessionKey(providerSessionId);
+          const entry = current.get(key);
+          const active = entry?.activeTurnByThread.get(providerThreadId);
+          if (
+            entry?.runtime !== runtime ||
+            active === undefined ||
+            active.attemptId !== attemptId
+          ) {
+            return current;
+          }
+          const activeTurnByThread = new Map(entry.activeTurnByThread);
+          activeTurnByThread.set(providerThreadId, { ...active, providerTurnId });
+          return new Map(current).set(key, { ...entry, activeTurnByThread });
+        });
 
       const markIdle = (
         providerSessionId: ProviderSessionId,
         providerThreadId: ProviderThreadId,
         runOrdinal: number,
+        providerTurnId: ProviderTurnId,
+        runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
       ) =>
         withActivityError(
           providerSessionId,
           Effect.gen(function* () {
             const key = sessionKey(providerSessionId);
             const now = yield* Clock.currentTimeMillis;
-            yield* Ref.update(sessions, (current) => {
+            const finished = yield* Ref.modify(sessions, (current) => {
               const entry = current.get(key);
-              if (entry === undefined) {
-                return current;
+              const active = entry?.activeTurnByThread.get(providerThreadId);
+              if (
+                entry === undefined ||
+                entry.runtime !== runtime ||
+                active === undefined ||
+                active.runOrdinal !== runOrdinal ||
+                (active.providerTurnId !== undefined && active.providerTurnId !== providerTurnId) ||
+                entry.lastTerminalByThread.get(providerThreadId) === providerTurnId
+              )
+                return [undefined, current] as const;
+              if (!active.nativeSendSettled) {
+                const activeTurnByThread = new Map(entry.activeTurnByThread);
+                activeTurnByThread.set(providerThreadId, {
+                  ...active,
+                  pendingTerminal: providerTurnId,
+                });
+                return [
+                  undefined,
+                  new Map(current).set(key, { ...entry, activeTurnByThread }),
+                ] as const;
               }
               const busyTurns = new Set(entry.busyTurns);
               busyTurns.delete(busyTurnKey(providerThreadId, runOrdinal));
+              const activeTurnByThread = new Map(entry.activeTurnByThread);
+              activeTurnByThread.delete(providerThreadId);
+              const lastTerminalByThread = new Map(entry.lastTerminalByThread);
+              lastTerminalByThread.set(providerThreadId, providerTurnId);
               const updated = new Map(current);
               updated.set(key, {
                 ...entry,
+                activeTurnByThread,
+                lastTerminalByThread,
                 busyTurns,
                 lastActivityAtMs: now,
               });
-              return updated;
+              return [active, updated] as const;
             });
+            if (finished === undefined) return;
+            yield* Effect.all([
+              Deferred.succeed(finished.finished, undefined),
+              Deferred.succeed(finished.submitted, undefined),
+            ]);
             yield* scheduleIdleReleaseInternal(providerSessionId);
             yield* scheduleThreadUnload(providerSessionId, providerThreadId);
           }),
@@ -1718,6 +1890,42 @@ export const layerWithOptions = (
               modelFamily: normalizeModelMetricLabel(model),
             },
           });
+        const sendTurn = (
+          input: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>[0],
+          send: Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>,
+        ) =>
+          observeActivity(
+            providerSessionId,
+            ensureThreadAttached({
+              providerSessionId,
+              threadId: input.threadId,
+              providerInstanceId: runtime.instanceId,
+            }),
+          ).pipe(
+            Effect.andThen(
+              holdThreadLoaded({
+                providerSessionId,
+                threadId: input.threadId,
+                providerThread: input.providerThread,
+              }),
+            ),
+            Effect.andThen(acquireTurn(input, runtime)),
+            Effect.flatMap((acquired) =>
+              acquired
+                ? send.pipe(
+                    turnMetrics("send", input.modelSelection.model),
+                    Effect.tap(() =>
+                      markSubmitted(
+                        providerSessionId,
+                        input.providerThread.id,
+                        input.attemptId,
+                        runtime,
+                      ),
+                    ),
+                  )
+                : Effect.void,
+            ),
+          );
         return {
           ...runtime,
           subscribeEvents,
@@ -1822,49 +2030,42 @@ export const layerWithOptions = (
                 }),
               ),
             ),
-          startTurn: (input) =>
-            observeActivity(
-              providerSessionId,
-              ensureThreadAttached({
-                providerSessionId,
-                threadId: input.threadId,
-                providerInstanceId: runtime.instanceId,
-              }),
-            ).pipe(
-              // A start that fails or is stopped may never emit turn.terminal,
-              // so it clears its own turn or the session never goes idle.
-              Effect.andThen(
-                holdThreadLoaded({
-                  providerSessionId,
-                  threadId: input.threadId,
-                  providerThread: input.providerThread,
-                }),
-              ),
-              Effect.andThen(
-                Effect.acquireUseRelease(
-                  observeActivity(
-                    providerSessionId,
-                    markBusy(
-                      providerSessionId,
-                      busyTurnKey(input.providerThread.id, input.runOrdinal),
-                    ),
-                  ),
-                  () =>
-                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
-                  (_, exit) =>
-                    Exit.isFailure(exit)
-                      ? observeActivity(
-                          providerSessionId,
-                          markIdle(providerSessionId, input.providerThread.id, input.runOrdinal),
-                        )
-                      : Effect.void,
-                ),
-              ),
-            ),
+          startTurn: (input) => sendTurn(input, runtime.startTurn(input)),
+          ...(runtime.compactThread === undefined
+            ? {}
+            : { compactThread: (input) => sendTurn(input, runtime.compactThread!(input)) }),
           steerTurn: (input) =>
-            observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
-              Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer"))),
-            ),
+            Effect.gen(function* () {
+              const key = sessionKey(providerSessionId);
+              const current = (yield* Ref.get(sessions)).get(key);
+              const active =
+                current?.runtime === runtime
+                  ? current.activeTurnByThread.get(input.providerThread.id)
+                  : undefined;
+              if (active === undefined) {
+                return yield* new ProviderAdapter.ProviderAdapterSteerRunUnsupportedError({
+                  driver: runtime.driver,
+                  providerThreadId: input.providerThread.id,
+                });
+              }
+              // A steer must not overtake the native send that admitted this generation.
+              yield* Deferred.await(active.submitted);
+              const latest = (yield* Ref.get(sessions)).get(key);
+              if (
+                latest?.runtime !== runtime ||
+                latest.activeTurnByThread.get(input.providerThread.id)?.submitted !==
+                  active.submitted ||
+                latest.activeTurnByThread.get(input.providerThread.id)?.providerTurnId !==
+                  input.providerTurnId
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterSteerRunUnsupportedError({
+                  driver: runtime.driver,
+                  providerThreadId: input.providerThread.id,
+                });
+              }
+              yield* observeActivity(providerSessionId, touchActivity(providerSessionId));
+              return yield* runtime.steerTurn(input).pipe(turnMetrics("steer"));
+            }),
           interruptTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.interruptTurn(input).pipe(turnMetrics("interrupt"))),
@@ -1914,79 +2115,102 @@ export const layerWithOptions = (
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
-            // Live output skips run subscribers and ingestion entirely: it is
-            // never persisted, and a flood of it must not queue ahead of real events.
-            if (event.type === "command_output.delta") {
-              return commandOutput.append(event);
-            }
-            // A settled item carries its final output, so its live tail can go.
-            const releaseLiveOutput =
-              event.type === "turn_item.updated" &&
-              event.turnItem.type === "command_execution" &&
-              !isOrchestrationV2WorkActive(event.turnItem.status)
-                ? commandOutput.finish({
-                    threadId: event.turnItem.threadId,
-                    itemId: event.turnItem.id,
-                  })
-                : Effect.void;
-            if (
-              event.type === "provider_session.updated" &&
-              event.providerSession.status === "stopped"
-            ) {
-              stoppedByProvider = true;
-            }
-            return observeActivity(
-              entry.runtime.providerSessionId,
-              event.type === "turn.terminal"
-                ? markIdle(
-                    entry.runtime.providerSessionId,
-                    event.providerThreadId,
-                    event.runOrdinal,
-                  )
-                : touchActivity(entry.runtime.providerSessionId, { providerActivity: true }),
-            ).pipe(
-              Effect.andThen(
-                event.type === "provider_session.updated"
-                  ? persistProviderSessionUpdate(entry, event)
-                  : Effect.void,
+            // Old event pumps must not release or publish for a replacement runtime.
+            const belongsToLiveRuntime = Ref.get(sessions).pipe(
+              Effect.map(
+                (current) =>
+                  current.get(sessionKey(entry.runtime.providerSessionId))?.runtime ===
+                  entry.runtime,
               ),
-              Effect.andThen(
-                Effect.gen(function* () {
-                  // Some providers can block before a run subscriber exists
-                  // (project trust, login, or session-switch hooks). Persist
-                  // their runless request artifacts directly so the normal T3
-                  // request UI can answer them and unblock session setup.
-                  const threadId = sessionScopedRuntimeRequestThreadId(event);
-                  if (threadId !== undefined) {
-                    yield* Effect.gen(function* () {
-                      const current = (yield* Ref.get(sessions)).get(
-                        sessionKey(entry.runtime.providerSessionId),
-                      );
-                      if (current?.runtime !== entry.runtime) return;
-                      yield* providerEventIngestor
-                        .ingestNormalized({
-                          providerSessionId: entry.runtime.providerSessionId,
-                          providerInstanceId: entry.runtime.instanceId,
-                          threadId,
-                          event,
-                        })
-                        .pipe(
-                          Effect.mapError(
-                            (cause) =>
-                              new ProviderAdapter.ProviderAdapterEventStreamError({
-                                driver: entry.runtime.driver,
-                                providerSessionId: entry.runtime.providerSessionId,
-                                cause,
-                              }),
-                          ),
-                        );
-                    }).pipe(entry.requestEventPermit.withPermits(1));
-                    return;
-                  }
-                  yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
-                  yield* releaseLiveOutput;
-                }),
-              ),
+            );
+            return belongsToLiveRuntime.pipe(
+              Effect.flatMap((isCurrent) => {
+                if (!isCurrent) return Effect.void;
+                // Live output skips run subscribers and ingestion entirely: it is
+                // never persisted, and a flood of it must not queue ahead of real events.
+                if (event.type === "command_output.delta") {
+                  return commandOutput.append(event);
+                }
+                // A settled item carries its final output, so its live tail can go.
+                const releaseLiveOutput =
+                  event.type === "turn_item.updated" &&
+                  event.turnItem.type === "command_execution" &&
+                  !isOrchestrationV2WorkActive(event.turnItem.status)
+                    ? commandOutput.finish({
+                        threadId: event.turnItem.threadId,
+                        itemId: event.turnItem.id,
+                      })
+                    : Effect.void;
+                if (
+                  event.type === "provider_session.updated" &&
+                  event.providerSession.status === "stopped"
+                ) {
+                  stoppedByProvider = true;
+                }
+                return observeActivity(
+                  entry.runtime.providerSessionId,
+                  event.type === "turn.terminal"
+                    ? markIdle(
+                        entry.runtime.providerSessionId,
+                        event.providerThreadId,
+                        event.runOrdinal,
+                        event.providerTurnId,
+                        entry.runtime,
+                      )
+                    : event.type === "provider_turn.updated"
+                      ? noteProviderTurn(
+                          entry.runtime.providerSessionId,
+                          event.providerTurn.providerThreadId,
+                          event.providerTurn.runAttemptId,
+                          event.providerTurn.id,
+                          entry.runtime,
+                        )
+                      : touchActivity(entry.runtime.providerSessionId, { providerActivity: true }),
+                ).pipe(
+                  Effect.andThen(
+                    event.type === "provider_session.updated"
+                      ? persistProviderSessionUpdate(entry, event)
+                      : Effect.void,
+                  ),
+                  Effect.andThen(
+                    Effect.gen(function* () {
+                      // Some providers can block before a run subscriber exists
+                      // (project trust, login, or session-switch hooks). Persist
+                      // their runless request artifacts directly so the normal T3
+                      // request UI can answer them and unblock session setup.
+                      const threadId = sessionScopedRuntimeRequestThreadId(event);
+                      if (threadId !== undefined) {
+                        yield* Effect.gen(function* () {
+                          const current = (yield* Ref.get(sessions)).get(
+                            sessionKey(entry.runtime.providerSessionId),
+                          );
+                          if (current?.runtime !== entry.runtime) return;
+                          yield* providerEventIngestor
+                            .ingestNormalized({
+                              providerSessionId: entry.runtime.providerSessionId,
+                              providerInstanceId: entry.runtime.instanceId,
+                              threadId,
+                              event,
+                            })
+                            .pipe(
+                              Effect.mapError(
+                                (cause) =>
+                                  new ProviderAdapter.ProviderAdapterEventStreamError({
+                                    driver: entry.runtime.driver,
+                                    providerSessionId: entry.runtime.providerSessionId,
+                                    cause,
+                                  }),
+                              ),
+                            );
+                        }).pipe(entry.requestEventPermit.withPermits(1));
+                        return;
+                      }
+                      yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
+                      yield* releaseLiveOutput;
+                    }),
+                  ),
+                );
+              }),
             );
           }),
           Effect.exit,
@@ -2201,6 +2425,8 @@ export const layerWithOptions = (
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),
+                activeTurnByThread: new Map(),
+                lastTerminalByThread: new Map(),
                 lastActivityAtMs: now,
                 idleFiber: null,
                 pinnedSinceMs: null,
