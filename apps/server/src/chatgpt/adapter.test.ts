@@ -24,6 +24,7 @@ import type { ChatGPTUpdate, TerminalEvent } from "./connection.ts";
 const fakes = vi.hoisted(() => ({
   failNextSend: false,
   failNextStop: false,
+  failNextReset: false,
   connections: [] as Array<{
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
@@ -69,6 +70,10 @@ vi.mock("./connection.ts", () => ({
     close() {}
     async adoptConversation() {}
     async resetNativeConversation() {
+      if (fakes.failNextReset) {
+        fakes.failNextReset = false;
+        throw new Error("Native reset unavailable");
+      }
       this.conversationId = null;
       this.controls.push("reset");
       return { conversation_id: null, epoch: ++this.epoch, state: "idle" };
@@ -333,6 +338,68 @@ describe("ChatGPT task authority", () => {
         const repeated = yield* session.ensureThread(request);
         expect(repeated.id).toBe(replacement.id);
         expect(fake.controls.filter((action) => action === "reset")).toHaveLength(1);
+      }),
+    ),
+  );
+
+  it.live("fences a failed reset and starts the following turn only on the rotated native identity", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, fake, turnInput, requestId, events } = yield* fixture;
+        fake.conversationId = "uncertain-native-conversation";
+        const oldThread = {
+          ...turnInput.providerThread,
+          nativeThreadRef: {
+            driver: turnInput.providerThread.driver,
+            nativeId: "uncertain-native-conversation",
+            strength: "strong" as const,
+          },
+        };
+        const freshRequest = {
+          threadId: turnInput.threadId,
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+          existingProviderThread: { ...oldThread, nativeThreadRef: null },
+        };
+        // A still-active old submission cannot be reused or rotated.
+        const activeRejection = yield* Effect.flip(session.ensureThread(freshRequest));
+        expect(activeRejection._tag).toBe("ProviderAdapterTurnStartError");
+        expect(fake.controls).not.toContain("reset");
+        fake.callback?.({ kind: "complete", requestId, conversationId: "uncertain-native-conversation" });
+        for (;;) {
+          const event = yield* Queue.take(events);
+          if (event.type === "turn.terminal") break;
+        }
+        fakes.failNextReset = true;
+        const resetRejection = yield* Effect.exit(session.ensureThread(freshRequest));
+        expect(resetRejection._tag).toBe("Failure");
+        expect(fake.conversationId).toBe("uncertain-native-conversation");
+        expect(fake.controls).not.toContain("reset");
+        const replacement = yield* session.ensureThread(freshRequest);
+        expect(replacement.id).toBe(oldThread.id);
+        expect(replacement.nativeThreadRef).toBeNull();
+        expect(fake.controls.filter((control) => control === "reset")).toHaveLength(1);
+        const nextTurn = {
+          ...turnInput,
+          runId: RunId.make("next-run"),
+          runOrdinal: 2,
+          providerTurnOrdinal: 2,
+          attemptId: RunAttemptId.make("next-attempt"),
+          providerThread: replacement,
+          message: { ...turnInput.message, messageId: MessageId.make("next-request"), text: "Continue with restored history" },
+        };
+        yield* session.startTurn(nextTurn);
+        expect(fake.sent).toEqual([requestId, "next-request"]);
+        fake.callback?.({ kind: "complete", requestId, conversationId: "uncertain-native-conversation" });
+        fake.callback?.({ kind: "complete", requestId: "next-request", conversationId: null });
+        const terminalEvents = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal" && event.runOrdinal === 2),
+          Stream.runCollect,
+        );
+        expect(terminalEvents.filter((event) => event.type === "turn.terminal").map((event) => event.runOrdinal)).toEqual([2]);
+        const reused = yield* session.ensureThread(freshRequest);
+        expect(reused.id).toBe(replacement.id);
+        expect(fake.controls.filter((control) => control === "reset")).toHaveLength(1);
       }),
     ),
   );
