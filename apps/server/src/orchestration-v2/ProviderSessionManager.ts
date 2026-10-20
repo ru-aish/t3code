@@ -2002,6 +2002,27 @@ export const layerWithOptions = (
               }),
             ).pipe(
               Effect.andThen(runtime.ensureThread(input)),
+              // ChatGPT's native reset has completed successfully before this
+              // point. A previous generation's lease belongs to the detached
+              // physical conversation, not to the durable T3 provider-thread
+              // row. Retire it without granting a second send to the old native.
+              Effect.tap(() =>
+                input.existingProviderThread?.nativeThreadRef === null && runtime.driver === "chatgpt"
+                  ? Effect.gen(function* () {
+                      const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                      const old = entry?.runtime === runtime
+                        ? entry.activeTurnByThread.get(input.existingProviderThread!.id)
+                        : undefined;
+                      if (old !== undefined)
+                        yield* releaseNotSubmitted(
+                          providerSessionId,
+                          input.existingProviderThread!.id,
+                          old.attemptId,
+                          runtime,
+                        );
+                    })
+                  : Effect.void,
+              ),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
                   providerSessionId,
