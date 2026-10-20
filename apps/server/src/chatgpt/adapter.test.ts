@@ -38,6 +38,7 @@ const fakes = vi.hoisted(() => ({
     onCompletionRead?: () => void;
     onDoneAcknowledged?: () => void;
     onStop?: () => void | Promise<void>;
+    onControl?: (action: string) => void | Promise<void>;
     onSend?: (id: string) => void;
     state: string;
     conversationId: string | null;
@@ -92,6 +93,7 @@ vi.mock("./connection.ts", () => ({
     }
     async control(action: string) {
       this.controls.push(action);
+      await this.onControl?.(action);
       if (action === "activate") {
         this.epoch++;
         this.state = "working";
@@ -117,6 +119,7 @@ vi.mock("./connection.ts", () => ({
       }
     }
     onStop?: () => void | Promise<void>;
+    onControl?: (action: string) => void | Promise<void>;
     onSend?: (id: string) => void;
     async stop() {
       this.stops++;
@@ -414,8 +417,33 @@ describe("ChatGPT task authority", () => {
         );
         expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "forced" });
         expect(fake.controls).toContain("pause");
-        expect(fake.stops).toBe(1);
+        expect(fake.stops).toBe(0);
         expect(fake.sent).toEqual([requestId]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("forces a recovered final even if pausing the orphaned task never returns", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        yield* Queue.take(events);
+        const read = Promise.withResolvers<void>();
+        fake.onConversationRead = () => read.resolve();
+        fake.idle = false;
+        fake.recoveredTerminalTools = true;
+        fake.onControl = (action) =>
+          action === "pause" ? new Promise<void>(() => {}) : undefined;
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Effect.promise(() => read.promise);
+        yield* TestClock.adjust("3 minutes");
+        yield* TestClock.adjust("5 seconds");
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "forced" });
+        expect(fake.stops).toBe(0);
       }),
     ).pipe(Effect.provide(TestClock.layer())),
   );
@@ -1070,6 +1098,28 @@ describe("ChatGPT task authority", () => {
         expect(fake.sent).toEqual([requestId]);
         yield* TestClock.adjust("5 minutes");
         expect(fake.idleChecks).toBe(1);
+        expect(fake.stops).toBe(1);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("forces an unconfirmed completion even when the native stop never returns", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        yield* Queue.take(events);
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.onStop = () => new Promise<void>(() => {});
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        yield* TestClock.adjust("3 minutes");
+        yield* TestClock.adjust("10 seconds");
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "forced" });
         expect(fake.stops).toBe(1);
       }),
     ).pipe(Effect.provide(TestClock.layer())),

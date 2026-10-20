@@ -465,6 +465,7 @@ export const makeChatGPTAdapter = (
               );
               retiredRequestIds.add(requestId);
               yield* attempt(() => connection.stop()).pipe(
+                Effect.timeout("10 seconds"),
                 Effect.catch((cause) =>
                   Effect.logWarning("Failed to stop ChatGPT while forcing the turn closed", {
                     threadId: input.threadId,
@@ -517,21 +518,24 @@ export const makeChatGPTAdapter = (
             // cannot revive a provider turn that we are about to terminalize.
             yield* attempt(() =>
               connection.control("pause", { requestId: `recovered-final-${requestId}` }),
-            ).pipe(Effect.ignore);
-            yield* attempt(() => connection.stop()).pipe(
+            ).pipe(
+              Effect.timeout("5 seconds"),
               Effect.catch((cause) =>
                 Effect.logWarning(
-                  "Failed to stop ChatGPT while forcing a recovered final turn closed",
+                  "Failed to pause orphaned Terminal activation before closing its recovered final",
                   { threadId: input.threadId, cause },
                 ),
               ),
             );
-            // A Terminal continuation or newer provider generation may have won
-            // while pause/stop was in flight. Refresh task state and never close
-            // a generation that has since continued or completed normally.
+            // The native final is already completed: stopCompletion is unnecessary
+            // and can hang after a renderer restart (or stop a later generation).
+            // Do not let an unresponsive Terminal endpoint prevent terminalization.
             binding = yield* attempt(() => connection.control<TerminalBinding>("get")).pipe(
+              Effect.timeout("5 seconds"),
               Effect.catch(() => Effect.succeed(binding)),
             );
+            // A Terminal continuation or newer provider generation may have won
+            // while pause/read was in flight.
             if (
               active?.requestId === requestId &&
               active.generation === recoveryGeneration &&
