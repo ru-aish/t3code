@@ -591,29 +591,29 @@ export const layer: Layer.Layer<
       // Restart recovery cancels stored turns without proving that an external
       // provider has stopped its native generation. A new send to that same
       // native thread would bypass the process-local admission fence.
-      const previousNativeRun = projection.runs
-        .filter(
-          (source) =>
-            source.providerThreadId === providerThread.id &&
-            source.ordinal < run.ordinal &&
-            source.startedAt !== null,
-        )
-        .sort((a, b) => b.ordinal - a.ordinal)[0];
-      const previousAttemptIds = new Set(
-        projection.attempts
-          .filter((source) => source.runId === previousNativeRun?.id)
-          .map((source) => source.id),
-      );
-      const confirmedNativeTerminal = projection.providerTurns.some(
+      const priorStartedRuns = projection.runs.filter(
         (source) =>
           source.providerThreadId === providerThread.id &&
-          source.runAttemptId !== null &&
-          previousAttemptIds.has(source.runAttemptId) &&
-          (source.status === "completed" ||
-            source.status === "failed" ||
-            source.status === "interrupted"),
+          source.ordinal < run.ordinal &&
+          source.startedAt !== null,
       );
-      if (previousNativeRun?.status === "cancelled" && !confirmedNativeTerminal) {
+      const terminalAttemptIds = new Set(
+        projection.providerTurns
+          .filter(
+            (source) =>
+              source.providerThreadId === providerThread.id &&
+              source.runAttemptId !== null &&
+              (source.status === "completed" ||
+                source.status === "failed" ||
+                source.status === "interrupted"),
+          )
+          .map((source) => source.runAttemptId),
+      );
+      const unresolvedNativeRun = priorStartedRuns.find((source) => {
+        const attempts = projection.attempts.filter((attempt) => attempt.runId === source.id);
+        return attempts.length === 0 || attempts.some((attempt) => !terminalAttemptIds.has(attempt.id));
+      });
+      if (unresolvedNativeRun !== undefined) {
         const uncertain = new ProviderAdapter.ProviderAdapterTurnStartError({
           driver: sessionResult.success.driver,
           threadId: projection.thread.id,
