@@ -1925,6 +1925,17 @@ export const layerWithOptions = (
                   )
                 : Effect.void,
             ),
+            Effect.catchTag(
+              "ProviderSessionActivityError",
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver: runtime.driver,
+                  threadId: input.threadId,
+                  providerThreadId: input.providerThread.id,
+                  runId: input.runId,
+                  cause,
+                }),
+            ),
           );
         return {
           ...runtime,
