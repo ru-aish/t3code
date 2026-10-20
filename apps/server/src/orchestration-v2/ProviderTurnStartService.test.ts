@@ -1058,3 +1058,39 @@ it("excludes only legacy child-result handoffs, preserving genuine history migra
   expect(ignored.has("child-handoff-17" as never)).toBe(true);
   expect(ignored.has("migration" as never)).toBe(false);
 });
+effectIt.effect(
+  "does not restart a cancelled native generation when its provider-turn event was lost",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        failReadsAfterRunning: true,
+      });
+      const before = harness.projection();
+      const run = before.runs.at(-1)!;
+      harness.setProjection({
+        ...before,
+        runs: [
+          {
+            ...run,
+            id: RunId.make("prior-native-generation-without-turn-event"),
+            ordinal: 1,
+            status: "cancelled",
+            startedAt: DateTime.makeUnsafe("2026-09-04T11:00:00Z"),
+            completedAt: DateTime.makeUnsafe("2026-09-04T11:01:00Z"),
+          },
+          run,
+        ],
+      });
+
+      yield* harness.start;
+
+      expect(harness.open).toHaveBeenCalledOnce();
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+      expect(harness.projection().turnItems.at(-1)).toMatchObject({
+        type: "error",
+        failure: { class: "provider_error" },
+      });
+    }),
+);
