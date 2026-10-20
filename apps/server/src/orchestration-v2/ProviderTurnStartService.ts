@@ -588,6 +588,49 @@ export const layer: Layer.Layer<
         });
         return;
       }
+      // Restart recovery cancels stored turns without proving that an external
+      // provider has stopped its native generation. A new send to that same
+      // native thread would bypass the process-local admission fence.
+      const previousNativeRun = projection.runs
+        .filter(
+          (source) =>
+            source.providerThreadId === providerThread.id &&
+            source.ordinal < run.ordinal &&
+            source.startedAt !== null,
+        )
+        .sort((a, b) => b.ordinal - a.ordinal)[0];
+      const previousAttemptIds = new Set(
+        projection.attempts
+          .filter((source) => source.runId === previousNativeRun?.id)
+          .map((source) => source.id),
+      );
+      const confirmedNativeTerminal = projection.providerTurns.some(
+        (source) =>
+          source.providerThreadId === providerThread.id &&
+          source.runAttemptId !== null &&
+          previousAttemptIds.has(source.runAttemptId) &&
+          (source.status === "completed" ||
+            source.status === "failed" ||
+            source.status === "interrupted"),
+      );
+      if (previousNativeRun?.status === "cancelled" && !confirmedNativeTerminal) {
+        const uncertain = new ProviderAdapter.ProviderAdapterTurnStartError({
+          driver: sessionResult.success.driver,
+          threadId: projection.thread.id,
+          providerThreadId: providerThread.id,
+          runId: run.id,
+          cause:
+            "Previous native generation was cancelled during recovery without a verified " +
+            "provider terminal event. Start a fresh conversation to avoid a duplicate submission.",
+        });
+        if (input.willRetry === true) return yield* uncertain;
+        yield* settleStartFailure({
+          signal: "unverified-native-generation",
+          title: "Previous provider turn is not confirmed stopped",
+          error: uncertain,
+        });
+        return;
+      }
       const session = sessionResult.success;
       const loadFromProvider = (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,

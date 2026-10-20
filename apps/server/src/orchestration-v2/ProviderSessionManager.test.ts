@@ -1320,7 +1320,7 @@ it.effect("ProviderSessionManagerV2 cleans up an interrupted open whose scope cl
   }),
 );
 
-it.effect("ProviderSessionManagerV2 releases an idle session whose turn start was stopped", () =>
+it.effect("ProviderSessionManagerV2 retains an uncertain interrupted native submission", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     const startTurnReached = yield* Deferred.make<void>();
@@ -1371,8 +1371,8 @@ it.effect("ProviderSessionManagerV2 releases an idle session whose turn start wa
       yield* Fiber.interrupt(starting);
       yield* TestClock.adjust("2 seconds");
       yield* Effect.yieldNow;
-      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
-      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
     }).pipe(
       Effect.provide(
         layerTest({
@@ -4979,4 +4979,127 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect("ProviderSessionManagerV2 serializes native generations until the prior terminal", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+    const firstNativeRelease = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-serial");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const first = yield* start(1).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      const second = yield* start(2).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(queue);
+      yield* Queue.offer(queue!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "first" }),
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      // A terminal callback may arrive before the native send promise settles.
+      // Neither the terminal nor a newer logical run may overlap that send.
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      yield* Deferred.succeed(firstNativeRelease, undefined);
+      yield* Fiber.join(first);
+      yield* Fiber.join(second);
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+      const third = yield* start(3).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Queue.offer(queue!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "first" }),
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+      yield* Queue.offer(queue!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "second" }),
+        runOrdinal: 2,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      yield* Fiber.join(third);
+      assert.equal(yield* Ref.get(nativeStarts), 3);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1 ? Deferred.await(firstNativeRelease) : Effect.void,
+            ),
+          ),
+        }),
+      ),
+    );
+  }),
 );
