@@ -574,7 +574,9 @@ export class ChatGPTConnection {
     };
     dispatch.state = "dispatching";
     await this.persist();
-    await cdp.evaluate(`(async()=>{${rendererDiscovery}
+    // A stop may have started during image upload or parent lookup. Join the
+    // native barrier at submission, not just at send() entry.
+    const nativeSubmission = this.nativeStopBarrier.then(() => cdp.evaluate(`(async()=>{${rendererDiscovery}
       const resolved=await resolveClient();
       const key=Symbol.for('t3.chatgpt.streams.v1');window[key] ||= new Map();
       const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true};
@@ -593,7 +595,9 @@ export class ChatGPTConnection {
         Promise.resolve(handle).then(h=>{state.handle=h;},e=>emit('error',e));
         return {submitted:true};
       }catch(e){emit('error',e);throw e;}
-    })()`);
+    })()`));
+    this.nativeStopBarrier = nativeSubmission.then(() => {}, () => {});
+    await nativeSubmission;
     dispatch.state = "submitted";
     await this.persist();
   }
