@@ -568,11 +568,17 @@ export class ChatGPTConnection {
     };
     dispatch.state = "dispatching";
     await this.persist();
-    await cdp.evaluate(`(async()=>{${rendererDiscovery}
-      const resolved=await resolveClient();
+    const submission = await cdp.evaluate<{
+      submitted: boolean;
+      cancelled?: boolean;
+    }>(`(async()=>{${rendererDiscovery}
+      const cancelKey=Symbol.for('t3.chatgpt.cancelled.v1');window[cancelKey] ||= new Set();
+      if(window[cancelKey].has(${JSON.stringify(requestId)})){window[cancelKey].delete(${JSON.stringify(requestId)});return {submitted:false,cancelled:true};}
       const key=Symbol.for('t3.chatgpt.streams.v1');window[key] ||= new Map();
       const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true};
       window[key].set(${JSON.stringify(this.options.threadId)},state);
+      const resolved=await resolveClient();
+      if(window[cancelKey].has(state.requestId)){window[cancelKey].delete(state.requestId);if(window[key].get(${JSON.stringify(this.options.threadId)})===state)window[key].delete(${JSON.stringify(this.options.threadId)});return {submitted:false,cancelled:true};}
       const emit=(kind,value)=>{
         const v=value&&typeof value==='object'?value:{};const candidate=v.message||v.data||v;const m=candidate.message||candidate;
         state.conversationId=v.conversation_id||v.conversationId||candidate.conversation_id||candidate.conversationId||state.conversationId;
@@ -583,20 +589,89 @@ export class ChatGPTConnection {
         if(typeof window[state.binding]==='function')window[state.binding](JSON.stringify(update));
       };
       try {
-        const handle=resolved.client.startCompletionStream({request:${JSON.stringify(request)},onUpdate:v=>emit('update',v),onComplete:v=>emit('complete',v),onError:v=>emit('error',v)});
-        Promise.resolve(handle).then(h=>{state.handle=h;},e=>emit('error',e));
+        const startupAbort=new AbortController();
+        state.startupAbort=startupAbort;
+        const handle=resolved.client.startCompletionStream({request:${JSON.stringify(request)},startupSignal:startupAbort.signal,onUpdate:v=>emit('update',v),onComplete:v=>emit('complete',v),onError:v=>emit('error',v)});
+        state.handlePromise=Promise.resolve(handle);
+        state.handlePromise.then(h=>{state.handle=h;},e=>{state.handleError=e;emit('error',e);});
         return {submitted:true};
       }catch(e){emit('error',e);throw e;}
     })()`);
+    if (submission.cancelled) {
+      delete this.cache.dispatches[requestId];
+      await this.persist();
+      return;
+    }
     dispatch.state = "submitted";
     await this.persist();
   }
-  async stop() {
-    if (!this.cache.conversationId)
-      throw new Error("Cannot stop a generation before its conversation identity is known");
+  async stop(requestId: string) {
+    const dispatchState = this.cache.dispatches[requestId]?.state;
+    const hasOtherDispatchingRequest = Object.entries(this.cache.dispatches).some(
+      ([candidateId, dispatch]) => candidateId !== requestId && dispatch.state === "dispatching",
+    );
+    const cachedConversationId =
+      dispatchState === "submitted" &&
+      this.latestSubmittedRequestId === requestId &&
+      !hasOtherDispatchingRequest
+        ? this.cache.conversationId
+        : null;
     const cdp = await this.renderer();
     await cdp.evaluate(
-      `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();if(typeof r.client.stopCompletion!=='function')throw new Error('Stop unavailable');await r.client.stopCompletion({conversationId:${JSON.stringify(this.cache.conversationId)}});return true;})()`,
+      `(async()=>{${rendererDiscovery}
+const cancelKey=Symbol.for('t3.chatgpt.cancelled.v1');window[cancelKey] ||= new Set();window[cancelKey].add(${JSON.stringify(requestId)});
+const state=window[Symbol.for('t3.chatgpt.streams.v1')]?.get(${JSON.stringify(this.options.threadId)});
+const stateMatches=state?.requestId===${JSON.stringify(requestId)};
+const dispatchState=${JSON.stringify(dispatchState)};
+const cachedConversationId=${JSON.stringify(cachedConversationId)};
+if(state&&!stateMatches){
+  if(dispatchState==='prepared')return true;
+  throw new Error('Cannot stop the requested ChatGPT generation while another request owns the renderer stream');
+}
+if(!state&&!cachedConversationId){
+  if(dispatchState==='prepared'||dispatchState===undefined)return true;
+  throw new Error('Cannot confirm ChatGPT cancellation because renderer state is unavailable');
+}
+const conversationId=(stateMatches?state.conversationId:null)||cachedConversationId;
+const handlePromise=stateMatches?(state.handlePromise||(state.handle?Promise.resolve(state.handle):null)):null;
+const handlePending=!!handlePromise&&!state.handle&&!state.handleError;
+if(stateMatches&&!state.startupAbort&&!handlePromise&&!state.handleError)return true;
+let startupAborted=false;
+if(stateMatches&&handlePending&&state.startupAbort){
+  state.startupAbort.abort();
+  startupAborted=true;
+}
+const r=await resolveClient();
+let nativeStopped=false;
+let nativeError=null;
+if(conversationId){
+  if(typeof r.client.stopCompletion!=='function')nativeError=new Error('Stop unavailable');
+  else try{
+    await r.client.stopCompletion({conversation_id:conversationId,exclude_async_types:[]});
+    nativeStopped=true;
+  }catch(e){nativeError=e;}
+}
+const cancelHandle=async()=>{
+  if(!handlePromise)return false;
+  let handle;
+  try{handle=await handlePromise;}catch{return false;}
+  const streamRequestId=handle?.streamRequestId;
+  if(!streamRequestId||typeof r.client.cancelStream!=='function')return false;
+  try{
+    r.client.cancelStream(streamRequestId);
+    return true;
+  }catch{return false;}
+};
+let streamCancelled=false;
+if(stateMatches&&state.handle?.streamRequestId)streamCancelled=await cancelHandle();
+else if(handlePending)void cancelHandle();
+if(!nativeStopped&&!streamCancelled&&!startupAborted){
+  if(nativeError)throw nativeError;
+  throw new Error('Cannot stop a generation before its conversation or stream identity is known');
+}
+window[cancelKey].delete(${JSON.stringify(requestId)});
+if(stateMatches)state.active=false;
+return true;})()`,
     );
   }
   async *terminalEvents(signal: AbortSignal): AsyncGenerator<TerminalEvent> {

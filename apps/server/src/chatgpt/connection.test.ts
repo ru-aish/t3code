@@ -85,13 +85,18 @@ describe("ChatGPT Terminal MCP control errors", () => {
       cacheDir: "/tmp",
     });
     const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: "A non-default registered thread identifier is required" }), {
-        status: 409,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({ error: "A non-default registered thread identifier is required" }),
+        {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        },
+      ),
     );
     try {
-      await expect(connection.control("register", { cwd: "/work", model: "gpt-5-6" })).rejects.toThrow(
+      await expect(
+        connection.control("register", { cwd: "/work", model: "gpt-5-6" }),
+      ).rejects.toThrow(
         "Terminal MCP control request failed (409): A non-default registered thread identifier is required",
       );
     } finally {
@@ -150,6 +155,434 @@ describe("ChatGPT streamed update delivery", () => {
   });
 });
 
+describe("ChatGPT interruption", () => {
+  type InterruptHarnessOptions = {
+    get?: (...args: unknown[]) => Promise<unknown>;
+    startCompletionStream?: (input: { startupSignal?: AbortSignal }) => unknown;
+    stopCompletion?: (...args: unknown[]) => Promise<void>;
+    cancelStream?: (streamRequestId: string) => void;
+    streams?: Map<string, unknown>;
+  };
+
+  const makeHarness = async (options: InterruptHarnessOptions = {}) => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-stop-"));
+    const stopCompletion = options.stopCompletion ?? vi.fn(async () => {});
+    const cancelStream = options.cancelStream ?? vi.fn();
+    const startCompletionStream =
+      options.startCompletionStream ?? vi.fn(() => Promise.resolve({ streamRequestId: "stream-1" }));
+    const client = {
+      get: options.get ?? (async () => ({ current_node: "parent" })),
+      list: async () => ({}),
+      models: async () => ({}),
+      startCompletionStream,
+      stopCompletion,
+      cancelStream,
+    };
+    const window: Record<symbol, unknown> = {
+      [Symbol.for("terminal-mcp.chat-runtime.client.v5")]: client,
+    };
+    if (options.streams) window[Symbol.for("t3.chatgpt.streams.v1")] = options.streams;
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "thread",
+      cacheDir: directory,
+    });
+    Object.assign(connection, {
+      renderer: async () => ({
+        evaluate: (expression: string) =>
+          NodeVM.runInNewContext(expression, {
+            window,
+            Symbol,
+            Map,
+            Set,
+            Promise,
+            AbortController,
+          }),
+      }),
+    });
+    return {
+      directory,
+      connection,
+      window,
+      stopCompletion,
+      cancelStream,
+      startCompletionStream,
+      cleanup: () => NodeFSP.rm(directory, { recursive: true, force: true }),
+    };
+  };
+
+  type InterruptHarness = Awaited<ReturnType<typeof makeHarness>>;
+
+  const withHarness = async (
+    options: InterruptHarnessOptions,
+    run: (harness: InterruptHarness) => Promise<void>,
+  ) => {
+    const harness = await makeHarness(options);
+    try {
+      await run(harness);
+    } finally {
+      await harness.cleanup();
+    }
+  };
+
+  const loadDispatches = async (
+    connection: ChatGPTConnection,
+    dispatches: Record<string, { messageId: string; state: string }>,
+  ) => {
+    await NodeFSP.writeFile(
+      connection.cachePath,
+      JSON.stringify({
+        conversationId: "conversation",
+        messages: {},
+        dispatches,
+        handledEvents: [],
+      }),
+    );
+    await connection.load();
+  };
+
+  const nativeStopPayload = {
+    conversation_id: "conversation",
+    exclude_async_types: [],
+  };
+
+  it("uses ChatGPT's native stop payload and cancels the active stream", async () => {
+    await withHarness({}, async ({ connection, stopCompletion, cancelStream, directory }) => {
+      await connection.adoptConversation("conversation");
+      await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+      await connection.stop("request");
+
+      expect(stopCompletion).toHaveBeenCalledWith(nativeStopPayload);
+      expect(cancelStream).toHaveBeenCalledWith("stream-1");
+    });
+  });
+
+  it("can interrupt a new conversation while its stream handle is still pending", async () => {
+    const handle = Promise.withResolvers<{ streamRequestId: string }>();
+    let startupSignal: AbortSignal | undefined;
+    await withHarness(
+      {
+        get: async () => ({}),
+        startCompletionStream: (input) => {
+          startupSignal = input.startupSignal;
+          return handle.promise;
+        },
+      },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        try {
+          await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+          await expect(connection.stop("request")).resolves.toBeUndefined();
+
+          expect(startupSignal?.aborted).toBe(true);
+          expect(stopCompletion).not.toHaveBeenCalled();
+          expect(cancelStream).not.toHaveBeenCalled();
+
+          handle.resolve({ streamRequestId: "stream-new" });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(cancelStream).toHaveBeenCalledWith("stream-new");
+        } finally {
+          handle.resolve({ streamRequestId: "stream-new" });
+        }
+      },
+    );
+  });
+
+  it("does not wait for a pending stream handle before stopping a known conversation", async () => {
+    const handle = Promise.withResolvers<{ streamRequestId: string }>();
+    await withHarness(
+      { startCompletionStream: () => handle.promise },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        try {
+          await connection.adoptConversation("conversation");
+          await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+          const stopping = connection.stop("request");
+          await new Promise<void>((resolve) => setImmediate(resolve));
+
+          expect(stopCompletion).toHaveBeenCalledWith(nativeStopPayload);
+          await stopping;
+          expect(cancelStream).not.toHaveBeenCalled();
+
+          handle.resolve({ streamRequestId: "stream-pending" });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(cancelStream).toHaveBeenCalledWith("stream-pending");
+        } finally {
+          handle.resolve({ streamRequestId: "stream-pending" });
+        }
+      },
+    );
+  });
+
+  it("falls back to stream cancellation when native stop fails", async () => {
+    await withHarness(
+      {
+        stopCompletion: vi.fn(async () => {
+          throw new Error("native stop failed");
+        }),
+        startCompletionStream: () => Promise.resolve({ streamRequestId: "stream-fallback" }),
+      },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        await connection.adoptConversation("conversation");
+        await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+        await expect(connection.stop("request")).resolves.toBeUndefined();
+
+        expect(stopCompletion).toHaveBeenCalledOnce();
+        expect(cancelStream).toHaveBeenCalledWith("stream-fallback");
+      },
+    );
+  });
+
+  it("keeps a successful native stop successful when local stream cleanup fails", async () => {
+    await withHarness(
+      {
+        cancelStream: vi.fn(() => {
+          throw new Error("local cancel failed");
+        }),
+        startCompletionStream: () => Promise.resolve({ streamRequestId: "stream-local-cleanup" }),
+      },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        await connection.adoptConversation("conversation");
+        await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+        await expect(connection.stop("request")).resolves.toBeUndefined();
+
+        expect(stopCompletion).toHaveBeenCalledOnce();
+        expect(cancelStream).toHaveBeenCalledWith("stream-local-cleanup");
+      },
+    );
+  });
+
+  it("uses the renderer conversation ID before the persisted cache catches up", async () => {
+    await withHarness(
+      {
+        get: async () => ({}),
+        startCompletionStream: () => Promise.resolve({ streamRequestId: "stream-renderer-id" }),
+      },
+      async ({ connection, window, stopCompletion, directory }) => {
+        await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+        const streams = window[Symbol.for("t3.chatgpt.streams.v1")] as Map<
+          string,
+          { conversationId: string | null }
+        >;
+        streams.get("thread")!.conversationId = "renderer-conversation";
+
+        await connection.stop("request");
+
+        expect(stopCompletion).toHaveBeenCalledWith({
+          conversation_id: "renderer-conversation",
+          exclude_async_types: [],
+        });
+      },
+    );
+  });
+
+  it("uses startup abort when native stop fails before the stream handle resolves", async () => {
+    const handle = Promise.withResolvers<{ streamRequestId: string }>();
+    let startupSignal: AbortSignal | undefined;
+    await withHarness(
+      {
+        startCompletionStream: (input) => {
+          startupSignal = input.startupSignal;
+          return handle.promise;
+        },
+        stopCompletion: vi.fn(async () => {
+          throw new Error("native stop failed");
+        }),
+      },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        try {
+          await connection.adoptConversation("conversation");
+          await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+          await expect(connection.stop("request")).resolves.toBeUndefined();
+
+          expect(startupSignal?.aborted).toBe(true);
+          expect(stopCompletion).toHaveBeenCalledOnce();
+
+          handle.reject(new Error("startup aborted"));
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(cancelStream).not.toHaveBeenCalled();
+        } finally {
+          handle.reject(new Error("startup aborted"));
+        }
+      },
+    );
+  });
+
+  it("prevents an interrupted pending submission from starting and ignores stale stream state", async () => {
+    const getStarted = Promise.withResolvers<void>();
+    const getGate = Promise.withResolvers<{ current_node: string }>();
+    const startCompletionStream = vi.fn(() => ({ streamRequestId: "new-stream" }));
+    const streams = new Map<string, unknown>([
+      [
+        "thread",
+        {
+          requestId: "old-request",
+          conversationId: "conversation",
+          handle: { streamRequestId: "old-stream" },
+          active: true,
+        },
+      ],
+    ]);
+    await withHarness(
+      {
+        get: vi.fn(() => {
+          getStarted.resolve();
+          return getGate.promise;
+        }),
+        startCompletionStream,
+        streams,
+      },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        try {
+          await connection.adoptConversation("conversation");
+          const sending = connection.send("request", "Do not start", "gpt-6-thinking", directory);
+          await getStarted.promise;
+
+          await expect(connection.stop("request")).resolves.toBeUndefined();
+          expect(stopCompletion).not.toHaveBeenCalled();
+          expect(cancelStream).not.toHaveBeenCalled();
+
+          getGate.resolve({ current_node: "parent" });
+          await sending;
+
+          expect(startCompletionStream).not.toHaveBeenCalled();
+          expect(connection.submittedRequestIds).not.toContain("request");
+          expect((streams.get("thread") as { requestId?: string } | undefined)?.requestId).toBe(
+            "old-request",
+          );
+        } finally {
+          getGate.resolve({ current_node: "parent" });
+        }
+      },
+    );
+  });
+
+  it("does not let a cancelled submission delete a newer renderer stream owner", async () => {
+    await withHarness({}, async ({ connection, window, startCompletionStream, directory }) => {
+      const client = window[Symbol.for("terminal-mcp.chat-runtime.client.v5")] as {
+        get: (...args: unknown[]) => Promise<unknown>;
+      };
+      const get = client.get;
+      let injected = false;
+      const newerState = {
+        requestId: "request-b",
+        conversationId: "conversation-b",
+        handle: { streamRequestId: "stream-b" },
+        active: true,
+      };
+      Object.defineProperty(client, "get", {
+        configurable: true,
+        get() {
+          if (!injected) {
+            injected = true;
+            const cancelKey = Symbol.for("t3.chatgpt.cancelled.v1");
+            const streamsKey = Symbol.for("t3.chatgpt.streams.v1");
+            const cancels = (window[cancelKey] ??= new Set<string>()) as Set<string>;
+            const streams = window[streamsKey] as Map<string, unknown>;
+            cancels.add("request-a");
+            streams.set("thread", newerState);
+          }
+          return get;
+        },
+      });
+
+      await connection.send("request-a", "Cancelled", "gpt-6-thinking", directory);
+
+      const streams = window[Symbol.for("t3.chatgpt.streams.v1")] as Map<string, unknown>;
+      expect(streams.get("thread")).toBe(newerState);
+      expect(startCompletionStream).not.toHaveBeenCalled();
+      expect(connection.submittedRequestIds).not.toContain("request-a");
+    });
+  });
+
+  it("does not use a cached conversation when another request owns the renderer stream", async () => {
+    const streams = new Map<string, unknown>([
+      [
+        "thread",
+        {
+          requestId: "request-b",
+          conversationId: "conversation",
+          handle: { streamRequestId: "stream-b" },
+          active: true,
+        },
+      ],
+    ]);
+    await withHarness({ streams }, async ({ connection, stopCompletion, cancelStream }) => {
+      await loadDispatches(connection, {
+        "request-a": { messageId: stableMessageId("request-a"), state: "submitted" },
+        "request-b": { messageId: stableMessageId("request-b"), state: "dispatching" },
+      });
+
+      await expect(connection.stop("request-a")).rejects.toThrow(
+        "another request owns the renderer stream",
+      );
+      expect(stopCompletion).not.toHaveBeenCalled();
+      expect(cancelStream).not.toHaveBeenCalled();
+    });
+  });
+
+  it("does not use cached fallback while another request is dispatching", async () => {
+    await withHarness({}, async ({ connection, stopCompletion, cancelStream }) => {
+      await loadDispatches(connection, {
+        "request-a": { messageId: stableMessageId("request-a"), state: "submitted" },
+        "request-b": { messageId: stableMessageId("request-b"), state: "dispatching" },
+      });
+
+      await expect(connection.stop("request-a")).rejects.toThrow("renderer state is unavailable");
+      expect(stopCompletion).not.toHaveBeenCalled();
+      expect(cancelStream).not.toHaveBeenCalled();
+    });
+  });
+
+  it("fails closed when a dispatching request loses renderer state", async () => {
+    await withHarness({}, async ({ connection, stopCompletion, cancelStream }) => {
+      await loadDispatches(connection, {
+        request: { messageId: stableMessageId("request"), state: "dispatching" },
+      });
+
+      await expect(connection.stop("request")).rejects.toThrow("renderer state is unavailable");
+      expect(stopCompletion).not.toHaveBeenCalled();
+      expect(cancelStream).not.toHaveBeenCalled();
+    });
+  });
+
+  it("uses the cached conversation for the exact submitted request after renderer state is lost", async () => {
+    await withHarness(
+      {},
+      async ({ connection, window, stopCompletion, cancelStream, directory }) => {
+        await connection.adoptConversation("conversation");
+        await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+        const streams = window[Symbol.for("t3.chatgpt.streams.v1")] as Map<string, unknown>;
+        streams.delete("thread");
+
+        await expect(connection.stop("request")).resolves.toBeUndefined();
+
+        expect(stopCompletion).toHaveBeenCalledWith(nativeStopPayload);
+        expect(cancelStream).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("does not let a rejected stream handle block native stop", async () => {
+    await withHarness(
+      {
+        startCompletionStream: () => Promise.reject(new Error("stream setup failed")),
+      },
+      async ({ connection, stopCompletion, cancelStream, directory }) => {
+        await connection.adoptConversation("conversation");
+        await connection.send("request", "Stop me", "gpt-6-thinking", directory);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await expect(connection.stop("request")).resolves.toBeUndefined();
+
+        expect(stopCompletion).toHaveBeenCalledWith(nativeStopPayload);
+        expect(cancelStream).not.toHaveBeenCalled();
+      },
+    );
+  });
+});
+
 describe("ChatGPT image and project submissions", () => {
   it("uploads actual image bytes, sends a multimodal request, and keeps the destination after reload", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-wire-"));
@@ -192,7 +625,17 @@ describe("ChatGPT image and project submissions", () => {
     }
     const renderer = {
       evaluate: async (expression: string) =>
-        NodeVM.runInNewContext(expression, { window, Image, Symbol, Map, Set, Date, Intl, URL }),
+        NodeVM.runInNewContext(expression, {
+          window,
+          Image,
+          Symbol,
+          Map,
+          Set,
+          Date,
+          Intl,
+          URL,
+          AbortController,
+        }),
     };
     const options = {
       orchestrationCommand: "test-orchestration-command",

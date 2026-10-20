@@ -253,9 +253,10 @@ export const makeChatGPTAdapter = (
         const reasoningKeys = new Set<string>();
         let streamComplete = false;
         let completionRecoveryRequestId: string | null = null;
-        const forcedRequestIds = new Set<string>();
+        const suppressedRequestIds = new Set<string>();
         let usedTerminalTools = false;
         let generation = 0;
+        let interrupting = false;
         let nextOrdinal = 0;
         const itemOrdinals = new Map<string, number>();
         const itemIds = new Map<string, TurnItemId>();
@@ -397,8 +398,8 @@ export const makeChatGPTAdapter = (
                   threadId: input.threadId,
                 },
               );
-              forcedRequestIds.add(requestId);
-              yield* attempt(() => connection.stop()).pipe(
+              suppressedRequestIds.add(requestId);
+              yield* attempt(() => connection.stop(requestId)).pipe(
                 Effect.catch((cause) =>
                   Effect.logWarning("Failed to stop ChatGPT while forcing the turn closed", {
                     threadId: input.threadId,
@@ -417,7 +418,7 @@ export const makeChatGPTAdapter = (
           );
         });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
-          if (update.requestId && forcedRequestIds.has(update.requestId)) return;
+          if (update.requestId && suppressedRequestIds.has(update.requestId)) return;
           if (
             update.role === "assistant" &&
             (update.recipient?.includes("fedora_t3code") ||
@@ -707,27 +708,30 @@ export const makeChatGPTAdapter = (
                 if (streamComplete) yield* finish("completed");
                 else if (active)
                   yield* recoverMissingCompletion(active.requestId).pipe(Effect.forkScoped);
-              } else if (control.kind === "continue" && active) {
+              } else if (control.kind === "continue" && active && !interrupting) {
+                const activeRequestId = active.requestId;
                 const claim = yield* attempt(() =>
                   connection.control<{ valid: boolean }>("claim", { eventId: control.event_id }),
                 );
-                if (claim.valid) {
-                  if (!streamComplete) yield* attempt(() => connection.stop());
-                  generation++;
-                  active = { ...active, generation, requestId: control.event_id };
-                  outputTurns.set(control.event_id, active);
-                  streamComplete = false;
-                  yield* attempt(() =>
-                    connection.send(
-                      control.event_id,
-                      control.payload.prompt ?? "continue",
-                      active!.input.modelSelection.model,
-                      cwd,
-                      active!.input.modelSelection.options?.find(
-                        (option) => option.id === "reasoningEffort",
-                      )?.value as string | undefined,
-                    ),
-                  );
+                if (claim.valid && !interrupting && active?.requestId === activeRequestId) {
+                  if (!streamComplete) yield* attempt(() => connection.stop(activeRequestId));
+                  if (!interrupting && active?.requestId === activeRequestId) {
+                    generation++;
+                    active = { ...active, generation, requestId: control.event_id };
+                    outputTurns.set(control.event_id, active);
+                    streamComplete = false;
+                    yield* attempt(() =>
+                      connection.send(
+                        control.event_id,
+                        control.payload.prompt ?? "continue",
+                        active!.input.modelSelection.model,
+                        cwd,
+                        active!.input.modelSelection.options?.find(
+                          (option) => option.id === "reasoningEffort",
+                        )?.value as string | undefined,
+                      ),
+                    );
+                  }
                 }
               }
               yield* attempt(() => connection.acknowledge(control));
@@ -923,15 +927,31 @@ export const makeChatGPTAdapter = (
             ),
           interruptTurn: () =>
             Effect.gen(function* () {
+              interrupting = true;
               const timestamp = yield* DateTime.now;
+              const requestId = active?.requestId;
+              if (!streamComplete && requestId) yield* attempt(() => connection.stop(requestId));
+              if (requestId) suppressedRequestIds.add(requestId);
               yield* attempt(() =>
                 connection.control("pause", {
                   requestId: `stop-${input.threadId}-${DateTime.toEpochMillis(timestamp)}`,
                 }),
+              ).pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("Failed to pause Terminal MCP after interrupting ChatGPT", {
+                    threadId: input.threadId,
+                    cause,
+                  }),
+                ),
               );
-              if (!streamComplete) yield* attempt(() => connection.stop());
               yield* finish("interrupted");
-            }),
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  interrupting = false;
+                }),
+              ),
+            ),
           respondToRuntimeRequest: unsupported,
           readThreadSnapshot: (request) =>
             Effect.gen(function* () {
