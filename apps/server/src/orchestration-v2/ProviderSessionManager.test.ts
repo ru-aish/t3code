@@ -4981,6 +4981,89 @@ it.effect(
     }),
 );
 
+it.effect("ProviderSessionManagerV2 releases a proved pre-submit rejection without a native terminal", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-pre-submit");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const first = yield* Effect.exit(start(1));
+      assert.isTrue(Exit.isFailure(first));
+      yield* start(2);
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: CODEX_DRIVER,
+                    threadId: ThreadId.make("thread-provider-generation-pre-submit"),
+                    providerThreadId: "rejected-provider-thread" as never,
+                    runId: "rejected-run" as never,
+                    cause: Object.assign(new Error("not submitted"), {
+                      _tag: "ChatGPTTurnNotSubmittedError",
+                    }),
+                  }))
+                : Effect.void,
+            ),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 serializes native generations until the prior terminal", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -5174,6 +5257,88 @@ it.effect("ProviderSessionManagerV2 fails closed when a prior generation has no 
           idleTimeoutMs: 60_000,
           startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
             Effect.flatMap((count) => (count === 1 ? Effect.never : Effect.void)),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+it.effect("ProviderSessionManagerV2 releases definitely rejected native submissions", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-serial");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const rejected = yield* Effect.exit(start(1));
+      assert.isTrue(Exit.isFailure(rejected));
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      yield* start(2);
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: CODEX_DRIVER,
+                    threadId: ThreadId.make("thread-provider-generation-serial"),
+                    providerThreadId: "rejected" as any,
+                    runId: "rejected" as any,
+                    cause: { _tag: "ChatGPTTurnNotSubmittedError" },
+                  }))
+                : Effect.void,
+            ),
           ),
         }),
       ),
