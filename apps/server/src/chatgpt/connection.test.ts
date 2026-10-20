@@ -18,6 +18,56 @@ const decodeThreadSend = Schema.decodeUnknownSync(
   Schema.fromJsonString(OrchestratorMcpThreadSendInput),
 );
 
+describe("Conversation-scoped stop ordering", () => {
+  it("does not submit a newer request before an earlier native stop settles", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "chatgpt-stop-order-"));
+    try {
+      const connection = new ChatGPTConnection({
+        cdpEndpoint: "http://127.0.0.1:9234",
+        controlEndpoint: "http://127.0.0.1:8022",
+        token: "test",
+        environmentId: "test",
+        providerId: "chatgpt",
+        threadId: "thread",
+        cacheDir: directory,
+      });
+      await connection.adoptConversation("existing-conversation");
+      const releaseStop = Promise.withResolvers<void>();
+      const enteredStop = Promise.withResolvers<void>();
+      const operations: string[] = [];
+      Object.assign(connection, {
+        renderer: async () => ({
+          evaluate: async (expression: string) => {
+            if (expression.includes("await r.client.stopCompletion(")) {
+              operations.push("stop-start");
+              enteredStop.resolve();
+              await releaseStop.promise;
+              operations.push("stop-finish");
+              return true;
+            }
+            if (expression.includes("const raw=await r.client.get(")) return { current_node: "parent", gizmo_id: null };
+            if (expression.includes("startCompletionStream")) {
+              operations.push("send");
+              return { submitted: true };
+            }
+            throw new Error("Unexpected CDP evaluation");
+          },
+        }),
+      });
+      const stopping = connection.stop();
+      await enteredStop.promise;
+      const sending = connection.send("next-request", "next", "gpt-6-thinking", directory);
+      await Promise.resolve();
+      expect(operations).toEqual(["stop-start"]);
+      releaseStop.resolve();
+      await Promise.all([stopping, sending]);
+      expect(operations).toEqual(["stop-start", "stop-finish", "send"]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("ChatGPT submission identity", () => {
   it("uses the same valid upstream message ID for a retried durable request", () => {
     expect(stableMessageId("request-one")).toBe(stableMessageId("request-one"));

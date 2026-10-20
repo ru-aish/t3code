@@ -33,7 +33,8 @@ const fakes = vi.hoisted(() => ({
     idleChecks: number;
     onCompletionRead?: () => void;
     onDoneAcknowledged?: () => void;
-    onStop?: () => void;
+    onStop?: () => void | Promise<void>;
+    onSend?: (id: string) => void;
     state: string;
     conversationReads: number;
     options: { orchestrationCommand?: string | undefined };
@@ -85,15 +86,17 @@ vi.mock("./connection.ts", () => ({
     }
     async send(id: string) {
       this.sent.push(id);
+      this.onSend?.(id);
       if (fakes.failNextSend) {
         fakes.failNextSend = false;
         throw new Error("Image upload failed");
       }
     }
-    onStop?: () => void;
+    onStop?: () => void | Promise<void>;
+    onSend?: (id: string) => void;
     async stop() {
       this.stops++;
-      this.onStop?.();
+      await this.onStop?.();
       if (fakes.failNextStop) {
         fakes.failNextStop = false;
         throw new Error("Stop failed");
@@ -718,6 +721,48 @@ describe("ChatGPT task authority", () => {
         yield* TestClock.adjust("5 minutes");
         expect(fake.idleChecks).toBe(1);
         expect(fake.stops).toBe(1);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("does not force-close a replacement generation while an old stop is in flight", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        yield* Queue.take(events);
+        const doneAcknowledged = Promise.withResolvers<void>();
+        const continuationSent = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => doneAcknowledged.resolve();
+        fake.onSend = (id) => {
+          if (id === "new-generation") continuationSent.resolve();
+        };
+        fake.onStop = () => {
+          if (fake.stops !== 1) return;
+          fake.publish({
+            ...terminal("continue"),
+            event_id: "new-generation",
+            payload: { prompt: "continue" },
+          });
+          return continuationSent.promise;
+        };
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => doneAcknowledged.promise);
+        yield* TestClock.adjust("3 minutes");
+        yield* Effect.promise(() => continuationSent.promise);
+        // The original recovery can now exit, but may not close the replacement.
+        yield* Effect.yieldNow;
+        expect(fake.sent).toContain("new-generation");
+        expect(fake.stops).toBe(2);
+        expect(yield* Queue.size(events)).toBe(0);
+        fake.callback?.({ kind: "complete", requestId: "new-generation", conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const terminalEvent = recorded.at(-1);
+        expect(terminalEvent?.type).toBe("turn.terminal");
+        if (terminalEvent?.type !== "turn.terminal") throw new Error("Missing completion");
+        expect(terminalEvent.status).toBe("completed");
       }),
     ).pipe(Effect.provide(TestClock.layer())),
   );
