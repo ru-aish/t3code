@@ -1059,7 +1059,7 @@ it("excludes only legacy child-result handoffs, preserving genuine history migra
   expect(ignored.has("migration" as never)).toBe(false);
 });
 effectIt.effect(
-  "does not restart a cancelled native generation when its provider-turn event was lost",
+  "does not block other providers on cancelled historical local runs",
   () =>
     Effect.gen(function* () {
       const harness = makeLocalCommandHarness({
@@ -1086,16 +1086,11 @@ effectIt.effect(
       yield* harness.start;
 
       expect(harness.open).toHaveBeenCalledOnce();
-      expect(harness.startRootRun).not.toHaveBeenCalled();
-      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
-      expect(harness.projection().turnItems.at(-1)).toMatchObject({
-        type: "error",
-        failure: { class: "provider_error" },
-      });
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
     }),
 );
 effectIt.effect(
-  "does not restart a locally completed native generation without a terminal",
+  "does not block other providers on locally completed historical runs",
   () =>
     Effect.gen(function* () {
       const harness = makeLocalCommandHarness({
@@ -1122,11 +1117,6 @@ effectIt.effect(
       yield* harness.start;
 
       expect(harness.open).toHaveBeenCalledOnce();
-      expect(harness.startRootRun).not.toHaveBeenCalled();
-      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
-      expect(harness.projection().turnItems.at(-1)).toMatchObject({
-        type: "error",
-        failure: { class: "provider_error" },
-      });
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
     }),
 );
