@@ -46,6 +46,7 @@ import {
 import * as ServerConfig from "../config.ts";
 import { withDetachedWorkspaceFence } from "../workspace/detachedWorkspaceFence.ts";
 
+const isGitCommandError = Schema.is(GitCommandError);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const gitProcesses = Semaphore.makeUnsafe(8);
 const WORKTREE_ADD_TIMEOUT_MS = 300_000;
@@ -4095,7 +4096,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         withListRefsInvalidation(input.cwd, removeWorktree(input)),
       ).pipe(
         Effect.mapError((error) =>
-          Schema.is(GitCommandError)(error)
+          isGitCommandError(error)
             ? error
             : new GitCommandError({
                 ...gitCommandContext({ operation: "GitVcsDriver.removeWorktree", cwd: input.cwd, args: ["worktree", "remove", input.path] }),
