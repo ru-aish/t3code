@@ -756,22 +756,25 @@ export const makeChatGPTAdapter = (
               const recovered = yield* Effect.result(
                 Effect.gen(function* () {
                   if (transport.refreshThread) {
-                    // The same service as Refresh also commits idle threads, which
-                    // no longer have a run subscriber to persist adapter events.
+                    // The Refresh service persists recovered output even when no
+                    // live run subscriber exists. It may, however, reconcile via
+                    // another provider-session instance, so it is not sufficient
+                    // to update this actor's active generation by itself.
                     yield* transport.refreshThread(input.threadId);
-                    retry = active !== null && !streamComplete;
-                  } else {
-                    const result = yield* Deferred.make<
-                      boolean,
-                      ProviderAdapter.ProviderAdapterProtocolError
-                    >();
-                    yield* Queue.offer(incoming, {
-                      kind: "recover_snapshot",
-                      token: event.token,
-                      result,
-                    });
-                    retry = yield* Deferred.await(result);
                   }
+                  // Always reconcile the original live adapter actor as well.
+                  // This is where generation fencing, Terminal task state, and the
+                  // recovered-final forced-completion timer are owned.
+                  const result = yield* Deferred.make<
+                    boolean,
+                    ProviderAdapter.ProviderAdapterProtocolError
+                  >();
+                  yield* Queue.offer(incoming, {
+                    kind: "recover_snapshot",
+                    token: event.token,
+                    result,
+                  });
+                  retry = yield* Deferred.await(result);
                 }),
               );
               if (recovered._tag === "Failure") {
