@@ -26,11 +26,19 @@ import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
 import { mergeFinalAnswer } from "./protocol.ts";
 import {
   ChatGPTConnection,
+  ChatGPTSubmissionNotStartedError,
   type ChatGPTUpdate,
   type ChatGPTImage,
   type TerminalBinding,
   type TerminalEvent,
 } from "./connection.ts";
+
+export class ChatGPTTurnNotSubmittedError extends Error {
+  readonly _tag = "ChatGPTTurnNotSubmittedError";
+  constructor(cause: unknown) {
+    super("ChatGPT turn was not submitted", { cause });
+  }
+}
 
 export const CHATGPT_DRIVER = ProviderDriverKind.make("chatgpt");
 
@@ -782,7 +790,27 @@ export const makeChatGPTAdapter = (
         const ensureThread = Effect.fnUntraced(function* (
           request: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
         ) {
-          if (thread) return thread;
+          if (thread && !(request.existingProviderThread?.nativeThreadRef === null &&
+            thread.nativeThreadRef !== null)) return thread;
+          if (thread?.nativeThreadRef && request.existingProviderThread?.nativeThreadRef === null) {
+            if (active) return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+              driver: CHATGPT_DRIVER, threadId: input.threadId,
+              providerThreadId: thread.id, runId: active.input.runId,
+            });
+            binding = yield* attempt(() => connection.resetNativeConversation());
+            generation++;
+            outputTurns.clear();
+            forcedRequestIds.clear();
+            messages.clear();
+            finalFragments.clear();
+            reasoningKeys.clear();
+            itemOrdinals.clear();
+            itemIds.clear();
+            restoredItems.clear();
+            nativeMessageIds.clear();
+            streamComplete = false;
+            thread = null;
+          }
           const timestamp = yield* DateTime.now;
           thread = request.existingProviderThread
             ? {
