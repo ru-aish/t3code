@@ -17,9 +17,11 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/server/adapterDriver";
 import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
@@ -172,6 +174,7 @@ export const makeChatGPTAdapter = (
       Effect.gen(function* () {
         const now = yield* DateTime.now;
         const sessionScope = yield* Effect.scope;
+        const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
         const cwd = input.runtimePolicy.cwd;
         if (!cwd)
           return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -246,6 +249,7 @@ export const makeChatGPTAdapter = (
         if (binding.conversation_id)
           yield* attempt(() => connection.adoptConversation(binding.conversation_id!));
         let thread: OrchestrationV2ProviderThread | null = null;
+        const pendingProcessEvents: TerminalEvent[] = [];
         let active: ActiveTurn | null = null;
         const outputTurns = new Map<string, ActiveTurn>();
         const messages = new Map<string, OrchestrationV2ConversationMessage>();
@@ -714,6 +718,44 @@ export const makeChatGPTAdapter = (
                 return;
               }
               const control = event.event;
+              // Detached processes may finish after their spawning activation's epoch.
+              // They are not turn-scoped continue events and must survive that change.
+              if (control.kind === "process.completed") {
+                if (control.acknowledged || control.payload.processId === undefined) return;
+                if (thread === null) {
+                  pendingProcessEvents.push(control);
+                  return;
+                }
+                const processId = control.payload.processId;
+                const result = control.payload.result ?? "unknown";
+                const outcome = result === "exit_code=0" ? "completed" : result.startsWith("exit_code=") ? "failed" : "unknown";
+                yield* continuationRequests.offer({
+                  threadId: input.threadId,
+                  providerThreadId: thread.id,
+                  driver: CHATGPT_DRIVER,
+                  messageId: MessageId.make(`process:${control.event_id}`),
+                  delivery: "message_text",
+                  detail: `Background process ${processId} finished (${result}). Use poll_process with process_id ${processId} for its output.`,
+                  notification: {
+                    source: { kind: "background_task" },
+                    outcome,
+                    summary: `Background process ${processId} finished`,
+                  },
+                  dispatchIfCurrent: (effect) =>
+                    Effect.gen(function* () {
+                      const claim = yield* Effect.promise(() =>
+                        connection.control<{ valid: boolean }>("claim", { eventId: control.event_id }),
+                      );
+                      if (!claim.valid) return Option.none();
+                      // The durable T3 command receipt is authoritative; an
+                      // in-memory queue offer alone never consumes this event.
+                      const accepted = yield* effect;
+                      yield* Effect.promise(() => connection.acknowledge(control));
+                      return Option.some(accepted);
+                    }),
+                });
+                return;
+              }
               if (control.epoch !== binding.epoch) {
                 yield* attempt(() => connection.acknowledge(control));
                 return;
@@ -756,7 +798,7 @@ export const makeChatGPTAdapter = (
             }).pipe(
               Effect.catch(() =>
                 Effect.gen(function* () {
-                  if (event.kind === "terminal")
+                  if (event.kind === "terminal" && event.event.kind !== "process.completed")
                     yield* attempt(() => connection.acknowledge(event.event)).pipe(Effect.ignore);
                   yield* Effect.logWarning(
                     "ChatGPT control event failed; Terminal MCP retains task authority.",
@@ -806,6 +848,9 @@ export const makeChatGPTAdapter = (
                 createdAt: timestamp,
                 updatedAt: timestamp,
               };
+          for (const pending of pendingProcessEvents.splice(0)) {
+            yield* Queue.offer(incoming, { kind: "terminal", event: pending });
+          }
           return thread;
         });
         const startTurn = Effect.fnUntraced(function* (

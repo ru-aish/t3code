@@ -239,6 +239,9 @@ export const layer = Layer.effectDiscard(
             ThreadManagementProviderInstanceDisabledError: logInstanceDisabled,
           }),
         );
+        if (request.messageId !== undefined && request.delegatedCompletion === undefined) {
+          yield* clearRetryAttempt(`${request.threadId}:process:${request.messageId}`);
+        }
       },
     );
 
@@ -252,6 +255,18 @@ export const layer = Layer.effectDiscard(
                 providerThreadId: request.providerThreadId,
                 cause,
               });
+              if (
+                request.delegatedCompletion === undefined &&
+                request.messageId !== undefined &&
+                request.dispatchIfCurrent !== undefined
+              ) {
+                const retryKey = `${request.threadId}:process:${request.messageId}`;
+                const retryDelay = yield* nextRetryDelay(retryKey);
+                yield* Effect.sleep(`${retryDelay} millis`).pipe(
+                  Effect.andThen(requests.offer(request)),
+                  Effect.forkScoped,
+                );
+              }
               if (request.delegatedCompletion !== undefined) {
                 const completion = request.delegatedCompletion;
                 const retryKey = delegatedCompletionRetryKey(request, completion);

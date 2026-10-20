@@ -36,10 +36,13 @@ export type TerminalEvent = {
   thread_id: string;
   kind: string;
   epoch: number;
+  acknowledged?: number | boolean;
   payload: {
     state?: string | undefined;
     paused?: boolean | undefined;
     prompt?: string | undefined;
+    processId?: string | undefined;
+    result?: string | undefined;
     url?: string;
   };
 };
@@ -603,7 +606,7 @@ export class ChatGPTConnection {
         throw new Error("Cannot stop a generation before its conversation identity is known");
       const cdp = await this.renderer();
       await cdp.evaluate(
-        `(async()=>{\nconst r=await resolveClient();if(typeof r.client.stopCompletion!=='function')throw new Error('Stop unavailable');await r.client.stopCompletion({conversationId:});return true;})()`,
+        `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();if(typeof r.client.stopCompletion!=='function')throw new Error('Stop unavailable');await r.client.stopCompletion({conversationId:${JSON.stringify(this.cache.conversationId)}});return true;})()`,
       );
     });
     this.nativeStopBarrier = stopping.catch(() => {});
