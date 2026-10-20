@@ -4090,7 +4090,20 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       withListRefsInvalidation(input.cwd, fetchRemoteTrackingBranch(input)),
     setBranchUpstream: (input) => withListRefsInvalidation(input.cwd, setBranchUpstream(input)),
     removeWorktree: (input) =>
-      withDetachedWorkspaceFence(input.path, withListRefsInvalidation(input.cwd, removeWorktree(input))),
+      withDetachedWorkspaceFence(
+        input.path,
+        withListRefsInvalidation(input.cwd, removeWorktree(input)),
+      ).pipe(
+        Effect.mapError((error) =>
+          Schema.is(GitCommandError)(error)
+            ? error
+            : new GitCommandError({
+                ...gitCommandContext({ operation: "GitVcsDriver.removeWorktree", cwd: input.cwd, args: ["worktree", "remove", input.path] }),
+                detail: "durable workspace fence blocked removal",
+                cause: error,
+              }),
+        ),
+      ),
     pruneWorktrees: (input) => withListRefsInvalidation(input.cwd, pruneWorktrees(input)),
     deleteLocalBranch: (input) => withListRefsInvalidation(input.cwd, deleteLocalBranch(input)),
     renameBranch: (input) => withListRefsInvalidation(input.cwd, renameBranch(input)),
