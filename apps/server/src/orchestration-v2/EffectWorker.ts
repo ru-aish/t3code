@@ -172,21 +172,6 @@ export const layerExecutor: Layer.Layer<
                   },
                 })
                 .pipe(
-                  Effect.catchTags({
-                    ThreadManagementProviderInstanceDisabledError: () =>
-                      Effect.forEach(
-                        delivery.taskIds,
-                        (id) =>
-                          threads.dispatch({
-                            type: "delegated_task.completion-delivery.acknowledge",
-                            commandId: CommandId.make(`${commandId}:disabled:${id}`),
-                            parentThreadId: effect.threadId,
-                            taskId: id,
-                            observedByRunId: null,
-                          }),
-                        { discard: true },
-                      ),
-                  }),
                   // The in-memory fast path can win the thread lock. If its
                   // dispatch consumed our delivery, this obligation is settled.
                   Effect.catch((error) =>

@@ -131,67 +131,22 @@ export const layer = Layer.effectDiscard(
             fixtureName: "delegated-completion",
             commandName: "dispatch",
           });
-          yield* threads
-            .dispatch({
-              type: "message.dispatch",
-              commandId,
-              threadId: request.threadId,
-              messageId: delivery.messageId,
-              text: delegatedCompletionText(delivery.taskIds),
-              attachments: [],
-              dispatchMode: { type: "queue_after_active" },
-              createdBy: "agent",
-              creationSource: "server",
-              delegatedCompletion: {
-                parentRunId: request.delegatedCompletion.parentRunId,
-                generation: delivery.generation,
-                taskIds: delivery.taskIds,
-              },
-            })
-            .pipe(
-              Effect.catchTags({
-                ThreadManagementProviderInstanceDisabledError: (error) =>
-                  Effect.logInfo(
-                    "orchestration-v2.provider-continuation.delegated-completion-disabled",
-                    {
-                      threadId: request.threadId,
-                      projectId: error.projectId,
-                      instanceId: error.instanceId,
-                    },
-                  ).pipe(
-                    Effect.andThen(
-                      Effect.forEach(
-                        delivery.taskIds,
-                        (taskId) =>
-                          ids.allocate
-                            .command({
-                              fixtureName: "delegated-completion",
-                              commandName: "acknowledge-disabled",
-                            })
-                            .pipe(
-                              Effect.flatMap((ackCommandId) =>
-                                threads.dispatch({
-                                  type: "delegated_task.completion-delivery.acknowledge",
-                                  commandId: ackCommandId,
-                                  parentThreadId: request.threadId,
-                                  taskId,
-                                  observedByRunId: null,
-                                }),
-                              ),
-                            ),
-                        { discard: true },
-                      ),
-                    ),
-                    Effect.andThen(
-                      request.clearIfCurrent !== undefined
-                        ? request.clearIfCurrent()
-                        : request.dispatchIfCurrent !== undefined
-                          ? request.dispatchIfCurrent(Effect.void)
-                          : Effect.void,
-                    ),
-                  ),
-              }),
-            );
+          yield* threads.dispatch({
+            type: "message.dispatch",
+            commandId,
+            threadId: request.threadId,
+            messageId: delivery.messageId,
+            text: delegatedCompletionText(delivery.taskIds),
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+            delegatedCompletion: {
+              parentRunId: request.delegatedCompletion.parentRunId,
+              generation: delivery.generation,
+              taskIds: delivery.taskIds,
+            },
+          });
           yield* clearRetryAttempt(retryKey);
           return;
         }
