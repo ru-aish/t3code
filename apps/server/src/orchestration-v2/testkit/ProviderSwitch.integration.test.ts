@@ -3,7 +3,6 @@ import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudge
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
-  ContextHandoffId,
   ContextTransferId,
   type ChatAttachment,
   EventId,
@@ -3557,6 +3556,13 @@ it.live(
         const databaseLayer = SqlitePersistence.layerFromPath(
           path.join(temp, "orchestration.sqlite"),
         ).pipe(Layer.provide(NodeServices.layer));
+        const maintenanceLayer = ProjectionMaintenance.layer.pipe(
+          Layer.provide(
+            Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+              Layer.provideMerge(databaseLayer),
+            ),
+          ),
+        );
         const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
         const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
         const registry = ProviderAdapterRegistry.layerFromAdapters([
@@ -3739,9 +3745,7 @@ it.live(
             Effect.tap((verification) => Effect.sync(() => assert.isTrue(verification.valid))),
           ),
         ).pipe(
-          Effect.provide(ProjectionMaintenance.layer),
-          Effect.provide(Layer.mergeAll(EventStore.layer, ProjectionStore.layer)),
-          Effect.provide(databaseLayer),
+          Effect.provide(maintenanceLayer),
         );
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
