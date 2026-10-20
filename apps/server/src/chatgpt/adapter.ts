@@ -17,11 +17,9 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/server/adapterDriver";
 import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
@@ -174,8 +172,6 @@ export const makeChatGPTAdapter = (
       Effect.gen(function* () {
         const now = yield* DateTime.now;
         const sessionScope = yield* Effect.scope;
-        const continuationRequests =
-          yield* ProviderContinuationRequests.ProviderContinuationRequests;
         const cwd = input.runtimePolicy.cwd;
         if (!cwd)
           return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -250,12 +246,6 @@ export const makeChatGPTAdapter = (
         if (binding.conversation_id)
           yield* attempt(() => connection.adoptConversation(binding.conversation_id!));
         let thread: OrchestrationV2ProviderThread | null = null;
-        const pendingProcessEvents: TerminalEvent[] = [];
-        const flushPendingProcessEvents = Effect.gen(function* () {
-          for (const pending of pendingProcessEvents.splice(0)) {
-            yield* Queue.offer(incoming, { kind: "terminal", event: pending });
-          }
-        });
         let active: ActiveTurn | null = null;
         const outputTurns = new Map<string, ActiveTurn>();
         const messages = new Map<string, OrchestrationV2ConversationMessage>();
@@ -726,69 +716,9 @@ export const makeChatGPTAdapter = (
                 return;
               }
               const control = event.event;
-              // Detached processes may finish after their spawning activation's epoch.
-              // They are not turn-scoped continue events and must survive that change.
-              if (control.kind === "process.completed") {
-                if (control.acknowledged || control.payload.processId === undefined) return;
-                if (thread === null) {
-                  pendingProcessEvents.push(control);
-                  return;
-                }
-                const processId = control.payload.processId;
-                const result = control.payload.result;
-                const status =
-                  control.payload.status ??
-                  (typeof result === "object" && result !== null ? result.status : undefined);
-                const exitCode =
-                  control.payload.exitCode ??
-                  (typeof result === "object" && result !== null ? result.exit_code : undefined) ??
-                  (typeof result === "string" && /^exit_code=-?\d+$/.test(result)
-                    ? Number(result.slice("exit_code=".length))
-                    : undefined);
-                const resultText =
-                  typeof result === "string"
-                    ? result
-                    : exitCode !== undefined && exitCode !== null
-                      ? `exit_code=${exitCode}`
-                      : (status ?? "unknown");
-                const outcome =
-                  status === "cancelled"
-                    ? "cancelled"
-                    : exitCode === 0
-                      ? "completed"
-                      : (exitCode !== undefined && exitCode !== null) ||
-                          status === "supervisor_error"
-                        ? "failed"
-                        : "unknown";
-                yield* continuationRequests.offer({
-                  threadId: input.threadId,
-                  providerThreadId: thread.id,
-                  driver: CHATGPT_DRIVER,
-                  messageId: MessageId.make(`process:${control.event_id}`),
-                  delivery: "message_text",
-                  detail: `Background process ${processId} finished (${resultText}). Use durable_process_status and durable_process_output with job_id ${processId} for its result and output.`,
-                  notification: {
-                    source: { kind: "background_task" },
-                    outcome,
-                    summary: `Background process ${processId} finished`,
-                  },
-                  dispatchIfCurrent: (effect) =>
-                    Effect.gen(function* () {
-                      const claim = yield* Effect.promise(() =>
-                        connection.control<{ valid: boolean }>("claim", {
-                          eventId: control.event_id,
-                        }),
-                      );
-                      if (!claim.valid) return Option.none();
-                      // The durable T3 command receipt is authoritative; an
-                      // in-memory queue offer alone never consumes this event.
-                      const accepted = yield* effect;
-                      yield* Effect.promise(() => connection.acknowledge(control));
-                      return Option.some(accepted);
-                    }),
-                });
-                return;
-              }
+              // The provider-instance listener owns detached process events
+              // independently of the lifetime of this native provider session.
+              if (control.kind === "process.completed") return;
               if (control.epoch !== binding.epoch) {
                 yield* attempt(() => connection.acknowledge(control));
                 return;
@@ -881,7 +811,6 @@ export const makeChatGPTAdapter = (
                 createdAt: timestamp,
                 updatedAt: timestamp,
               };
-          yield* flushPendingProcessEvents;
           return thread;
         });
         const startTurn = Effect.fnUntraced(function* (
@@ -1007,9 +936,8 @@ export const makeChatGPTAdapter = (
           events: Stream.fromQueue(events),
           ensureThread,
           resumeThread: ({ providerThread }) =>
-            Effect.gen(function* () {
+            Effect.sync(() => {
               thread = providerThread;
-              yield* flushPendingProcessEvents;
               return providerThread;
             }),
           startTurn,
