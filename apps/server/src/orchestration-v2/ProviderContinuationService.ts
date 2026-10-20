@@ -8,6 +8,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
+import { forkParked } from "../serverActivation.ts";
 
 const CONTINUATION_MESSAGE_TEXT = "Background task completed.";
 
@@ -278,7 +279,8 @@ export const layer = Layer.effectDiscard(
         ),
       ),
       Effect.forever,
-      Effect.forkScoped,
+      // Replayed source events must survive startup reconciliation before dispatch/ack.
+      forkParked,
     );
   }),
 );
