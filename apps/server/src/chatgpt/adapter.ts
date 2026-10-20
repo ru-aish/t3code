@@ -279,6 +279,7 @@ export const makeChatGPTAdapter = (
         const reasoningKeys = new Set<string>();
         let streamComplete = false;
         let completionRecoveryRequestId: string | null = null;
+        let recoveredFinalRecoveryRequestId: string | null = null;
         let transportInterrupted = false;
         let recoveryToken = 0;
         let recoveryScheduled = false;
@@ -489,6 +490,63 @@ export const makeChatGPTAdapter = (
             ),
           );
         });
+        const recoverCompletedProviderWithoutTask = Effect.fnUntraced(function* (
+          requestId: string,
+        ) {
+          if (recoveredFinalRecoveryRequestId === requestId) return;
+          recoveredFinalRecoveryRequestId = requestId;
+          const recoveryGeneration = active?.generation;
+          yield* Effect.gen(function* () {
+            // A recovered native final is strong evidence that the provider turn
+            // ended, but Terminal MCP may still legitimately issue a continuation.
+            // Give it the same three-minute grace period used by missing-stream
+            // recovery before treating the orphaned task as stale.
+            yield* Effect.sleep("3 minutes");
+            if (
+              active?.requestId !== requestId ||
+              active.generation !== recoveryGeneration ||
+              binding.state === "done"
+            )
+              return;
+            yield* Effect.logWarning(
+              "Recovered ChatGPT final answer while Terminal MCP remained active; forcing the turn closed",
+              { threadId: input.threadId },
+            );
+            retiredRequestIds.add(requestId);
+            // Pause the orphaned Terminal activation so its inactivity recovery
+            // cannot revive a provider turn that we are about to terminalize.
+            yield* attempt(() =>
+              connection.control("pause", { requestId: `recovered-final-${requestId}` }),
+            ).pipe(Effect.ignore);
+            yield* attempt(() => connection.stop()).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning(
+                  "Failed to stop ChatGPT while forcing a recovered final turn closed",
+                  { threadId: input.threadId, cause },
+                ),
+              ),
+            );
+            // A Terminal continuation or newer provider generation may have won
+            // while pause/stop was in flight. Refresh task state and never close
+            // a generation that has since continued or completed normally.
+            binding = yield* attempt(() => connection.control<TerminalBinding>("get")).pipe(
+              Effect.catch(() => Effect.succeed(binding)),
+            );
+            if (
+              active?.requestId === requestId &&
+              active.generation === recoveryGeneration &&
+              binding.state !== "done"
+            )
+              yield* finish("forced");
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (recoveredFinalRecoveryRequestId === requestId)
+                  recoveredFinalRecoveryRequestId = null;
+              }),
+            ),
+          );
+        });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
           if (update.requestId && retiredRequestIds.has(update.requestId)) return;
           if (
@@ -665,6 +723,25 @@ export const makeChatGPTAdapter = (
               requestId: active.requestId,
               conversationId: binding.conversation_id,
             });
+          const recoveredFinal = snapshot.updates.some(
+            (update) =>
+              update.kind === "update" &&
+              update.requestId === snapshot.latestRequestId &&
+              update.role === "assistant" &&
+              (!update.channel || update.channel === "final") &&
+              (!update.recipient || update.recipient === "all") &&
+              update.hidden !== true &&
+              update.status === "finished_successfully",
+          );
+          if (
+            recoveredFinal &&
+            active !== null &&
+            active.requestId === snapshot.latestRequestId &&
+            binding.state !== "done"
+          )
+            yield* recoverCompletedProviderWithoutTask(active.requestId).pipe(
+              Effect.forkIn(sessionScope),
+            );
         });
         const recoverTransport = Effect.fnUntraced(function* (
           event: Extract<Update, { kind: "recover" }>,
