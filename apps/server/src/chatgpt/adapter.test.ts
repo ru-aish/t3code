@@ -847,6 +847,80 @@ describe("ChatGPT task authority", () => {
       ),
   );
 
+  it.effect(
+    "replays a process completion received before resuming an existing provider thread",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const offered =
+            yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+          const requests = {
+            offer: (request: ProviderContinuationRequests.ProviderContinuationRequest) =>
+              Queue.offer(offered, request).pipe(Effect.asVoid),
+            take: Effect.never,
+          };
+          yield* Effect.gen(function* () {
+            const threadId = ThreadId.make("test-thread");
+            const selection = {
+              instanceId: ProviderInstanceId.make("chatgpt"),
+              model: "test-model",
+            };
+            const adapter = makeChatGPTAdapter(
+              {
+                instanceId: selection.instanceId,
+                displayName: undefined,
+                environment: [],
+                enabled: true,
+                config: yield* Schema.decodeEffect(ChatGPTSettings)({}),
+              },
+              {
+                token: "test-token",
+                environmentId: "test-environment",
+                cacheDir: "/tmp/test-chatgpt",
+                attachMcp: () => Effect.succeed(null),
+              },
+            );
+            const session = yield* adapter.openSession({
+              threadId,
+              providerSessionId: ProviderSessionId.make("existing-session"),
+              modelSelection: selection,
+              runtimePolicy: {
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                cwd: "/tmp",
+              },
+            });
+            const fake = fakes.connections.at(-1)!;
+            const beforeResumeHandled = Promise.withResolvers<void>();
+            fake.onDoneAcknowledged = () => beforeResumeHandled.resolve();
+            fake.publish({
+              ...terminal("process.completed", undefined, 0),
+              event_id: "process-before-resume",
+              payload: { processId: "job-before-resume", status: "exited", exitCode: 0 },
+            });
+            fake.publish(terminal("state", "done", 0));
+            yield* Effect.promise(() => beforeResumeHandled.promise);
+            expect(yield* Queue.size(offered)).toBe(0);
+            yield* session.resumeThread({
+              providerThread: { id: "chatgpt:test-thread" } as never,
+            });
+            const notification = yield* Queue.take(offered);
+            expect(notification.messageId).toBe(MessageId.make("process:process-before-resume"));
+            expect(notification.notification?.outcome).toBe("completed");
+            expect(fake.acknowledged).not.toContain("process-before-resume");
+            if (!notification.dispatchIfCurrent) throw new Error("Missing source acknowledgment");
+            yield* notification.dispatchIfCurrent(Effect.void);
+            expect(fake.acknowledged).toContain("process-before-resume");
+          }).pipe(
+            Effect.provideService(
+              ProviderContinuationRequests.ProviderContinuationRequests,
+              requests,
+            ),
+          );
+        }),
+      ),
+  );
+
   it.effect("still forces the turn when native stop fails", () =>
     Effect.scoped(
       Effect.gen(function* () {
