@@ -174,7 +174,8 @@ export const makeChatGPTAdapter = (
       Effect.gen(function* () {
         const now = yield* DateTime.now;
         const sessionScope = yield* Effect.scope;
-        const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        const continuationRequests =
+          yield* ProviderContinuationRequests.ProviderContinuationRequests;
         const cwd = input.runtimePolicy.cwd;
         if (!cwd)
           return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -386,7 +387,8 @@ export const makeChatGPTAdapter = (
                 active.generation !== recoveryGeneration ||
                 streamComplete ||
                 binding.state !== "done"
-              ) return;
+              )
+                return;
               const updates = yield* attempt(() => connection.readCompletion(requestId)).pipe(
                 Effect.catch(() => Effect.succeed(null)),
               );
@@ -395,7 +397,8 @@ export const makeChatGPTAdapter = (
                 active.generation !== recoveryGeneration ||
                 streamComplete ||
                 binding.state !== "done"
-              ) return;
+              )
+                return;
               if (updates) {
                 // Recovered text must be ingested before the completion event.
                 for (const update of updates)
@@ -727,15 +730,38 @@ export const makeChatGPTAdapter = (
                   return;
                 }
                 const processId = control.payload.processId;
-                const result = control.payload.result ?? "unknown";
-                const outcome = result === "exit_code=0" ? "completed" : result.startsWith("exit_code=") ? "failed" : "unknown";
+                const result = control.payload.result;
+                const status =
+                  control.payload.status ??
+                  (typeof result === "object" && result !== null ? result.status : undefined);
+                const exitCode =
+                  control.payload.exitCode ??
+                  (typeof result === "object" && result !== null ? result.exit_code : undefined) ??
+                  (typeof result === "string" && /^exit_code=-?\d+$/.test(result)
+                    ? Number(result.slice("exit_code=".length))
+                    : undefined);
+                const resultText =
+                  typeof result === "string"
+                    ? result
+                    : exitCode !== undefined && exitCode !== null
+                      ? `exit_code=${exitCode}`
+                      : (status ?? "unknown");
+                const outcome =
+                  status === "cancelled"
+                    ? "cancelled"
+                    : exitCode === 0
+                      ? "completed"
+                      : (exitCode !== undefined && exitCode !== null) ||
+                          status === "supervisor_error"
+                        ? "failed"
+                        : "unknown";
                 yield* continuationRequests.offer({
                   threadId: input.threadId,
                   providerThreadId: thread.id,
                   driver: CHATGPT_DRIVER,
                   messageId: MessageId.make(`process:${control.event_id}`),
                   delivery: "message_text",
-                  detail: `Background process ${processId} finished (${result}). Use poll_process with process_id ${processId} for its output.`,
+                  detail: `Background process ${processId} finished (${resultText}). Use durable_process_status and durable_process_output with job_id ${processId} for its result and output.`,
                   notification: {
                     source: { kind: "background_task" },
                     outcome,
@@ -744,7 +770,9 @@ export const makeChatGPTAdapter = (
                   dispatchIfCurrent: (effect) =>
                     Effect.gen(function* () {
                       const claim = yield* Effect.promise(() =>
-                        connection.control<{ valid: boolean }>("claim", { eventId: control.event_id }),
+                        connection.control<{ valid: boolean }>("claim", {
+                          eventId: control.event_id,
+                        }),
                       );
                       if (!claim.valid) return Option.none();
                       // The durable T3 command receipt is authoritative; an
