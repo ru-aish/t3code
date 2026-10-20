@@ -4,7 +4,7 @@ T3's in-process `withWorkspaceLease` only coordinates T3 effects. Terminal MCP c
 
 ## Shared protocol (v1)
 
-T3 reads the Terminal MCP durable supervisor's on-disk job ledger. Set `T3_WORKSPACE_DURABLE_JOBS_DIR` in T3 to the same directory as Terminal MCP's `MCP_T3_DURABLE_JOBS_DIR`. If T3 has `T3_TERMINAL_DB`, its default is that database's sibling `durable-jobs`; otherwise the extra fence is not enabled. The job root is outside worktrees and private to the local user.
+T3 reads the Terminal MCP durable supervisor's on-disk job ledger. Set `T3_WORKSPACE_DURABLE_JOBS_DIR` in T3 to the same directory as Terminal MCP's `MCP_T3_DURABLE_JOBS_DIR` (or supply that same `MCP_T3_DURABLE_JOBS_DIR` directly to T3). If T3 has `T3_TERMINAL_DB`, its default is that database's sibling `durable-jobs`; otherwise the extra fence is not enabled. The job root is outside worktrees and private to the local user.
 
 The Terminal MCP producer **must** be updated separately:
 
@@ -12,6 +12,6 @@ The Terminal MCP producer **must** be updated separately:
 2. Acquire the _atomic directory_ `<durable-jobs>/workspace-mutation.lock` before beginning any launch reservation. Hold it until the supervisor has durably written `jobs/<job-id>/request.json` (whose `cwd` is canonical) or until an abort is known not to have launched a process. No clock-based stale-lock recovery: if a caller crashes with the lock, fail closed until an operator can verify and remove it.
 3. Keep `request.json` and write `result.json` only after the entire original process group has been reaped/verified. Non-verifiable termination must not be represented as `group_verified: true`. A child that daemonizes into an independent process group or writes outside the declared cwd breaks this contract; such workloads require a separate isolated worktree or a stronger supervisor.
 
-T3 acquires the same lock for the **whole** rollback or cleanup, examines all reserved jobs, and refuses mutation if any overlapping working directory has an unfinished, missing, corrupt, or unverified exit receipt. A lock, missing protocol marker, or unreadable ledger always fails closed _when the integration is configured_.
+T3 acquires the same lock for the **whole** rollback or cleanup, examines all reserved jobs, and refuses mutation if any overlapping working directory has an unfinished, missing, corrupt, or unverified exit receipt. A lock, missing protocol marker, or unreadable ledger always fails closed _when the integration is configured_. No configured root means the extra cross-process gate is disabled; that is not evidence of safety. Do not enable detached workspace writers without setting the root in T3 and deploying the matching producer.
 
 This is intentionally one global gate per local supervisor instead of a new distributed lease subsystem. It establishes an ordering: either the job reservation completes first and blocks rollback, or the rollback completes first and the job starts afterward. T3-only changes do not establish this ordering: do not enable file restoration/cleanup in an environment with detached Terminal MCP writers until the producer-side protocol is deployed and both processes reference the same directory.
