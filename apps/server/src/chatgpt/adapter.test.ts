@@ -230,6 +230,9 @@ const fixture = Effect.gen(function* () {
       environmentId: "test-environment",
       cacheDir: "/tmp/test-chatgpt",
       attachMcp,
+      // Production recovery persists through the Refresh service first. Keep the
+      // unit harness on that path so local reconciliation cannot silently drift.
+      refreshThread: () => Effect.void,
     },
   );
   const session = yield* adapter.openSession({
