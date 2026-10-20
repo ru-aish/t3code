@@ -1,0 +1,245 @@
+name: Scheduled AppImage and Android APK
+
+on:
+  schedule:
+    # Four fixed starts per day, six hours apart. Avoid minute zero, when
+    # GitHub scheduled jobs are usually busiest.
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  appimage:
+    name: Build Linux AppImage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --frozen-lockfile
+
+      - name: Install Linux packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config imagemagick
+
+      - name: Test ChatGPT integration
+        run: |
+          command -v pwsh
+          vp test run \
+            apps/server/src/chatgpt/connection.test.ts \
+            apps/server/src/chatgpt/adapter.test.ts \
+            apps/server/src/chatgpt/protocol.test.ts \
+            apps/server/src/chatgpt/driver.test.ts \
+            apps/server/src/chatgpt/threadSync.test.ts \
+            apps/server/src/chatgpt/mcpBridge.test.ts \
+            apps/server/src/chatgpt/mcpBridge.windows.test.ts \
+            apps/server/src/chatgpt/subagents.integration.test.ts \
+            apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts \
+            packages/contracts/src/settings.test.ts \
+            apps/web/src/components/chat/ModelPickerContent.test.ts \
+            apps/web/src/components/chat/ChatGPTThreadControls.test.tsx \
+            apps/web/src/components/chat/ThreadDetailsPanel.test.tsx \
+            apps/server/src/auth/RpcAuthorization.test.ts \
+            packages/client-runtime/src/state/commandPermissions.test.ts
+
+      - name: Typecheck server and web
+        run: vp run --filter t3 --filter @t3tools/web typecheck
+
+      - name: Package AppImage
+        env:
+          T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+          T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+          T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+        run: vp run dist:desktop:linux
+
+      - name: Verify and stage AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t appimages < <(find release -maxdepth 1 -type f -name '*.AppImage' -print | sort)
+          if (( ${#appimages[@]} != 1 )); then
+            printf 'Expected one AppImage, found %s\n' "${#appimages[@]}" >&2
+            exit 1
+          fi
+          test -s "${appimages[0]}"
+          file "${appimages[0]}"
+          mkdir -p scheduled-appimage
+          cp "${appimages[0]}" "scheduled-appimage/T3-Code-${GITHUB_SHA:0:12}-x86_64.AppImage"
+          printf 'commit=%s\nworkflow_run=%s\nrepository=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > scheduled-appimage/APPIMAGE_BUILD_INFO.txt
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: scheduled-linux-appimage
+          path: scheduled-appimage/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  android:
+    name: Build production Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+
+      - name: Install mobile dependencies
+        run: vp install --frozen-lockfile --filter=@t3tools/mobile...
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Restore Gradle build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: scheduled-mobile-gradle-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/mobile/package.json', 'apps/mobile/app.config.*', 'patches/**') }}
+          restore-keys: |
+            scheduled-mobile-gradle-${{ runner.os }}-
+            mobile-gradle-${{ runner.os }}-
+
+      - name: Install Android SDK components
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006'
+
+      - name: Generate Android native project
+        working-directory: apps/mobile
+        env:
+          APP_VARIANT: production
+          EXPO_NO_GIT_STATUS: "1"
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Use stable Android compile SDK
+        run: |
+          echo 'android.compileSdkVersion=36' >> apps/mobile/android/gradle.properties
+          echo 'android.buildToolsVersion=36.0.0' >> apps/mobile/android/gradle.properties
+
+      - name: Assemble standalone APK
+        working-directory: apps/mobile/android
+        env:
+          APP_VARIANT: production
+          NODE_ENV: production
+        run: ./gradlew :app:assembleRelease --no-daemon --build-cache --parallel
+
+      - name: Verify and stage APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_apk=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          test -s "$source_apk"
+          mkdir -p scheduled-apk
+          apk="scheduled-apk/T3-Code-${GITHUB_SHA:0:12}-android.apk"
+          cp "$source_apk" "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" | tee scheduled-apk/APK_BADGING.txt
+          grep -F "package: name='com.t3tools.t3code'" scheduled-apk/APK_BADGING.txt
+          printf 'commit=%s\nworkflow_run=%s\nrepository=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" > scheduled-apk/APK_BUILD_INFO.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: scheduled-android-apk
+          path: scheduled-apk/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    name: Publish scheduled binaries
+    needs: [appimage, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download AppImage
+        uses: actions/download-artifact@v8
+        with:
+          name: scheduled-linux-appimage
+          path: release-assets
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v8
+        with:
+          name: scheduled-android-apk
+          path: release-assets
+
+      - id: metadata
+        name: Prepare release metadata and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          appimages=(release-assets/*.AppImage)
+          apks=(release-assets/*.apk)
+          if (( ${#appimages[@]} != 1 || ${#apks[@]} != 1 )); then
+            printf 'Expected exactly one AppImage and one APK; found %s and %s\n' \
+              "${#appimages[@]}" "${#apks[@]}" >&2
+            exit 1
+          fi
+
+          (
+            cd release-assets
+            sha256sum -- *.AppImage *.apk > SHA256SUMS
+          )
+
+          tag="scheduled-build-${GITHUB_RUN_NUMBER}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          cat > release-notes.md <<EOF
+          Automated six-hour T3 Code build.
+
+          - Source commit: \`$GITHUB_SHA\`
+          - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - Started: ${{ github.run_started_at }}
+
+          This prerelease contains the Linux x86_64 AppImage and the production Android APK built from the same commit.
+          EOF
+
+      - name: Publish GitHub prerelease
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.metadata.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "T3 Code scheduled build #${{ github.run_number }}"
+          body_path: release-notes.md
+          prerelease: true
+          make_latest: false
+          files: |
+            release-assets/*.AppImage
+            release-assets/*.apk
+            release-assets/SHA256SUMS
+            release-assets/APPIMAGE_BUILD_INFO.txt
+            release-assets/APK_BUILD_INFO.txt
+            release-assets/APK_BADGING.txt
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
