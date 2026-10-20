@@ -688,38 +688,47 @@ describe("ProviderContinuationService", () => {
   });
 
   it.effect(
-    "a project-disabled instance refuses a delegated-completion wake exactly once, acknowledges it, and never retries",
-    () => {
-      return Effect.gen(function* () {
-        const attempts = yield* Ref.make(0);
+    "retries a delegated completion after its provider is re-enabled without acknowledging rejection",
+    () =>
+      Effect.gen(function* () {
+        const enabled = yield* Ref.make(false);
         const cleared = yield* Ref.make(false);
-        const acknowledged = yield* Queue.unbounded<unknown>();
+        const dispatches = yield* Queue.unbounded<{ type: string; messageId?: MessageId }>();
+        const accepted = yield* Ref.make(false);
         const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadRecords: () => Effect.succeed(delegatedProjection()),
-          dispatch: (command) => {
-            if ((command as { type: string }).type === "message.dispatch") {
-              return Ref.update(attempts, (count) => count + 1).pipe(
-                Effect.andThen(
-                  Effect.fail(
-                    new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+          getThreadRecords: () =>
+            Ref.get(accepted).pipe(
+              Effect.map(
+                (delivered) =>
+                  ({
+                    ...delegatedProjection(),
+                    messages: delivered ? [{ id: delegatedMessageId }] : [],
+                  }) as unknown as OrchestrationV2ThreadProjection,
+              ),
+            ),
+          dispatch: (command) =>
+            Effect.gen(function* () {
+              yield* Queue.offer(dispatches, command);
+              if (command.type === "message.dispatch") {
+                if (!(yield* Ref.get(enabled)))
+                  return yield* new ThreadManagementService.ThreadManagementProviderInstanceDisabledError(
+                    {
                       projectId: ProjectId.make("project-provider-continuation-disabled"),
                       instanceId: ProviderInstanceId.make(
                         "instance-provider-continuation-disabled",
                       ),
-                    }) as never,
-                  ),
-                ),
-              );
-            }
-            return Queue.offer(acknowledged, command).pipe(Effect.as({} as never));
-          },
+                    },
+                  );
+                yield* Ref.set(accepted, true);
+              }
+              return {} as never;
+            }),
         });
         const layerWorker = ProviderContinuationService.layer.pipe(
           Layer.provide(
             Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
           ),
         );
-
         yield* Effect.gen(function* () {
           const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
           yield* requests.offer({
@@ -729,40 +738,32 @@ describe("ProviderContinuationService", () => {
             detail: null,
             delivery: "message_text",
             clearIfCurrent: () => Ref.set(cleared, true),
-            delegatedCompletion: {
-              parentRunId,
-              generation: 1,
-              messageId: delegatedMessageId,
-            },
+            delegatedCompletion: { parentRunId, generation: 1, messageId: delegatedMessageId },
           });
+          assert.equal((yield* Queue.take(dispatches)).type, "message.dispatch");
           yield* Effect.yieldNow;
-          assert.equal(yield* Ref.get(attempts), 1);
-          assert.isTrue(yield* Ref.get(cleared));
-
-          const acknowledgements = (yield* Queue.takeAll(acknowledged)) as ReadonlyArray<{
-            type: string;
-            taskId: string;
-            observedByRunId: string | null;
-          }>;
-          assert.deepEqual(
-            acknowledgements.map((command) => command.taskId),
-            ["node-provider-continuation-first", "node-provider-continuation-second"],
-          );
-          for (const command of acknowledgements) {
-            assert.equal(command.type, "delegated_task.completion-delivery.acknowledge");
-            assert.isNull(command.observedByRunId);
-          }
-
+          assert.isFalse(yield* Ref.get(cleared));
+          assert.isFalse(yield* Ref.get(accepted));
+          assert.equal(yield* Queue.size(dispatches), 0);
+          yield* TestClock.adjust("100 millis");
+          assert.equal((yield* Queue.take(dispatches)).type, "message.dispatch");
+          yield* Effect.yieldNow;
+          assert.isFalse(yield* Ref.get(accepted));
+          yield* Ref.set(enabled, true);
+          yield* TestClock.adjust("200 millis");
+          const delivered = yield* Queue.take(dispatches);
+          assert.equal(delivered.type, "message.dispatch");
+          assert.equal(delivered.messageId, delegatedMessageId);
+          yield* Effect.yieldNow;
+          assert.isTrue(yield* Ref.get(accepted));
+          assert.isFalse(yield* Ref.get(cleared));
           yield* TestClock.adjust("1 hour");
-          yield* Effect.yieldNow;
-          assert.equal(yield* Ref.get(attempts), 1);
-          assert.equal(yield* Queue.size(acknowledged), 0);
+          assert.equal(yield* Queue.size(dispatches), 0);
         }).pipe(
           Effect.provide(Layer.merge(ProviderContinuationRequests.layer, layerWorker)),
           Effect.scoped,
         );
-      });
-    },
+      }),
   );
 
   it.effect(

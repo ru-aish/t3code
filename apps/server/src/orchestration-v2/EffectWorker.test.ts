@@ -4,6 +4,8 @@ import {
   MessageId,
   type OrchestrationV2ThreadProjection,
   NodeId,
+  ProjectId,
+  ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -240,6 +242,100 @@ it.effect("replays one delegated completion obligation without a duplicate nativ
       yield* executor.execute({ ...effect, attemptCount: 2 });
     }).pipe(Effect.provide(layer));
     assert.deepEqual(yield* Ref.get(calls), ["message.dispatch"]);
+  }),
+);
+
+it.effect("retains a disabled-provider obligation until delivery is accepted", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const taskId = NodeId.make("node:disabled-provider-task");
+    const parentRunId = RunId.make("run:disabled-provider-parent");
+    const messageId = MessageId.make("message:disabled-provider-completion");
+    const enabled = yield* Ref.make(false);
+    const accepted = yield* Ref.make(false);
+    const commands = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerExecutorFor({
+      events: yield* Ref.make<ReadonlyArray<string>>([]),
+      threads: {
+        getThreadRecords: () =>
+          Ref.get(accepted).pipe(
+            Effect.map(
+              (delivered) =>
+                ({
+                  thread: { archivedAt: null, deletedAt: null },
+                  runs: [
+                    {
+                      id: parentRunId,
+                      delegatedCompletion: {
+                        disposition: "open",
+                        delivery: { generation: 1, messageId, taskIds: [taskId] },
+                      },
+                    },
+                  ],
+                  subagents: [
+                    {
+                      id: taskId,
+                      origin: "app_owned",
+                      runId: parentRunId,
+                      completionDelivery: { state: "claimed" },
+                    },
+                  ],
+                  messages: delivered ? [{ id: messageId, runId: parentRunId }] : [],
+                  providerTurns: [],
+                }) as unknown as OrchestrationV2ThreadProjection,
+            ),
+          ),
+        dispatch: (command) =>
+          Effect.gen(function* () {
+            yield* Ref.update(commands, (current) => [...current, command.type]);
+            if (command.type === "message.dispatch") {
+              if (!(yield* Ref.get(enabled)))
+                return yield* new ThreadManagementService.ThreadManagementProviderInstanceDisabledError(
+                  {
+                    projectId: ProjectId.make("project:disabled-delivery"),
+                    instanceId: ProviderInstanceId.make("instance-disabled-delivery"),
+                  },
+                );
+              assert.equal(command.messageId, messageId);
+              yield* Ref.set(accepted, true);
+            }
+            return { sequence: 1, storedEvents: [] };
+          }),
+      },
+    });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: "effect:disabled-provider",
+      commandId: CommandId.make("command:disabled-provider"),
+      threadId,
+      request: { type: "delegated-completion.dispatch", taskId },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      const refused = yield* executor.execute(effect).pipe(Effect.result);
+      assert.equal(refused._tag, "Failure");
+      if (refused._tag === "Failure") {
+        assert.instanceOf(
+          refused.failure.cause,
+          ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+        );
+      }
+      assert.deepEqual(yield* Ref.get(commands), ["message.dispatch"]);
+      assert.isFalse(yield* Ref.get(accepted));
+      yield* Ref.set(enabled, true);
+      yield* executor.execute({ ...effect, attemptCount: 2 });
+      yield* executor.execute({ ...effect, attemptCount: 3 });
+    }).pipe(Effect.provide(layer));
+    assert.isTrue(yield* Ref.get(accepted));
+    assert.deepEqual(yield* Ref.get(commands), ["message.dispatch", "message.dispatch"]);
   }),
 );
 
