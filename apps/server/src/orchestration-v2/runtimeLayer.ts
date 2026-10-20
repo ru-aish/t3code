@@ -137,6 +137,7 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
     Layer.mergeAll(
       layerCommandOutputHubProvided,
       layerProviderAdapterRegistryProvided,
+      ProviderContinuationRequests.layer,
       layerEventSinkProvided,
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
