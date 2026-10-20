@@ -25,6 +25,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { ServerActivation } from "../serverActivation.ts";
 
 const threadId = ThreadId.make("thread-provider-continuation");
 const providerThreadId = ProviderThreadId.make("provider-thread-continuation");
@@ -108,6 +109,43 @@ function layerTest(input: {
 }
 
 describe("ProviderContinuationService", () => {
+  it.effect("retains process results until startup recovery has finished", () =>
+    Effect.gen(function* () {
+      const activation = yield* Deferred.make<void>();
+      const acknowledged = yield* Deferred.make<void>();
+      const dispatched = yield* Queue.unbounded<unknown>();
+      const messageId = MessageId.make("process:startup-replay");
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request((effect) =>
+            effect.pipe(
+              Effect.tap(() => Deferred.succeed(acknowledged, undefined)),
+              Effect.map(Option.some),
+            ),
+          ),
+          messageId,
+          delivery: "message_text",
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Queue.size(dispatched), 0);
+        assert.isFalse(yield* Deferred.isDone(acknowledged));
+
+        yield* Deferred.succeed(activation, undefined);
+        const command = (yield* Queue.take(dispatched)) as { messageId: MessageId };
+        yield* Deferred.await(acknowledged);
+        assert.equal(command.messageId, messageId);
+        assert.equal(yield* Queue.size(dispatched), 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({ dispatched, getThreadRecords: () => Effect.succeed(projection) }),
+        ),
+        Effect.provideService(ServerActivation, Deferred.await(activation)),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("recovers an unaccepted persisted steer using the same delivery identity", () =>
     Effect.gen(function* () {
       const dispatched = yield* Queue.unbounded<unknown>();
