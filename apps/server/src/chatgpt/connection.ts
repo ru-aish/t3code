@@ -202,6 +202,13 @@ class Cdp {
   }
 }
 
+export class ChatGPTSubmissionNotStartedError extends Error {
+  readonly _tag = "ChatGPTSubmissionNotStartedError";
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "ChatGPT request failed before native submission", { cause });
+  }
+}
+
 export class ChatGPTConnection {
   private cdp: Cdp | undefined;
   private cache: Cache = { conversationId: null, messages: {}, dispatches: {}, handledEvents: [] };
@@ -212,6 +219,7 @@ export class ChatGPTConnection {
   private nativeStopBarrier: Promise<void> = Promise.resolve();
   private closed = false;
   private snapshotRead: Promise<ConversationSnapshot> | undefined;
+  private readonly retiredRequestIds = new Set<string>();
   readonly cachePath: string;
   readonly options: {
     cdpEndpoint: string;
@@ -309,7 +317,8 @@ export class ChatGPTConnection {
     await this.cdp.call("Runtime.addBinding", { name: this.binding });
     return this.cdp;
   }
-  private acceptRendererUpdate(update: ChatGPTUpdate) {
+  private acceptRendererUpdate(update: ChatGPTUpdate, epoch = this.conversationEpoch) {
+    if (epoch !== this.conversationEpoch || (update.requestId && this.retiredRequestIds.has(update.requestId))) return;
     const conversationChanged =
       update.conversationId !== null && update.conversationId !== this.cache.conversationId;
     if (update.conversationId) this.cache.conversationId = update.conversationId;
@@ -406,6 +415,19 @@ export class ChatGPTConnection {
     await this.persist();
     return uploaded;
   }
+  async resetNativeConversation() {
+    // A terminal binding must be detached before the persistent local cache is
+    // cleared. Never pretend the reset succeeded when the control plane does
+    // not support it: that would silently reattach the poisoned conversation.
+    const binding = await this.control<TerminalBinding>("reset", {});
+    if (binding.conversation_id !== null)
+      throw new Error("Terminal control plane did not detach the native conversation");
+    for (const id of Object.keys(this.cache.dispatches)) this.retiredRequestIds.add(id);
+    this.cache = { conversationId: null, messages: {}, dispatches: {}, handledEvents: [] };
+    this.snapshotRead = undefined;
+    await this.persist();
+    return binding;
+  }
   async adoptConversation(conversationId: string) {
     if (this.cache.conversationId && this.cache.conversationId !== conversationId)
       throw new Error("Conversation identity is immutable");
@@ -485,7 +507,11 @@ export class ChatGPTConnection {
     projectId?: string | null,
   ) {
     // A conversation-scoped stop must settle before any newer submission.
-    await this.nativeStopBarrier;
+    try {
+      await this.nativeStopBarrier;
+    } catch (cause) {
+      throw new ChatGPTSubmissionNotStartedError(cause);
+    }
     let dispatch = this.cache.dispatches[requestId];
     if (dispatch?.state === "submitted") return;
     if (dispatch?.state === "dispatching")
@@ -493,8 +519,16 @@ export class ChatGPTConnection {
     dispatch = { messageId: stableMessageId(requestId), state: "prepared" };
     this.cache.dispatches[requestId] = dispatch;
     await this.persist();
-    const cdp = await this.renderer();
+    let cdp: Cdp;
+    try {
+      cdp = await this.renderer();
+    } catch (cause) {
+      throw new ChatGPTSubmissionNotStartedError(cause);
+    }
     const existing = this.cache.conversationId;
+    const uploaded: UploadedImage[] = [];
+    let parent: string | undefined;
+    try {
     if (projectId && !/^g-p-[a-zA-Z0-9-]+$/.test(projectId))
       throw new Error("Invalid ChatGPT project identity");
     if (
@@ -506,10 +540,8 @@ export class ChatGPTConnection {
         "This conversation is bound to another ChatGPT project. Start a new thread to change it.",
       );
     if (!existing && this.cache.projectId === undefined) this.cache.projectId = projectId ?? null;
-    const uploaded = [];
     for (const image of images) uploaded.push(await this.uploadImage(image));
     // A continuation reads its canonical parent once. No transcript or stream-status polling.
-    let parent: string | undefined;
     if (existing) {
       const snapshot = await cdp.evaluate<{ current_node: string; gizmo_id?: string }>(
         `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();const raw=await r.client.get(${JSON.stringify(existing)});const c=raw.conversation||raw.data||raw;return {current_node:c.current_node,gizmo_id:c.gizmo_id};})()`,
@@ -522,6 +554,9 @@ export class ChatGPTConnection {
       if (projectId !== undefined && projectId !== upstreamProject)
         throw new Error("This conversation is bound to another ChatGPT project");
       this.cache.projectId = upstreamProject;
+    }
+    } catch (cause) {
+      throw new ChatGPTSubmissionNotStartedError(cause);
     }
     const request = {
       action: "next",

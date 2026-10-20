@@ -66,6 +66,7 @@ const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 /** Claude refuses to replace a process running background work before it reads the prompt. */
 const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
+  Predicate.isTagged(error, "ChatGPTTurnNotSubmittedError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
 export interface ProviderTurnStartServiceV2Shape {
