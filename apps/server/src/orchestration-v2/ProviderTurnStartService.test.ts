@@ -1094,3 +1094,39 @@ effectIt.effect(
       });
     }),
 );
+effectIt.effect(
+  "does not restart a locally completed native generation without a terminal",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        failReadsAfterRunning: true,
+      });
+      const before = harness.projection();
+      const run = before.runs.at(-1)!;
+      harness.setProjection({
+        ...before,
+        runs: [
+          {
+            ...run,
+            id: RunId.make("locally-completed-native-generation"),
+            ordinal: 1,
+            status: "completed",
+            startedAt: DateTime.makeUnsafe("2026-09-04T11:00:00Z"),
+            completedAt: DateTime.makeUnsafe("2026-09-04T11:01:00Z"),
+          },
+          run,
+        ],
+      });
+
+      yield* harness.start;
+
+      expect(harness.open).toHaveBeenCalledOnce();
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+      expect(harness.projection().turnItems.at(-1)).toMatchObject({
+        type: "error",
+        failure: { class: "provider_error" },
+      });
+    }),
+);

@@ -620,8 +620,8 @@ export const layer: Layer.Layer<
           providerThreadId: providerThread.id,
           runId: run.id,
           cause:
-            "Previous native generation was cancelled during recovery without a verified " +
-            "provider terminal event. Start a fresh conversation to avoid a duplicate submission.",
+            "Previous native generation lacks a verified " +
+            "provider terminal event. Local completion does not prove native cessation; do not submit to this conversation again.",
         });
         if (input.willRetry === true) return yield* uncertain;
         yield* settleStartFailure({
