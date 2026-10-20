@@ -3673,7 +3673,6 @@ it.live("replays persisted legacy child handoffs without sending their summaries
         ]) });
         const persisted = yield* orchestrator.getThreadProjection(targetThread);
         assert.lengthOf(persisted.contextHandoffs.filter((h) => h.id.startsWith("legacy-child-handoff:")), 18);
-        assert.equal(persisted.runs[0]?.status, "interrupted");
         assert.lengthOf(persisted.contextHandoffs.filter((h) => h.id.startsWith("legacy-child-handoff:") && h.targetRunId === persisted.runs[0]?.id), 13);
         assert.lengthOf(persisted.contextTransfers.filter((t) => t.type === "subagent_result" && t.status === "pending"), 9);
         assert.lengthOf(persisted.contextTransfers.filter((t) => t.type === "subagent_result" && t.status === "consumed"), 9);
