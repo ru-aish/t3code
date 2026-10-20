@@ -2912,6 +2912,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   it.effect.each([
     { type: "terminal.cleanup" },
     { type: "provider-runtime.continue", sourceRunId: RunId.make("run:restart-replay") },
+    { type: "delegated-completion.dispatch", taskId: NodeId.make("node:restart-mailbox") },
   ] as const)(
     "retires live provider effects and requeues $type after process loss",
     (replayRequest) =>

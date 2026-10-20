@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -28,6 +28,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -101,6 +102,112 @@ export const layerExecutor: Layer.Layer<
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "delegated-completion.dispatch": {
+            const taskId = effect.request.taskId;
+            const read = () =>
+              threads.getThreadRecords(
+                effect.threadId,
+                ["runs", "subagents", "messages", "providerTurns"],
+                {
+                  messageRoles: ["user"],
+                },
+              );
+            const currentDelivery = (
+              projection: Pick<
+                OrchestrationV2ThreadProjection,
+                "runs" | "subagents" | "messages" | "providerTurns"
+              >,
+            ) => {
+              const task = projection.subagents.find(
+                (candidate) => candidate.id === taskId && candidate.origin === "app_owned",
+              );
+              const parent = projection.runs.find((candidate) => candidate.id === task?.runId);
+              const delivery = parent?.delegatedCompletion?.delivery;
+              if (
+                task?.completionDelivery?.state !== "claimed" ||
+                parent?.delegatedCompletion?.disposition !== "open" ||
+                delivery == null ||
+                !delivery.taskIds.includes(taskId)
+              )
+                return undefined;
+              if (
+                projection.messages.some((message) => message.id === delivery.messageId) &&
+                !isUndeliveredMailboxSteer(projection, delivery.messageId)
+              )
+                return undefined;
+              return { parentRunId: parent.id, delivery };
+            };
+            return Effect.gen(function* () {
+              const projection = yield* read();
+              if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null)
+                return;
+              const current = currentDelivery(projection);
+              if (current === undefined) return;
+              const { parentRunId, delivery } = current;
+              const taskList = delivery.taskIds.join(", ");
+              const prompt =
+                delivery.taskIds.length === 1
+                  ? `Delegated task ${taskList} reached a terminal state. Use task_status with taskId ${taskList} to read the result.`
+                  : `Delegated tasks ${taskList} reached terminal states. Use task_status with each taskId to read the results.`;
+              // A rejected dispatch receipt must not poison retries. The effect
+              // identity stays stable while each actual attempt has a fresh ID.
+              const commandId = CommandId.make(
+                `command:mailbox-effect:${effect.id}:${effect.attemptCount}`,
+              );
+              yield* threads
+                .dispatch({
+                  type: "message.dispatch",
+                  commandId,
+                  threadId: effect.threadId,
+                  messageId: delivery.messageId,
+                  text: prompt,
+                  attachments: [],
+                  dispatchMode: { type: "queue_after_active" },
+                  createdBy: "agent",
+                  creationSource: "server",
+                  delegatedCompletion: {
+                    parentRunId,
+                    generation: delivery.generation,
+                    taskIds: delivery.taskIds,
+                  },
+                })
+                .pipe(
+                  Effect.catchTags({
+                    ThreadManagementProviderInstanceDisabledError: () =>
+                      Effect.forEach(
+                        delivery.taskIds,
+                        (id) =>
+                          threads.dispatch({
+                            type: "delegated_task.completion-delivery.acknowledge",
+                            commandId: CommandId.make(`${commandId}:disabled:${id}`),
+                            parentThreadId: effect.threadId,
+                            taskId: id,
+                            observedByRunId: null,
+                          }),
+                        { discard: true },
+                      ),
+                  }),
+                  // The in-memory fast path can win the thread lock. If its
+                  // dispatch consumed our delivery, this obligation is settled.
+                  Effect.catch((error) =>
+                    read().pipe(
+                      Effect.flatMap((fresh) =>
+                        currentDelivery(fresh) === undefined ? Effect.void : Effect.fail(error),
+                      ),
+                    ),
+                  ),
+                );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
+          }
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
