@@ -391,6 +391,32 @@ describe("ChatGPT task authority", () => {
     })),
   );
 
+  it.effect("forces a recovered final whose native status and Terminal task stay stuck", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const read = Promise.withResolvers<void>();
+        fake.onConversationRead = () => read.resolve();
+        fake.idle = false;
+        fake.recoveredTerminalTools = true;
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Effect.promise(() => read.promise);
+        yield* TestClock.adjust("179 seconds");
+        expect(fake.stops).toBe(0);
+        yield* TestClock.adjust("1 second");
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "forced" });
+        expect(fake.controls).toContain("pause");
+        expect(fake.stops).toBe(1);
+        expect(fake.sent).toEqual([requestId]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("cancels outage retries even when native Stop fails", () =>
     Effect.scoped(Effect.gen(function* () {
       const { session, turnInput, fake, requestId } = yield* fixture;
