@@ -188,7 +188,12 @@ it("rejects unknown ledger entries instead of pretending the ledger is empty", a
 });
 
 it("discovers configured producer roots and allows explicitly disabled installations", () => {
-  const keys = ["T3_WORKSPACE_FENCE_DISABLED", "T3_WORKSPACE_DURABLE_JOBS_DIR", "MCP_T3_DURABLE_JOBS_DIR", "T3_TERMINAL_DB"] as const;
+  const keys = [
+    "T3_WORKSPACE_FENCE_DISABLED",
+    "T3_WORKSPACE_DURABLE_JOBS_DIR",
+    "MCP_T3_DURABLE_JOBS_DIR",
+    "T3_TERMINAL_DB",
+  ] as const;
   const previous = keys.map((key) => process.env[key]);
   try {
     for (const key of keys) delete process.env[key];
@@ -205,27 +210,6 @@ it("discovers configured producer roots and allows explicitly disabled installat
       const value = previous[index];
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
-    });
-  }
-});
-
-it("discovers explicit and producer-default durable registries and permits explicit opt-out", () => {
-  const names = ["T3_WORKSPACE_DURABLE_JOBS_DIR", "MCP_T3_DURABLE_JOBS_DIR", "T3_TERMINAL_DB", "T3_WORKSPACE_FENCE_DISABLED"] as const;
-  const prior = names.map((name) => process.env[name]);
-  try {
-    for (const name of names) delete process.env[name];
-    process.env.T3_TERMINAL_DB = "/example/terminal/state.sqlite";
-    NodeAssert.equal(jobsDirectory(), "/example/terminal/durable-jobs");
-    process.env.MCP_T3_DURABLE_JOBS_DIR = "/example/shared";
-    NodeAssert.equal(jobsDirectory(), "/example/shared");
-    process.env.T3_WORKSPACE_DURABLE_JOBS_DIR = "/example/override";
-    NodeAssert.equal(jobsDirectory(), "/example/override");
-    process.env.T3_WORKSPACE_FENCE_DISABLED = "1";
-    NodeAssert.equal(jobsDirectory(), null);
-  } finally {
-    names.forEach((name, i) => {
-      if (prior[i] === undefined) delete process.env[name];
-      else process.env[name] = prior[i];
     });
   }
 });

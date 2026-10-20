@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 import {
   CheckpointId,
   CheckpointScopeId,
@@ -27,6 +28,10 @@ import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
+
+// Workspace ownership fixtures must not use the workstation's live registry.
+beforeEach(() => vi.stubEnv("T3_WORKSPACE_FENCE_DISABLED", "1"));
+afterEach(() => vi.unstubAllEnvs());
 
 it.effect.each([
   "nested",

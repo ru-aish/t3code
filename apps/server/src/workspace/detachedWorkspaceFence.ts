@@ -25,7 +25,10 @@ export const jobsDirectory = (): string | null => {
   const explicit = process.env.T3_WORKSPACE_DURABLE_JOBS_DIR ?? process.env.MCP_T3_DURABLE_JOBS_DIR;
   if (explicit !== undefined) return NodePath.resolve(explicit);
   if (process.env.T3_TERMINAL_DB)
-    return NodePath.join(NodePath.dirname(NodePath.resolve(process.env.T3_TERMINAL_DB)), "durable-jobs");
+    return NodePath.join(
+      NodePath.dirname(NodePath.resolve(process.env.T3_TERMINAL_DB)),
+      "durable-jobs",
+    );
   const home = NodeOS.homedir();
   const token = NodePath.join(home, ".config/terminal-mcp-t3/control-token");
   const state = NodePath.join(home, ".local/share/terminal-mcp-t3/state.sqlite");

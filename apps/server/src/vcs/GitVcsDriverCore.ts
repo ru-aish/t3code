@@ -4099,7 +4099,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           isGitCommandError(error)
             ? error
             : new GitCommandError({
-                ...gitCommandContext({ operation: "GitVcsDriver.removeWorktree", cwd: input.cwd, args: ["worktree", "remove", input.path] }),
+                ...gitCommandContext({
+                  operation: "GitVcsDriver.removeWorktree",
+                  cwd: input.cwd,
+                  args: ["worktree", "remove", input.path],
+                }),
                 detail: "durable workspace fence blocked removal",
                 cause: error,
               }),
