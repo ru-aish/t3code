@@ -148,25 +148,40 @@ class Cdp {
     if (!target?.webSocketDebuggerUrl)
       throw new Error("Authenticated ChatGPT renderer is unavailable");
     const socket = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise<void>((resolve, reject) => {
-      socket.addEventListener("open", () => resolve(), { once: true });
-      socket.addEventListener(
-        "error",
-        () => reject(new Error("Cannot connect to ChatGPT renderer")),
-        { once: true },
-      );
-    });
-    const cdp = new Cdp(socket, onEvent);
-    await cdp.call("Runtime.enable", {});
-    return cdp;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          clearTimeout(timeout);
+          socket.removeEventListener("open", opened);
+          socket.removeEventListener("close", closed);
+          socket.removeEventListener("error", errored);
+        };
+        const fail = (reason: string) => { cleanup(); reject(new Error(reason)); };
+        const opened = () => { cleanup(); resolve(); };
+        const closed = () => fail("ChatGPT renderer closed during handshake");
+        const errored = () => fail("Cannot connect to ChatGPT renderer");
+        const timeout = setTimeout(() => fail("ChatGPT renderer handshake timed out"), 10_000);
+        socket.addEventListener("open", opened);
+        socket.addEventListener("close", closed);
+        socket.addEventListener("error", errored);
+      });
+      const cdp = new Cdp(socket, onEvent);
+      await cdp.call("Runtime.enable", {}, 10_000);
+      return cdp;
+    } catch (error) {
+      socket.close();
+      throw error;
+    }
   }
-  async call(method: string, params: unknown): Promise<unknown> {
+  async call(method: string, params: unknown, timeoutMs = 90_000): Promise<unknown> {
+    if (this.socket.readyState === WebSocket.CLOSED || this.socket.readyState === WebSocket.CLOSING) throw new Error("ChatGPT renderer disconnected");
+    if (this.pending.size >= 64) throw new Error("ChatGPT renderer command capacity exceeded");
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error("ChatGPT renderer command timed out"));
-      }, 90_000);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timeout);
@@ -177,15 +192,21 @@ class Cdp {
           reject(error);
         },
       });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      try {
+        this.socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        const pending = this.pending.get(id);
+        this.pending.delete(id);
+        pending?.reject(error instanceof Error ? error : new Error("ChatGPT renderer send failed"));
+      }
     });
   }
-  async evaluate<T>(expression: string): Promise<T> {
+  async evaluate<T>(expression: string, timeoutMs = 90_000): Promise<T> {
     const result = (await this.call("Runtime.evaluate", {
       expression,
       awaitPromise: true,
       returnByValue: true,
-    })) as {
+    }, timeoutMs)) as {
       exceptionDetails?: unknown;
       result?: { value?: T; subtype?: string };
     };
@@ -214,6 +235,8 @@ export class ChatGPTSubmissionNotStartedError extends Error {
 
 export class ChatGPTConnection {
   private cdp: Cdp | undefined;
+  private connecting: Promise<Cdp> | undefined;
+  private rendererGeneration = 0;
   private cache: Cache = { conversationId: null, messages: {}, dispatches: {}, handledEvents: [] };
   private writes = Promise.resolve();
   private binding = "__t3_chatgpt_" + NodeCrypto.randomUUID().replaceAll("-", "");
@@ -303,24 +326,49 @@ export class ChatGPTConnection {
     }
     return (await response.json()) as T;
   }
-  private async renderer() {
+  private async renderer(): Promise<Cdp> {
+    if (this.closed) throw new Error("ChatGPT connection is closed");
     if (this.cdp) return this.cdp;
-    this.cdp = await Cdp.connect(this.options.cdpEndpoint, (method, raw) => {
-      if (method === "disconnected") {
-        this.cdp = undefined;
-        if (!this.closed)
-          this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
-        return;
+    if (this.connecting) return this.connecting;
+    const generation = ++this.rendererGeneration;
+    const connecting = (async () => {
+      let socket: Cdp | undefined;
+      try {
+        socket = await Cdp.connect(this.options.cdpEndpoint, (method, raw) => {
+          if (this.rendererGeneration !== generation || this.closed) return;
+          if (method === "disconnected") {
+            if (this.cdp === socket) this.cdp = undefined;
+            return;
+          }
+          const params = raw as { name: string; payload: string };
+          if (method !== "Runtime.bindingCalled" || params.name !== this.binding) return;
+          const binding = this.binding;
+          const update = JSON.parse(params.payload) as ChatGPTUpdate;
+          this.acceptRendererUpdate(update, () =>
+            this.rendererGeneration === generation && !this.closed && this.binding === binding,
+          );
+        });
+        if (this.closed || this.rendererGeneration !== generation)
+          throw new Error("ChatGPT connection closed during handshake");
+        await socket.call("Runtime.addBinding", { name: this.binding }, 10_000);
+        if (this.closed || this.rendererGeneration !== generation)
+          throw new Error("ChatGPT connection closed during handshake");
+        this.cdp = socket;
+        return socket;
+      } catch (error) {
+        socket?.close();
+        throw error;
       }
-      const params = raw as { name: string; payload: string };
-      if (method !== "Runtime.bindingCalled" || params.name !== this.binding) return;
-      const update = JSON.parse(params.payload) as ChatGPTUpdate;
-      this.acceptRendererUpdate(update);
-    });
-    await this.cdp.call("Runtime.addBinding", { name: this.binding });
-    return this.cdp;
+    })();
+    this.connecting = connecting;
+    try {
+      return await connecting;
+    } finally {
+      if (this.connecting === connecting) this.connecting = undefined;
+    }
   }
-  private acceptRendererUpdate(update: ChatGPTUpdate) {
+  private acceptRendererUpdate(update: ChatGPTUpdate, isCurrent: () => boolean = () => true) {
+    if (!isCurrent()) return;
     if (update.requestId && this.retiredRequestIds.has(update.requestId)) return;
     const conversationChanged =
       update.conversationId !== null && update.conversationId !== this.cache.conversationId;
@@ -337,7 +385,7 @@ export class ChatGPTConnection {
     // diagnostic message cache does not need to block every streamed token.
     if (conversationChanged) this.deliveryBarrier = this.persist().then(() => undefined);
     void this.deliveryBarrier
-      .then(() => this.callback?.(update))
+      .then(() => { if (isCurrent()) this.callback?.(update); })
       .catch(() => {
         this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
       });
@@ -445,7 +493,12 @@ export class ChatGPTConnection {
     await this.persist();
   }
   async health() {
-    await this.renderer();
+    const cdp = await this.renderer();
+    const healthy = await cdp.evaluate<boolean>(
+      `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();return Boolean(r?.client && typeof r.client.models === "function");})()`,
+      10_000,
+    );
+    if (!healthy) throw new Error("Authenticated ChatGPT client is unavailable");
   }
   get conversationId() {
     return this.cache.conversationId;
@@ -701,6 +754,8 @@ export class ChatGPTConnection {
   }
   close() {
     this.closed = true;
+    ++this.rendererGeneration;
     this.cdp?.close();
+    this.cdp = undefined;
   }
 }

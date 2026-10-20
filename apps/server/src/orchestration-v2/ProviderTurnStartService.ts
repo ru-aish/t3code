@@ -588,6 +588,52 @@ export const layer: Layer.Layer<
         });
         return;
       }
+      // A locally settled run is not proof that ChatGPT's native generation
+      // stopped. Retire the uncertain native conversation instead of blocking
+      // the durable T3 thread forever (or resending to the same conversation).
+      // This rule is ChatGPT-specific; other providers have their own lifecycle.
+      const terminalAttemptIds = new Set(
+        projection.providerTurns
+          .filter(
+            (source) =>
+              source.providerThreadId === providerThread.id &&
+              source.runAttemptId !== null &&
+              source.status === "completed",
+          )
+          .map((source) => source.runAttemptId),
+      );
+      const recoveredThroughOrdinal = Math.max(
+        0,
+        ...projection.contextHandoffs
+          .filter(
+            (handoff) =>
+              handoff.toProviderThreadId === providerThread.id &&
+              handoff.strategy === "full_thread_summary" &&
+              handoff.delivery?.status !== "pending" &&
+              handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId,
+          )
+          .map((handoff) => handoff.coveredRunOrdinals.to),
+      );
+      const requiresFreshNative =
+        sessionResult.success.driver === "chatgpt" &&
+        projection.runs.some((source) => {
+          if (
+            source.providerThreadId !== providerThread.id ||
+            source.ordinal >= run.ordinal ||
+            source.ordinal <= recoveredThroughOrdinal ||
+            source.startedAt === null
+          ) return false;
+          const attempts = projection.attempts.filter((candidate) => candidate.runId === source.id);
+          // A prior native identity cannot poison a successfully rotated one.
+          const matching = attempts.filter(
+            (candidate) =>
+              candidate.nativeThreadId === undefined ||
+              candidate.nativeThreadId === providerThread.nativeThreadRef?.nativeId,
+          );
+          return matching.length > 0 && matching.some(
+            (candidate) => !terminalAttemptIds.has(candidate.id),
+          );
+        });
       const session = sessionResult.success;
       const loadFromProvider = (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
@@ -655,7 +701,9 @@ export const layer: Layer.Layer<
               modelSelection: run.modelSelection,
               runtimePolicy: resolvedRuntimePolicy,
               providerSessionId,
-              existingProviderThread: providerThread,
+              existingProviderThread: requiresFreshNative
+                ? { ...providerThread, nativeThreadRef: null }
+                : providerThread,
             }),
           );
         }
@@ -667,14 +715,16 @@ export const layer: Layer.Layer<
             handoff.delivery?.status === "pending",
         );
         const resumed = yield* Effect.result(
-          uncertainDelivery
+          uncertainDelivery || requiresFreshNative
             ? Effect.fail(
                 new ProviderAdapter.ProviderAdapterTurnStartError({
                   driver: session.driver,
                   threadId: projection.thread.id,
                   providerThreadId: providerThread.id,
                   runId,
-                  cause: "Uncertain native history injection",
+                  cause: requiresFreshNative
+                    ? "Previous ChatGPT native generation lacks terminal proof"
+                    : "Uncertain native history injection",
                 }),
               )
             : session.resumeThread({
@@ -692,7 +742,9 @@ export const layer: Layer.Layer<
           driver: session.driver,
           providerThreadId: providerThread.id,
           runId,
-          reason: uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
+          reason: requiresFreshNative
+            ? "unverified_native_generation"
+            : uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
           errorTag: resumed.failure._tag,
         });
         const replacement = yield* loadFromProvider(
