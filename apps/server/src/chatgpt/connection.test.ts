@@ -665,9 +665,21 @@ describe("ChatGPT handoff submission boundary", () => {
       await connection.adoptConversation("poisoned");
       const cache = Reflect.get(connection, "cache");
       cache.dispatches.old = { state: "submitted", messageId: stableMessageId("old") };
-      Object.assign(connection, { control: async () => ({ conversation_id: "poisoned" }) });
+      const resetRequests: unknown[] = [];
+      Object.assign(connection, {
+        control: async (action: string, body: unknown) => {
+          resetRequests.push({ action, body });
+          return { conversation_id: "poisoned" };
+        },
+      });
       await expect(connection.resetNativeConversation()).rejects.toThrow("did not detach");
       expect(connection.conversationId).toBe("poisoned");
+      expect(resetRequests).toEqual([
+        {
+          action: "reset",
+          body: { expectedConversationId: "poisoned" },
+        },
+      ]);
       Object.assign(connection, { control: async () => ({ conversation_id: null }) });
       await connection.resetNativeConversation();
       expect(connection.conversationId).toBeNull();

@@ -422,7 +422,10 @@ export class ChatGPTConnection {
     // A terminal binding must be detached before the persistent local cache is
     // cleared. Never pretend the reset succeeded when the control plane does
     // not support it: that would silently reattach the poisoned conversation.
-    const binding = await this.control<TerminalBinding>("reset", {});
+    const expectedConversationId = this.cache.conversationId;
+    if (!expectedConversationId)
+      throw new Error("Cannot reset a native conversation without its expected identity");
+    const binding = await this.control<TerminalBinding>("reset", { expectedConversationId });
     if (binding.conversation_id !== null)
       throw new Error("Terminal control plane did not detach the native conversation");
     // Renderer callbacks retain the binding name used at submission. Retiring
