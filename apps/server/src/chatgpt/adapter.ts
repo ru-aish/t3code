@@ -366,6 +366,7 @@ export const makeChatGPTAdapter = (
         ) {
           if (completionRecoveryRequestId === requestId) return;
           completionRecoveryRequestId = requestId;
+          const recoveryGeneration = active?.generation;
           yield* Effect.gen(function* () {
             // Normal streaming wins. Only refresh if Terminal MCP is done and
             // the completion callback is still missing after three minutes.
@@ -376,13 +377,21 @@ export const makeChatGPTAdapter = (
               : (["3 minutes"] as const);
             for (const delay of delays) {
               yield* Effect.sleep(delay);
-              if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
-                return;
+              if (
+                active?.requestId !== requestId ||
+                active.generation !== recoveryGeneration ||
+                streamComplete ||
+                binding.state !== "done"
+              ) return;
               const updates = yield* attempt(() => connection.readCompletion(requestId)).pipe(
                 Effect.catch(() => Effect.succeed(null)),
               );
-              if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
-                return;
+              if (
+                active?.requestId !== requestId ||
+                active.generation !== recoveryGeneration ||
+                streamComplete ||
+                binding.state !== "done"
+              ) return;
               if (updates) {
                 // Recovered text must be ingested before the completion event.
                 for (const update of updates)
@@ -390,7 +399,12 @@ export const makeChatGPTAdapter = (
                 return;
               }
             }
-            if (active?.requestId === requestId && !streamComplete && binding.state === "done") {
+            if (
+              active?.requestId === requestId &&
+              active.generation === recoveryGeneration &&
+              !streamComplete &&
+              binding.state === "done"
+            ) {
               yield* Effect.logWarning(
                 "ChatGPT completion remained unconfirmed after the recovery refresh; forcing the turn closed",
                 {
@@ -406,7 +420,15 @@ export const makeChatGPTAdapter = (
                   }),
                 ),
               );
-              yield* finish("forced");
+              // A newer provider generation may have started while stop() was in flight.
+              // Never terminalize that replacement on behalf of this stale recovery.
+              if (
+                active?.requestId === requestId &&
+                active.generation === recoveryGeneration &&
+                !streamComplete
+              ) {
+                yield* finish("forced");
+              }
             }
           }).pipe(
             Effect.ensuring(

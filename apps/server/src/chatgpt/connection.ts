@@ -204,6 +204,7 @@ export class ChatGPTConnection {
   private binding = "__t3_chatgpt_" + NodeCrypto.randomUUID().replaceAll("-", "");
   private callback: ((update: ChatGPTUpdate) => void) | undefined;
   private deliveryBarrier = Promise.resolve();
+  private nativeStopBarrier: Promise<void> = Promise.resolve();
   private closed = false;
   private snapshotRead: Promise<ConversationSnapshot> | undefined;
   readonly cachePath: string;
@@ -477,6 +478,8 @@ export class ChatGPTConnection {
     images: ChatGPTImage[] = [],
     projectId?: string | null,
   ) {
+    // A conversation-scoped stop must settle before any newer submission.
+    await this.nativeStopBarrier;
     let dispatch = this.cache.dispatches[requestId];
     if (dispatch?.state === "submitted") return;
     if (dispatch?.state === "dispatching")
@@ -592,12 +595,19 @@ export class ChatGPTConnection {
     await this.persist();
   }
   async stop() {
-    if (!this.cache.conversationId)
-      throw new Error("Cannot stop a generation before its conversation identity is known");
-    const cdp = await this.renderer();
-    await cdp.evaluate(
-      `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();if(typeof r.client.stopCompletion!=='function')throw new Error('Stop unavailable');await r.client.stopCompletion({conversationId:${JSON.stringify(this.cache.conversationId)}});return true;})()`,
-    );
+    // Publish this barrier synchronously, before the first async CDP await.
+    // stopCompletion is conversation-scoped and could otherwise cancel a later send.
+    const previous = this.nativeStopBarrier;
+    const stopping = previous.then(async () => {
+      if (!this.cache.conversationId)
+        throw new Error("Cannot stop a generation before its conversation identity is known");
+      const cdp = await this.renderer();
+      await cdp.evaluate(
+        `(async()=>{\nconst r=await resolveClient();if(typeof r.client.stopCompletion!=='function')throw new Error('Stop unavailable');await r.client.stopCompletion({conversationId:});return true;})()`,
+      );
+    });
+    this.nativeStopBarrier = stopping.catch(() => {});
+    await stopping;
   }
   async *terminalEvents(signal: AbortSignal): AsyncGenerator<TerminalEvent> {
     let after = 0;
