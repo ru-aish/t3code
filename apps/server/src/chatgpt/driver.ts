@@ -7,12 +7,14 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import {
@@ -22,6 +24,10 @@ import {
 import { ChatGPTConnection, type ChatGPTModel } from "./connection.ts";
 import * as ChatGPTMcpBridge from "./mcpBridge.ts";
 import { CHATGPT_DRIVER, makeChatGPTAdapter } from "./adapter.ts";
+import {
+  makeProcessCompletionTransport,
+  startProcessCompletionWorker,
+} from "./processCompletionWorker.ts";
 
 export type ChatGPTDriverEnv =
   | ProviderHost.ProviderHost
@@ -63,6 +69,20 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
         cacheDir,
       });
       yield* Effect.addFinalizer(() => Effect.sync(() => control.close()));
+      const requests = yield* Effect.serviceOption(
+        ProviderContinuationRequests.ProviderContinuationRequests,
+      );
+      if (input.enabled && token && Option.isSome(requests)) {
+        yield* startProcessCompletionWorker(
+          makeProcessCompletionTransport({
+            endpoint: input.config.terminalEndpoint,
+            token,
+            environmentId,
+            providerId: input.instanceId,
+          }),
+          requests.value,
+        );
+      }
       const changes = yield* PubSub.unbounded<ServerProvider>();
       let models: ChatGPTModel[] = [];
       let fetchedAt = 0;

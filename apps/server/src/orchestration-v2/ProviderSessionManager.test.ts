@@ -28,6 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
@@ -53,6 +54,9 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import { startProcessCompletionWorker } from "../chatgpt/processCompletionWorker.ts";
+import type { TerminalEvent } from "../chatgpt/connection.ts";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -2687,6 +2691,74 @@ it.effect("ProviderSessionManagerV2 releases idle sessions without sweeping all 
       assert.equal(projection.providerSessions.at(-1)?.status, "stopped");
     });
 
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+  }),
+);
+
+it.effect("retains detached process notifications after a real idle session release", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* ids.allocate.project({ fixtureName: "idle-process-completion" });
+      const threadId = yield* ids.allocate.thread({
+        fixtureName: "idle-process-completion",
+        projectId,
+      });
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      let publishCompletion!: (event: TerminalEvent) => void;
+      const completion = new Promise<TerminalEvent>((resolve) => {
+        publishCompletion = resolve;
+      });
+      const notifications =
+        yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const instanceScope = yield* Scope.make();
+      const acked: string[] = [];
+      yield* startProcessCompletionWorker(
+        {
+          async *events(signal) {
+            if (!signal.aborted) yield await completion;
+          },
+          claim: async () => true,
+          acknowledge: async (event) => {
+            acked.push(event.event_id);
+          },
+        },
+        { offer: (request) => Queue.offer(notifications, request).pipe(Effect.asVoid) },
+      ).pipe(Effect.provideService(Scope.Scope, instanceScope));
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      // The provider session has exited; the owning instance still receives
+      // Terminal MCP's durable completion without reopening a generation.
+      publishCompletion({
+        seq: 1,
+        event_id: "completed-after-idle-release",
+        thread_id: threadId,
+        kind: "process.completed",
+        epoch: 1,
+        payload: { processId: "detached-job", result: "exit_code=0" },
+      });
+      const delivery = yield* Queue.take(notifications);
+      assert.equal(delivery.threadId, threadId);
+      assert.equal(delivery.delivery, "message_text");
+      assert.deepEqual(acked, []);
+      assert.isDefined(delivery.dispatchIfCurrent);
+      yield* delivery.dispatchIfCurrent!(Effect.void);
+      assert.deepEqual(acked, ["completed-after-idle-release"]);
+      yield* Scope.close(instanceScope, Exit.void);
+    });
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
   }),
 );
