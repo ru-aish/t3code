@@ -7,7 +7,7 @@ import { orchestrationPrompt } from "./mcpBridge.ts";
 import { rendererDiscovery } from "./rendererDiscovery.ts";
 
 export type ChatGPTUpdate = {
-  kind: "update" | "complete" | "error";
+  kind: "update" | "complete" | "error" | "disconnected";
   requestId?: string | undefined;
   conversationId: string | null;
   messageId?: string | undefined;
@@ -65,11 +65,12 @@ type UploadedImage = {
   height: number;
 };
 export type CachedMessage = ChatGPTUpdate & { messageId: string; text: string };
-type ConversationSnapshot = {
+export type ConversationSnapshot = {
   updates: ChatGPTUpdate[];
   idle: boolean;
   complete: boolean;
   latestRequestId?: string;
+  usesTerminalTools?: boolean;
 };
 type Cache = {
   conversationId: string | null;
@@ -156,8 +157,14 @@ class Cdp {
           socket.removeEventListener("close", closed);
           socket.removeEventListener("error", errored);
         };
-        const fail = (reason: string) => { cleanup(); reject(new Error(reason)); };
-        const opened = () => { cleanup(); resolve(); };
+        const fail = (reason: string) => {
+          cleanup();
+          reject(new Error(reason));
+        };
+        const opened = () => {
+          cleanup();
+          resolve();
+        };
         const closed = () => fail("ChatGPT renderer closed during handshake");
         const errored = () => fail("Cannot connect to ChatGPT renderer");
         const timeout = setTimeout(() => fail("ChatGPT renderer handshake timed out"), 10_000);
@@ -174,7 +181,8 @@ class Cdp {
     }
   }
   async call(method: string, params: unknown, timeoutMs = 90_000): Promise<unknown> {
-    if (this.socket.readyState === WebSocket.CLOSED || this.socket.readyState === WebSocket.CLOSING) throw new Error("ChatGPT renderer disconnected");
+    if (this.socket.readyState === WebSocket.CLOSED || this.socket.readyState === WebSocket.CLOSING)
+      throw new Error("ChatGPT renderer disconnected");
     if (this.pending.size >= 64) throw new Error("ChatGPT renderer command capacity exceeded");
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
@@ -202,11 +210,15 @@ class Cdp {
     });
   }
   async evaluate<T>(expression: string, timeoutMs = 90_000): Promise<T> {
-    const result = (await this.call("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    }, timeoutMs)) as {
+    const result = (await this.call(
+      "Runtime.evaluate",
+      {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      timeoutMs,
+    )) as {
       exceptionDetails?: unknown;
       result?: { value?: T; subtype?: string };
     };
@@ -336,16 +348,26 @@ export class ChatGPTConnection {
       try {
         socket = await Cdp.connect(this.options.cdpEndpoint, (method, raw) => {
           if (this.rendererGeneration !== generation || this.closed) return;
-          if (method === "disconnected") {
-            if (this.cdp === socket) this.cdp = undefined;
+          if (
+            method === "disconnected" ||
+            method === "Runtime.executionContextsCleared" ||
+            method === "Inspector.detached"
+          ) {
+            if (this.cdp !== socket) return;
+            this.cdp = undefined;
+            ++this.rendererGeneration;
+            if (method !== "disconnected") socket?.close();
+            this.callback?.({ kind: "disconnected", conversationId: this.cache.conversationId });
             return;
           }
           const params = raw as { name: string; payload: string };
           if (method !== "Runtime.bindingCalled" || params.name !== this.binding) return;
           const binding = this.binding;
           const update = JSON.parse(params.payload) as ChatGPTUpdate;
-          this.acceptRendererUpdate(update, () =>
-            this.rendererGeneration === generation && !this.closed && this.binding === binding,
+          this.acceptRendererUpdate(
+            update,
+            () =>
+              this.rendererGeneration === generation && !this.closed && this.binding === binding,
           );
         });
         if (this.closed || this.rendererGeneration !== generation)
@@ -385,7 +407,9 @@ export class ChatGPTConnection {
     // diagnostic message cache does not need to block every streamed token.
     if (conversationChanged) this.deliveryBarrier = this.persist().then(() => undefined);
     void this.deliveryBarrier
-      .then(() => { if (isCurrent()) this.callback?.(update); })
+      .then(() => {
+        if (isCurrent()) this.callback?.(update);
+      })
       .catch(() => {
         this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
       });
@@ -530,7 +554,8 @@ export class ChatGPTConnection {
       ]),
     );
     const cdp = await this.renderer();
-    return cdp.evaluate(`(async()=>{${rendererDiscovery}
+    return cdp.evaluate(
+      `(async()=>{${rendererDiscovery}
       const r=await resolveClient();const raw=await r.client.get(${JSON.stringify(conversationId)});const c=raw.conversation||raw.data||raw;
       if(!c.mapping||!c.current_node)throw new Error('ChatGPT conversation history is unavailable');
       const normalize=${normalizeStreamMessage.toString()};const requests=${JSON.stringify(requests)};
@@ -539,14 +564,19 @@ export class ChatGPTConnection {
         if(seen.has(key)||!c.mapping[key])throw new Error('ChatGPT conversation ancestry is invalid');
         seen.add(key);const node=c.mapping[key];if(node.message)nodes.push(node.message);key=node.parent;
       }
-      const head=normalize(nodes[0]);const updates=[];let requestId;
+      const head=normalize(nodes[0]);const updates=[];let requestId;let usesTerminalTools=false;
       for(const raw of nodes.reverse()){
         const message=normalize(raw);
-        if(message.role==='user'){requestId=requests[message.messageId];continue;}
+        if(message.role==='user'){requestId=requests[message.messageId];usesTerminalTools=false;continue;}
+        if(requestId&&message.role==='assistant'&&(message.recipient?.includes('fedora_t3code')||(message.recipient==='api_tool.call_tool'&&message.text?.includes('fedora_t3code'))))usesTerminalTools=true;
         if(requestId&&message.role==='assistant'&&!message.hidden&&(!message.recipient||message.recipient==='all'))updates.push({...message,kind:'update',requestId,conversationId:${JSON.stringify(conversationId)},createdAt:raw.create_time});
       }
-      return {updates,idle:c.async_status===null,complete:head.role==='assistant'&&head.status==='finished_successfully'&&head.endTurn===true&&!head.hidden&&(!head.recipient||head.recipient==='all'),latestRequestId:requestId};
-    })()`);
+      const visibleFinal=updates.findLast(message=>message.requestId===requestId&&(!message.channel||message.channel==='final'));
+      const complete=head.role==='assistant'&&head.status==='finished_successfully'&&head.endTurn===true&&(!head.channel||head.channel==='final')&&(!head.recipient||head.recipient==='all')&&(!head.hidden||visibleFinal?.status==='finished_successfully');
+      return {updates,idle:c.async_status===null,complete,latestRequestId:requestId,usesTerminalTools};
+    })()`,
+      10_000,
+    );
   }
   async readCompletion(requestId: string): Promise<ChatGPTUpdate[] | null> {
     if (this.cache.dispatches[requestId]?.state !== "submitted") return null;

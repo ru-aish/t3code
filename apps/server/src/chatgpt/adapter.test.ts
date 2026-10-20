@@ -42,6 +42,10 @@ const fakes = vi.hoisted(() => ({
     state: string;
     conversationId: string | null;
     conversationReads: number;
+    conversationFailures: number;
+    onConversationRead?: () => void;
+    conversationReadGate?: Promise<void>;
+    recoveredTerminalTools: boolean;
     options: { orchestrationCommand?: string | undefined };
   }>,
 }));
@@ -60,6 +64,10 @@ vi.mock("./connection.ts", () => ({
     epoch = 0;
     state = "working";
     conversationReads = 0;
+    conversationFailures = 0;
+    onConversationRead?: () => void;
+    conversationReadGate?: Promise<void>;
+    recoveredTerminalTools = false;
     pending: Array<TerminalEvent> = [];
     wake?: () => void;
     readonly options: { orchestrationCommand?: string | undefined };
@@ -123,6 +131,9 @@ vi.mock("./connection.ts", () => ({
     }
     async readConversation() {
       this.conversationReads++;
+      this.onConversationRead?.();
+      await this.conversationReadGate;
+      if (this.conversationFailures-- > 0) throw new Error("ChatGPT is offline");
       const requestId = this.sent.at(-1)!;
       return {
         updates: [
@@ -140,6 +151,7 @@ vi.mock("./connection.ts", () => ({
         idle: this.idle,
         complete: this.idle,
         latestRequestId: requestId,
+        usesTerminalTools: this.recoveredTerminalTools,
       };
     }
     get latestSubmittedRequestId() {
@@ -300,6 +312,124 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("automatically refreshes a lost stream without submitting or stopping work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, events, fake, requestId } = yield* fixture;
+        fake.idle = true;
+        fake.callback?.({ kind: "error", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.findLast((event) => event.type === "message.updated")?.message.text).toBe("Recovered final answer");
+        expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(fake.sent).toEqual([requestId]);
+        expect(fake.stops).toBe(0);
+        expect(fake.conversationReads).toBe(1);
+        expect(session.providerSessionId).toBe(ProviderSessionId.make("test-session"));
+      }),
+    ),
+  );
+
+  it.effect("waits through a runtime outage beyond the forced-completion deadline", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { events, fake, requestId } = yield* fixture;
+      yield* Queue.take(events);
+      const acknowledged = Promise.withResolvers<void>();
+      const read = Promise.withResolvers<void>();
+      fake.onDoneAcknowledged = () => acknowledged.resolve();
+      fake.onConversationRead = () => read.resolve();
+      fake.conversationFailures = 100;
+      fake.publish(terminal("state", "done"));
+      yield* Effect.promise(() => acknowledged.promise);
+      fake.callback?.({ kind: "disconnected", conversationId: null });
+      yield* Effect.promise(() => read.promise);
+      yield* TestClock.adjust("4 minutes");
+      expect(fake.stops).toBe(0);
+      expect(fake.sent).toEqual([requestId]);
+      expect(yield* Queue.size(events)).toBe(0);
+      fake.conversationFailures = 0;
+      fake.idle = true;
+      fake.state = "done";
+      yield* TestClock.adjust("30 seconds");
+      const recovered = yield* Stream.fromQueue(events).pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect,
+      );
+      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+      expect(fake.stops).toBe(0);
+    })).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("refreshes a still-running native generation again instead of sending continue", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { events, fake, requestId } = yield* fixture;
+      fake.callback?.({ kind: "disconnected", conversationId: null });
+      yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "message.updated"), Stream.runDrain);
+      expect(fake.stops).toBe(0);
+      expect(fake.sent).toEqual([requestId]);
+      fake.idle = true;
+      yield* TestClock.adjust("1 second");
+      const recovered = yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect);
+      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+      expect(fake.conversationReads).toBe(2);
+      expect(fake.sent).toEqual([requestId]);
+    })).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.live("keeps Terminal MCP task authority when recovered history reveals offline tool use", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { events, fake } = yield* fixture;
+      fake.idle = true;
+      fake.recoveredTerminalTools = true;
+      fake.callback?.({ kind: "disconnected", conversationId: null });
+      yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "message.updated"), Stream.runDrain);
+      fake.publish(terminal("state", "done"));
+      const recovered = yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect);
+      expect(fake.controls).not.toContain("pause");
+      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+    })),
+  );
+
+  it.effect("cancels outage retries even when native Stop fails", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { session, turnInput, fake, requestId } = yield* fixture;
+      const read = Promise.withResolvers<void>();
+      fake.onConversationRead = () => read.resolve();
+      fake.conversationFailures = 100;
+      fake.callback?.({ kind: "disconnected", conversationId: null });
+      yield* Effect.promise(() => read.promise);
+      fakes.failNextStop = true;
+      const stopped = yield* Effect.exit(session.interruptTurn({ providerThread: turnInput.providerThread, providerTurnId: ProviderTurnId.make("chatgpt:attempt") }));
+      expect(stopped._tag).toBe("Failure");
+      fake.callback?.({ kind: "disconnected", conversationId: null });
+      yield* TestClock.adjust("4 minutes");
+      expect(fake.conversationReads).toBe(1);
+      expect(fake.sent).toEqual([requestId]);
+    })).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.live("drops a restart snapshot that returns after Stop and a replacement turn", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { session, turnInput, events, fake, requestId } = yield* fixture;
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      fake.onConversationRead = () => entered.resolve();
+      fake.conversationReadGate = release.promise;
+      fake.callback?.({ kind: "disconnected", conversationId: null });
+      yield* Effect.promise(() => entered.promise);
+      yield* session.interruptTurn({ providerThread: turnInput.providerThread, providerTurnId: ProviderTurnId.make("chatgpt:attempt") });
+      yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runDrain);
+      const nextId = MessageId.make("post-outage-replacement");
+      yield* session.startTurn({ ...turnInput, attemptId: RunAttemptId.make("post-outage-attempt"), message: { ...turnInput.message, messageId: nextId } });
+      release.resolve();
+      fake.callback?.({ kind: "complete", requestId: nextId, conversationId: null });
+      const recovered = yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect);
+      expect(recovered.filter((event) => event.type === "message.updated")).toEqual([]);
+      expect(fake.sent).toEqual([requestId, nextId]);
+    })),
+  );
+
   it.live("ignores late output and completion from a steering-interrupted request", () =>
     Effect.scoped(
       Effect.gen(function* () {
