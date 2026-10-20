@@ -205,7 +205,10 @@ class Cdp {
 export class ChatGPTSubmissionNotStartedError extends Error {
   readonly _tag = "ChatGPTSubmissionNotStartedError";
   constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : "ChatGPT request failed before native submission", { cause });
+    super(
+      cause instanceof Error ? cause.message : "ChatGPT request failed before native submission",
+      { cause },
+    );
   }
 }
 
@@ -318,7 +321,11 @@ export class ChatGPTConnection {
     return this.cdp;
   }
   private acceptRendererUpdate(update: ChatGPTUpdate, epoch = this.conversationEpoch) {
-    if (epoch !== this.conversationEpoch || (update.requestId && this.retiredRequestIds.has(update.requestId))) return;
+    if (
+      epoch !== this.conversationEpoch ||
+      (update.requestId && this.retiredRequestIds.has(update.requestId))
+    )
+      return;
     const conversationChanged =
       update.conversationId !== null && update.conversationId !== this.cache.conversationId;
     if (update.conversationId) this.cache.conversationId = update.conversationId;
@@ -529,32 +536,32 @@ export class ChatGPTConnection {
     const uploaded: UploadedImage[] = [];
     let parent: string | undefined;
     try {
-    if (projectId && !/^g-p-[a-zA-Z0-9-]+$/.test(projectId))
-      throw new Error("Invalid ChatGPT project identity");
-    if (
-      this.cache.projectId !== undefined &&
-      projectId !== undefined &&
-      this.cache.projectId !== projectId
-    )
-      throw new Error(
-        "This conversation is bound to another ChatGPT project. Start a new thread to change it.",
-      );
-    if (!existing && this.cache.projectId === undefined) this.cache.projectId = projectId ?? null;
-    for (const image of images) uploaded.push(await this.uploadImage(image));
-    // A continuation reads its canonical parent once. No transcript or stream-status polling.
-    if (existing) {
-      const snapshot = await cdp.evaluate<{ current_node: string; gizmo_id?: string }>(
-        `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();const raw=await r.client.get(${JSON.stringify(existing)});const c=raw.conversation||raw.data||raw;return {current_node:c.current_node,gizmo_id:c.gizmo_id};})()`,
-      );
-      if (!snapshot.current_node) throw new Error("Conversation parent could not be reconciled");
-      parent = snapshot.current_node;
-      const upstreamProject = snapshot.gizmo_id ?? null;
-      if (this.cache.projectId !== undefined && this.cache.projectId !== upstreamProject)
-        throw new Error("ChatGPT conversation project changed outside T3");
-      if (projectId !== undefined && projectId !== upstreamProject)
-        throw new Error("This conversation is bound to another ChatGPT project");
-      this.cache.projectId = upstreamProject;
-    }
+      if (projectId && !/^g-p-[a-zA-Z0-9-]+$/.test(projectId))
+        throw new Error("Invalid ChatGPT project identity");
+      if (
+        this.cache.projectId !== undefined &&
+        projectId !== undefined &&
+        this.cache.projectId !== projectId
+      )
+        throw new Error(
+          "This conversation is bound to another ChatGPT project. Start a new thread to change it.",
+        );
+      if (!existing && this.cache.projectId === undefined) this.cache.projectId = projectId ?? null;
+      for (const image of images) uploaded.push(await this.uploadImage(image));
+      // A continuation reads its canonical parent once. No transcript or stream-status polling.
+      if (existing) {
+        const snapshot = await cdp.evaluate<{ current_node: string; gizmo_id?: string }>(
+          `(async()=>{${rendererDiscovery}\nconst r=await resolveClient();const raw=await r.client.get(${JSON.stringify(existing)});const c=raw.conversation||raw.data||raw;return {current_node:c.current_node,gizmo_id:c.gizmo_id};})()`,
+        );
+        if (!snapshot.current_node) throw new Error("Conversation parent could not be reconciled");
+        parent = snapshot.current_node;
+        const upstreamProject = snapshot.gizmo_id ?? null;
+        if (this.cache.projectId !== undefined && this.cache.projectId !== upstreamProject)
+          throw new Error("ChatGPT conversation project changed outside T3");
+        if (projectId !== undefined && projectId !== upstreamProject)
+          throw new Error("This conversation is bound to another ChatGPT project");
+        this.cache.projectId = upstreamProject;
+      }
     } catch (cause) {
       throw new ChatGPTSubmissionNotStartedError(cause);
     }

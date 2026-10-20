@@ -790,13 +790,28 @@ export const makeChatGPTAdapter = (
         const ensureThread = Effect.fnUntraced(function* (
           request: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
         ) {
-          if (thread && !(request.existingProviderThread?.nativeThreadRef === null &&
-            thread.nativeThreadRef !== null)) return thread;
-          if (thread?.nativeThreadRef && request.existingProviderThread?.nativeThreadRef === null) {
-            if (active) return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
-              driver: CHATGPT_DRIVER, threadId: input.threadId,
-              providerThreadId: thread.id, runId: active.input.runId,
-            });
+          const freshRequested = request.existingProviderThread?.nativeThreadRef === null;
+          if (
+            thread &&
+            !(
+              freshRequested &&
+              (thread.nativeThreadRef !== null ||
+                connection.conversationId !== null ||
+                binding.conversation_id !== null)
+            )
+          )
+            return thread;
+          if (
+            freshRequested &&
+            (connection.conversationId !== null || binding.conversation_id !== null)
+          ) {
+            if (active)
+              return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                driver: CHATGPT_DRIVER,
+                threadId: input.threadId,
+                providerThreadId: thread.id,
+                runId: active.input.runId,
+              });
             binding = yield* attempt(() => connection.resetNativeConversation());
             generation++;
             outputTurns.clear();
@@ -946,6 +961,11 @@ export const makeChatGPTAdapter = (
                   )?.value as string | undefined),
             ),
           ).pipe(
+            Effect.mapError((error) =>
+              error.cause instanceof ChatGPTSubmissionNotStartedError
+                ? new ChatGPTTurnNotSubmittedError(error)
+                : error,
+            ),
             Effect.tapError(() =>
               Effect.gen(function* () {
                 yield* attempt(() =>

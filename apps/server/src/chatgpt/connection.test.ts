@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 import {
   ChatGPTConnection,
+  ChatGPTSubmissionNotStartedError,
   executionPrompt,
   stableMessageId,
   type ChatGPTUpdate,
@@ -47,7 +48,8 @@ describe("Conversation-scoped stop ordering", () => {
               operations.push("stop-finish");
               return true;
             }
-            if (expression.includes("const raw=await r.client.get(")) return { current_node: "parent", gizmo_id: null };
+            if (expression.includes("const raw=await r.client.get("))
+              return { current_node: "parent", gizmo_id: null };
             if (expression.includes("startCompletionStream")) {
               operations.push("send");
               return { submitted: true };
@@ -69,7 +71,9 @@ describe("Conversation-scoped stop ordering", () => {
     }
   });
   it("orders a stop arriving during conversation preparation before native submission", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "chatgpt-stop-mid-send-"));
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "chatgpt-stop-mid-send-"),
+    );
     try {
       const connection = new ChatGPTConnection({
         cdpEndpoint: "http://127.0.0.1:9234",
@@ -199,13 +203,18 @@ describe("ChatGPT Terminal MCP control errors", () => {
       cacheDir: "/tmp",
     });
     const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: "A non-default registered thread identifier is required" }), {
-        status: 409,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({ error: "A non-default registered thread identifier is required" }),
+        {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        },
+      ),
     );
     try {
-      await expect(connection.control("register", { cwd: "/work", model: "gpt-5-6" })).rejects.toThrow(
+      await expect(
+        connection.control("register", { cwd: "/work", model: "gpt-5-6" }),
+      ).rejects.toThrow(
         "Terminal MCP control request failed (409): A non-default registered thread identifier is required",
       );
     } finally {
@@ -495,6 +504,98 @@ describe("ChatGPT conversation reconciliation", () => {
       expect((await connection.readConversation()).updates).toEqual([]);
       snapshot.mapping.final.parent = "final";
       await expect(connection.readConversation()).rejects.toThrow("ancestry is invalid");
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ChatGPT handoff submission boundary", () => {
+  it("distinguishes failure before dispatch from uncertain native failure", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "chatgpt-handoff-phase-"),
+    );
+    try {
+      const make = (threadId: string) =>
+        new ChatGPTConnection({
+          cdpEndpoint: "http://127.0.0.1:9234",
+          controlEndpoint: "http://127.0.0.1:8022",
+          token: "test",
+          environmentId: "test",
+          providerId: "chatgpt",
+          threadId,
+          cacheDir: directory,
+        });
+      const pre = make("pre");
+      Object.assign(pre, {
+        renderer: async () => {
+          throw new Error("renderer unavailable");
+        },
+      });
+      await expect(pre.send("pre", "history", "model", "/tmp")).rejects.toBeInstanceOf(
+        ChatGPTSubmissionNotStartedError,
+      );
+      let submitted = 0;
+      Object.assign(pre, {
+        renderer: async () => ({
+          evaluate: async () => {
+            submitted++;
+            return { submitted: true };
+          },
+        }),
+      });
+      await pre.send("pre", "history", "model", "/tmp");
+      await pre.send("pre", "history", "model", "/tmp");
+      expect(submitted).toBe(1);
+      const post = make("post");
+      Object.assign(post, {
+        renderer: async () => ({
+          evaluate: async () => {
+            throw new Error("submission uncertain");
+          },
+        }),
+      });
+      await expect(post.send("post", "history", "model", "/tmp")).rejects.not.toBeInstanceOf(
+        ChatGPTSubmissionNotStartedError,
+      );
+      const dispatches = Reflect.get(post, "cache").dispatches;
+      expect(dispatches.post.state).toBe("dispatching");
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("refuses a fresh native reset without terminal detachment, and fences retired streams", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "chatgpt-handoff-reset-"),
+    );
+    try {
+      const connection = new ChatGPTConnection({
+        cdpEndpoint: "http://127.0.0.1:9234",
+        controlEndpoint: "http://127.0.0.1:8022",
+        token: "test",
+        environmentId: "test",
+        providerId: "chatgpt",
+        threadId: "reset",
+        cacheDir: directory,
+      });
+      await connection.adoptConversation("poisoned");
+      const cache = Reflect.get(connection, "cache");
+      cache.dispatches.old = { state: "submitted", messageId: stableMessageId("old") };
+      Object.assign(connection, { control: async () => ({ conversation_id: "poisoned" }) });
+      await expect(connection.resetNativeConversation()).rejects.toThrow("did not detach");
+      expect(connection.conversationId).toBe("poisoned");
+      Object.assign(connection, { control: async () => ({ conversation_id: null }) });
+      await connection.resetNativeConversation();
+      expect(connection.conversationId).toBeNull();
+      const updates: ChatGPTUpdate[] = [];
+      connection.onUpdate((update) => updates.push(update));
+      Reflect.get(connection, "acceptRendererUpdate").call(connection, {
+        kind: "update",
+        requestId: "old",
+        conversationId: "poisoned",
+      });
+      expect(connection.conversationId).toBeNull();
+      expect(updates).toHaveLength(0);
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

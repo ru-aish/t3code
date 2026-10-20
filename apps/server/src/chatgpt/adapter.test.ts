@@ -43,6 +43,7 @@ const fakes = vi.hoisted(() => ({
   }>,
 }));
 vi.mock("./connection.ts", () => ({
+  ChatGPTSubmissionNotStartedError: class ChatGPTSubmissionNotStartedError extends Error {},
   ChatGPTConnection: class {
     conversationId = null;
     messages = [];
@@ -66,6 +67,11 @@ vi.mock("./connection.ts", () => ({
     async load() {}
     close() {}
     async adoptConversation() {}
+    async resetNativeConversation() {
+      this.conversationId = null;
+      this.controls.push("reset");
+      return { conversation_id: null, epoch: ++this.epoch, state: "idle" };
+    }
     onUpdate(callback: (update: ChatGPTUpdate) => void) {
       this.callback = callback;
     }
@@ -287,6 +293,45 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("replaces a poisoned cached native conversation but fences active generation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, fake, turnInput, requestId } = yield* fixture;
+        fake.conversationId = "poisoned";
+        const oldThread = {
+          ...turnInput.providerThread,
+          nativeThreadRef: {
+            driver: turnInput.providerThread.driver,
+            nativeId: "poisoned",
+            strength: "strong" as const,
+          },
+        };
+        const request = {
+          threadId: turnInput.threadId,
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+          existingProviderThread: {
+            ...oldThread,
+            nativeThreadRef: null,
+          },
+        };
+        const refused = yield* Effect.flip(session.ensureThread(request));
+        expect(refused._tag).toBe("ProviderAdapterTurnStartError");
+        expect(fake.controls).not.toContain("reset");
+        fake.callback?.({ kind: "complete", requestId, conversationId: "poisoned" });
+        yield* Effect.sleep("10 millis");
+        const replacement = yield* session.ensureThread(request);
+        expect(fake.controls).toContain("reset");
+        expect(replacement.id).toBe(oldThread.id);
+        expect(replacement.nativeThreadRef).toBeNull();
+        expect(fake.conversationId).toBeNull();
+        const repeated = yield* session.ensureThread(request);
+        expect(repeated.id).toBe(replacement.id);
+        expect(fake.controls.filter((action) => action === "reset")).toHaveLength(1);
+      }),
+    ),
+  );
+
   it.live("attaches the orchestration command and refreshes credentials before a turn", () =>
     Effect.scoped(
       Effect.gen(function* () {
