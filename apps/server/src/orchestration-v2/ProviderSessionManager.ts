@@ -1540,6 +1540,45 @@ export const layerWithOptions = (
           return true;
         });
 
+      // Only this adapter proof permits release without a provider terminal. Other
+      // failures (including interruption and transport timeouts) may have submitted.
+      const definitelyNotSubmitted = (error: unknown): boolean => {
+        if (typeof error !== "object" || error === null) return false;
+        if ("_tag" in error && error._tag === "ChatGPTTurnNotSubmittedError") return true;
+        return "cause" in error && definitelyNotSubmitted(error.cause);
+      };
+
+      const releaseNotSubmitted = (
+        providerSessionId: ProviderSessionId,
+        providerThreadId: ProviderThreadId,
+        attemptId: RunAttemptId,
+        runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      ) =>
+        Effect.gen(function* () {
+          const key = sessionKey(providerSessionId);
+          const now = yield* Clock.currentTimeMillis;
+          const released = yield* Ref.modify(sessions, (current) => {
+            const entry = current.get(key);
+            const active = entry?.activeTurnByThread.get(providerThreadId);
+            if (entry?.runtime !== runtime || active?.attemptId !== attemptId)
+              return [undefined, current] as const;
+            const activeTurnByThread = new Map(entry.activeTurnByThread);
+            activeTurnByThread.delete(providerThreadId);
+            const busyTurns = new Set(entry.busyTurns);
+            busyTurns.delete(busyTurnKey(providerThreadId, active.runOrdinal));
+            return [active, new Map(current).set(key, {
+              ...entry, activeTurnByThread, busyTurns, lastActivityAtMs: now,
+            })] as const;
+          });
+          if (released === undefined) return;
+          yield* Effect.all([
+            Deferred.succeed(released.finished, undefined),
+            Deferred.succeed(released.submitted, undefined),
+          ]);
+          yield* scheduleIdleReleaseInternal(providerSessionId);
+          yield* scheduleThreadUnload(providerSessionId, providerThreadId);
+        });
+
       const markSubmitted = (
         providerSessionId: ProviderSessionId,
         providerThreadId: ProviderThreadId,
@@ -1921,6 +1960,16 @@ export const layerWithOptions = (
                         input.attemptId,
                         runtime,
                       ),
+                    ),
+                    Effect.tapError((error) =>
+                      definitelyNotSubmitted(error)
+                        ? releaseNotSubmitted(
+                            providerSessionId,
+                            input.providerThread.id,
+                            input.attemptId,
+                            runtime,
+                          )
+                        : Effect.void,
                     ),
                   )
                 : Effect.void,
