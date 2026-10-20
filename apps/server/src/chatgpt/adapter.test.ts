@@ -23,6 +23,7 @@ import type { ChatGPTUpdate, TerminalEvent } from "./connection.ts";
 const fakes = vi.hoisted(() => ({
   failNextSend: false,
   failNextStop: false,
+  failNextPause: false,
   connections: [] as Array<{
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
@@ -34,6 +35,8 @@ const fakes = vi.hoisted(() => ({
     onCompletionRead?: () => void;
     onDoneAcknowledged?: () => void;
     onStop?: () => void;
+    onClaim?: () => void;
+    claimGate?: Promise<void>;
     state: string;
     conversationReads: number;
     options: { orchestrationCommand?: string | undefined };
@@ -67,11 +70,19 @@ vi.mock("./connection.ts", () => ({
     }
     async control(action: string) {
       this.controls.push(action);
+      if (action === "pause" && fakes.failNextPause) {
+        fakes.failNextPause = false;
+        throw new Error("Pause failed");
+      }
       if (action === "activate") {
         this.epoch++;
         this.state = "working";
       }
-      if (action === "claim") return { valid: true };
+      if (action === "claim") {
+        this.onClaim?.();
+        if (this.claimGate) await this.claimGate;
+        return { valid: true };
+      }
       return {
         thread_id: "test-thread",
         terminal_id: "test-thread",
@@ -91,6 +102,8 @@ vi.mock("./connection.ts", () => ({
       }
     }
     onStop?: () => void;
+    onClaim?: () => void;
+    claimGate?: Promise<void>;
     async stop() {
       this.stops++;
       this.onStop?.();
@@ -442,6 +455,159 @@ describe("ChatGPT task authority", () => {
         const result = yield* Effect.result(fixture);
         expect(result._tag).toBe("Failure");
         expect(fakes.connections.at(-1)?.controls).toEqual(["register", "activate", "pause"]);
+      }),
+    ),
+  );
+
+  it.live("does not pause the binding when interrupt cancellation fails completely", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, turnInput } = yield* fixture;
+        const started = yield* Queue.take(events);
+        if (started.type !== "provider_turn.updated")
+          throw new Error("Expected the provider turn to start");
+        fakes.failNextStop = true;
+
+        const result = yield* Effect.result(
+          session.interruptTurn({
+            providerThread: turnInput.providerThread,
+            providerTurnId: started.providerTurn.id,
+          }),
+        );
+
+        expect(result._tag).toBe("Failure");
+        expect(fake.stops).toBe(1);
+        expect(fake.controls).toEqual(["register", "activate"]);
+      }),
+    ),
+  );
+
+  it.live("finishes the interrupted turn when pause fails after a successful stop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, turnInput } = yield* fixture;
+        const started = yield* Queue.take(events);
+        if (started.type !== "provider_turn.updated")
+          throw new Error("Expected the provider turn to start");
+        fakes.failNextPause = true;
+
+        const result = yield* Effect.result(
+          session.interruptTurn({
+            providerThread: turnInput.providerThread,
+            providerTurnId: started.providerTurn.id,
+          }),
+        );
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const terminalEvent = recorded.at(-1);
+
+        expect(result._tag).toBe("Success");
+        expect(fake.stops).toBe(1);
+        expect(fake.controls).toEqual(["register", "activate", "pause"]);
+        expect(terminalEvent?.type).toBe("turn.terminal");
+        if (terminalEvent?.type !== "turn.terminal")
+          throw new Error("Expected interrupted terminal event");
+        expect(terminalEvent.status).toBe("interrupted");
+      }),
+    ),
+  );
+
+  it.live("does not submit a continuation that was claimed while an interrupt completed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, turnInput, requestId } = yield* fixture;
+        const started = yield* Queue.take(events);
+        if (started.type !== "provider_turn.updated")
+          throw new Error("Expected the provider turn to start");
+
+        const claimStarted = Promise.withResolvers<void>();
+        const claimGate = Promise.withResolvers<void>();
+        fake.onClaim = () => claimStarted.resolve();
+        fake.claimGate = claimGate.promise;
+        fake.publish(terminal("continue"));
+        yield* Effect.promise(() => claimStarted.promise);
+
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: started.providerTurn.id,
+        });
+        claimGate.resolve();
+        yield* Effect.sleep("20 millis");
+
+        expect(fake.sent).toEqual([requestId]);
+        expect(fake.stops).toBe(1);
+      }),
+    ),
+  );
+
+  it.live("ignores late stream updates after an interrupted turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, turnInput, requestId } = yield* fixture;
+        const started = yield* Queue.take(events);
+        if (started.type !== "provider_turn.updated")
+          throw new Error("Expected the provider turn to start");
+
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: started.providerTurn.id,
+        });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "late-after-interrupt",
+          text: "This should be ignored.",
+          status: "in_progress",
+        });
+        yield* Effect.sleep("20 millis");
+
+        expect(yield* Queue.size(events)).toBe(0);
+      }),
+    ),
+  );
+
+  it.live("ignores late ChatGPT updates after an interrupted terminal turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, requestId, turnInput } = yield* fixture;
+        const started = yield* Queue.take(events);
+        if (started.type !== "provider_turn.updated")
+          throw new Error("Expected the provider turn to start");
+
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: started.providerTurn.id,
+        });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        expect(yield* Queue.size(events)).toBe(0);
+
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "late-final",
+          text: "This must not appear after interruption.",
+          status: "finished_successfully",
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        yield* Effect.sleep("10 millis");
+
+        expect(yield* Queue.size(events)).toBe(0);
       }),
     ),
   );
