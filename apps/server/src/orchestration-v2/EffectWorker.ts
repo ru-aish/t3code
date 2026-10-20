@@ -827,8 +827,11 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Completion delivery is a durable obligation, not best-effort cleanup.
+          // Only a successful or explicitly revoked delivery may settle it.
+          const deliveryCritical = effect.request.type === "delegated-completion.dispatch";
           const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
+            .execute(effect, { willRetry: deliveryCritical || effect.attemptCount < maxAttempts })
             .pipe(Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
@@ -864,7 +867,7 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : !deliveryCritical && effect.attemptCount >= maxAttempts
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
@@ -873,7 +876,12 @@ export const layerWithOptions = (
                     effectId: effect.id,
                     workerId,
                     error,
-                    delayMs: Math.min(30_000, 100 * 2 ** Math.max(0, effect.attemptCount - 1)),
+                    // Saturate the exponent as well as the duration; a very old
+                    // obligation must never overflow to Infinity.
+                    delayMs: Math.min(
+                      30_000,
+                      100 * 2 ** Math.min(9, Math.max(0, effect.attemptCount - 1)),
+                    ),
                   })
                   .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (!updated) {

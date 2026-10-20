@@ -243,6 +243,73 @@ it.effect("replays one delegated completion obligation without a duplicate nativ
   }),
 );
 
+it.effect("settles archived and disposed delegated delivery obligations without dispatch", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const taskId = NodeId.make("node:mailbox-abandoned-task");
+    const parentRunId = RunId.make("run:mailbox-abandoned-parent");
+    const messageId = MessageId.make("message:mailbox-abandoned");
+    const dispatches = yield* Ref.make(0);
+    for (const mode of ["archived", "disposed"] as const) {
+      const layer = layerExecutorFor({
+        events: yield* Ref.make<ReadonlyArray<string>>([]),
+        threads: {
+          getThreadRecords: () =>
+            Effect.succeed({
+              thread: {
+                archivedAt: mode === "archived" ? now : null,
+                deletedAt: null,
+              },
+              runs: [
+                {
+                  id: parentRunId,
+                  delegatedCompletion: {
+                    disposition: "open",
+                    delivery: { generation: 1, messageId, taskIds: [taskId] },
+                  },
+                },
+              ],
+              subagents: [
+                {
+                  id: taskId,
+                  origin: "app_owned",
+                  runId: parentRunId,
+                  completionDelivery: { state: mode === "disposed" ? "disposed" : "claimed" },
+                },
+              ],
+              messages: [],
+              providerTurns: [],
+            } as unknown as OrchestrationV2ThreadProjection),
+          dispatch: () =>
+            Ref.update(dispatches, (count) => count + 1).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            ),
+        },
+      });
+      const effect: EffectOutbox.OrchestrationEffectV2 = {
+        id: "effect:mailbox-abandoned",
+        commandId: CommandId.make("command:mailbox-abandoned"),
+        threadId,
+        request: { type: "delegated-completion.dispatch", taskId },
+        status: "running",
+        attemptCount: 7,
+        availableAt: now,
+        leaseOwner: "worker",
+        leaseExpiresAt: now,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+        lastError: null,
+      };
+      yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+        Effect.flatMap((executor) => executor.execute(effect)),
+        Effect.provide(layer),
+      );
+    }
+    assert.equal(yield* Ref.get(dispatches), 0);
+  }),
+);
+
 it("does not retry pure interrupt races where the turn is already gone", () => {
   assert.isTrue(
     EffectWorker.isNonRetryableProviderTurnControlFailure(
