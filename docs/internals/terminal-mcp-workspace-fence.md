@@ -4,7 +4,7 @@ T3's in-process `withWorkspaceLease` only coordinates T3 effects. Terminal MCP c
 
 ## Shared protocol (v1)
 
-T3 reads the Terminal MCP durable supervisor's on-disk job ledger. Set `T3_WORKSPACE_DURABLE_JOBS_DIR` in T3 to the same directory as Terminal MCP's `MCP_T3_DURABLE_JOBS_DIR` (or supply that same `MCP_T3_DURABLE_JOBS_DIR` directly to T3). If T3 has `T3_TERMINAL_DB`, its default is that database's sibling `durable-jobs`; otherwise the extra fence is not enabled. The job root is outside worktrees and private to the local user.
+T3 reads the Terminal MCP durable supervisor's on-disk job ledger. Set `T3_WORKSPACE_DURABLE_JOBS_DIR` in T3 to the same directory as Terminal MCP's `MCP_T3_DURABLE_JOBS_DIR` (or supply that same `MCP_T3_DURABLE_JOBS_DIR` directly to T3). If T3 has `T3_TERMINAL_DB`, its default is that database's sibling `durable-jobs`; otherwise T3 detects the documented default `~/.local/share/terminal-mcp-t3/state.sqlite` when both that state file and the default `~/.config/terminal-mcp-t3/control-token` exist. If there is no configured or detected Terminal MCP producer, the extra fence is inactive. For non-default producer paths configure the root explicitly; a mismatch or absent version marker fails closed rather than allowing deletion. Only use `T3_WORKSPACE_FENCE_DISABLED=1` for installations with no ChatGPT durable-job producer. The job root is outside worktrees and private to the local user.
 
 The Terminal MCP producer **must** be updated separately:
 

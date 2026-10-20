@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off globalTimers:off - filesystem mutex must match Terminal MCP's native atomic mkdir protocol.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -15,12 +17,22 @@ const FENCE_VERSION = "1";
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 3_000;
 
-const jobsDirectory = () =>
-  process.env.T3_WORKSPACE_DURABLE_JOBS_DIR ??
-  process.env.MCP_T3_DURABLE_JOBS_DIR ??
-  (process.env.T3_TERMINAL_DB
-    ? NodePath.join(NodePath.dirname(process.env.T3_TERMINAL_DB), "durable-jobs")
-    : null);
+// Terminal MCP's documented default is state.path.parent/durable-jobs.
+// Detect only a configured/installed producer; unrelated T3 installations do
+// not need a Terminal MCP service to manipulate their worktrees.
+export const jobsDirectory = (): string | null => {
+  if (process.env.T3_WORKSPACE_FENCE_DISABLED === "1") return null;
+  const explicit = process.env.T3_WORKSPACE_DURABLE_JOBS_DIR ?? process.env.MCP_T3_DURABLE_JOBS_DIR;
+  if (explicit !== undefined) return NodePath.resolve(explicit);
+  if (process.env.T3_TERMINAL_DB)
+    return NodePath.join(NodePath.dirname(NodePath.resolve(process.env.T3_TERMINAL_DB)), "durable-jobs");
+  const home = NodeOS.homedir();
+  const token = NodePath.join(home, ".config/terminal-mcp-t3/control-token");
+  const state = NodePath.join(home, ".local/share/terminal-mcp-t3/state.sqlite");
+  return NodeFS.existsSync(token) && NodeFS.existsSync(state)
+    ? NodePath.join(NodePath.dirname(state), "durable-jobs")
+    : null;
+};
 
 const overlaps = (left: string, right: string) => {
   const contains = (parent: string, child: string) => {

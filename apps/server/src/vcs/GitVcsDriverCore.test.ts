@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, it, describe } from "@effect/vitest";
@@ -3449,6 +3451,37 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const fileSystem = yield* FileSystem.FileSystem;
         assert.equal(yield* fileSystem.exists(worktreePath), false);
         assert.notInclude(yield* driver.listLocalBranchNames(cwd), "feature/worktree");
+      }),
+    );
+
+    it.effect("rejects removal through the VCS service while a detached job owns the checkout", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const worktreePath = (yield* Path.Path).join(yield* makeTmpDir("git-fence-"), "busy");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree({ cwd, path: worktreePath, refName: initialBranch, newRefName: "feature/busy" });
+        const jobsRoot = yield* makeTmpDir("git-fence-ledger-");
+        yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(jobsRoot, "jobs", "a".repeat(32)), { recursive: true }));
+        yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(jobsRoot, "workspace-fence-version"), "1\n"));
+        yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(jobsRoot, "jobs", "a".repeat(32), "request.json"), JSON.stringify({ cwd: worktreePath })));
+        const previous = process.env.T3_WORKSPACE_DURABLE_JOBS_DIR;
+        const disabled = process.env.T3_WORKSPACE_FENCE_DISABLED;
+        process.env.T3_WORKSPACE_DURABLE_JOBS_DIR = jobsRoot;
+        delete process.env.T3_WORKSPACE_FENCE_DISABLED;
+        yield* Effect.gen(function* () {
+          const blocked = yield* Effect.result(driver.removeWorktree({ cwd, path: worktreePath, force: true }));
+          assert.equal(blocked._tag, "Failure");
+          assert.equal(yield* (yield* FileSystem.FileSystem).exists(worktreePath), true);
+          yield* Effect.promise(() => NodeFSP.writeFile(NodePath.join(jobsRoot, "jobs", "a".repeat(32), "result.json"), JSON.stringify({ status: "exited", group_verified: true, child: { pid: 99999999, start_ticks: 1, boot_id: "other-boot" } })));
+          yield* driver.removeWorktree({ cwd, path: worktreePath, force: true });
+          assert.equal(yield* (yield* FileSystem.FileSystem).exists(worktreePath), false);
+        }).pipe(Effect.ensuring(Effect.sync(() => {
+          if (previous === undefined) delete process.env.T3_WORKSPACE_DURABLE_JOBS_DIR;
+          else process.env.T3_WORKSPACE_DURABLE_JOBS_DIR = previous;
+          if (disabled === undefined) delete process.env.T3_WORKSPACE_FENCE_DISABLED;
+          else process.env.T3_WORKSPACE_FENCE_DISABLED = disabled;
+        })));
       }),
     );
 

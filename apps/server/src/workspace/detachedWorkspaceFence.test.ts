@@ -9,6 +9,7 @@ import * as Fiber from "effect/Fiber";
 
 import {
   checkDetachedWorkspaceJobs,
+  jobsDirectory,
   withDetachedWorkspaceFence,
 } from "./detachedWorkspaceFence.ts";
 
@@ -183,5 +184,27 @@ it("rejects unknown ledger entries instead of pretending the ledger is empty", a
     );
   } finally {
     await NodeFSP.rm(temporary, { recursive: true, force: true });
+  }
+});
+
+it("discovers configured producer roots and allows explicitly disabled installations", () => {
+  const keys = ["T3_WORKSPACE_FENCE_DISABLED", "T3_WORKSPACE_DURABLE_JOBS_DIR", "MCP_T3_DURABLE_JOBS_DIR", "T3_TERMINAL_DB"] as const;
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    for (const key of keys) delete process.env[key];
+    process.env.T3_TERMINAL_DB = "/testing/terminal/state.sqlite";
+    NodeAssert.equal(jobsDirectory(), "/testing/terminal/durable-jobs");
+    process.env.MCP_T3_DURABLE_JOBS_DIR = "/testing/producer";
+    NodeAssert.equal(jobsDirectory(), "/testing/producer");
+    process.env.T3_WORKSPACE_DURABLE_JOBS_DIR = "/testing/consumer";
+    NodeAssert.equal(jobsDirectory(), "/testing/consumer");
+    process.env.T3_WORKSPACE_FENCE_DISABLED = "1";
+    NodeAssert.equal(jobsDirectory(), null);
+  } finally {
+    keys.forEach((key, index) => {
+      const value = previous[index];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    });
   }
 });
