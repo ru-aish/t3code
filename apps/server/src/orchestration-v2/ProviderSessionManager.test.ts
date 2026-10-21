@@ -5383,10 +5383,19 @@ it.effect.each(["pending", "rejected", "interrupted"] as const)(
       const outcome = yield* Fiber.join(second);
       assert.isTrue(Exit.isFailure(outcome));
       assert.equal(yield* Ref.get(nativeStarts), 1);
-      // Even a matching terminal must not override an interrupted,
-      // still-running native send. Only a verified replacement can reuse it.
+      // A matching terminal cannot unlock admission until the real promise
+      // settles, even after the caller's Effect fiber was interrupted.
       yield* Fiber.interrupt(first);
       nativePromise.resolve();
+      if (failureMode === "interrupted") {
+        // The independent native-send fiber must process its pending terminal
+        // once the underlying JavaScript promise actually completes.
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        const third = yield* start(3).pipe(Effect.forkChild);
+        yield* Fiber.join(third);
+        assert.equal(yield* Ref.get(nativeStarts), 2);
+      }
     }).pipe(
       Effect.provide(
         layerTest({

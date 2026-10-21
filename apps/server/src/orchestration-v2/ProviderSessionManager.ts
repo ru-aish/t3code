@@ -1958,33 +1958,37 @@ export const layerWithOptions = (
             Effect.andThen(acquireTurn(input, runtime)),
             Effect.flatMap((acquired) =>
               acquired
-                ? send.pipe(
-                    turnMetrics("send", input.modelSelection.model),
-                    Effect.tapError((error) =>
-                      definitelyNotSubmitted(error)
-                        ? releaseNotSubmitted(
-                            providerSessionId,
-                            input.providerThread.id,
-                            input.attemptId,
-                            runtime,
-                          )
-                        : Effect.void,
-                    ),
-                    // An interrupted Effect may leave the underlying JavaScript
-                    // submission promise running. Do not let a terminal event
-                    // release admission before that native operation has settled.
-                    Effect.onExit((exit) =>
-                      Exit.hasInterrupts(exit)
-                        ? Effect.void
-                        : settleNativeSend(
-                            providerSessionId,
-                            input.providerThread.id,
-                            input.attemptId,
-                            runtime,
-                            Exit.isSuccess(exit),
-                          ),
-                    ),
-                  )
+                ? Effect.gen(function* () {
+                    // The logical run may be interrupted while the native promise
+                    // is still pending. Its layer-scoped fiber must observe real
+                    // settlement independently of the interrupted caller.
+                    const nativeSend = yield* send.pipe(
+                      turnMetrics("send", input.modelSelection.model),
+                      Effect.tapError((error) =>
+                        definitelyNotSubmitted(error)
+                          ? releaseNotSubmitted(
+                              providerSessionId,
+                              input.providerThread.id,
+                              input.attemptId,
+                              runtime,
+                            )
+                          : Effect.void,
+                      ),
+                      Effect.onExit((exit) =>
+                        Exit.hasInterrupts(exit)
+                          ? Effect.void
+                          : settleNativeSend(
+                              providerSessionId,
+                              input.providerThread.id,
+                              input.attemptId,
+                              runtime,
+                              Exit.isSuccess(exit),
+                            ),
+                      ),
+                      Effect.forkIn(layerScope),
+                    );
+                    yield* Fiber.join(nativeSend);
+                  })
                 : Effect.void,
             ),
             Effect.catchTag(
