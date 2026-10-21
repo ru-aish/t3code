@@ -25,6 +25,14 @@ describe("agent SVG previews", () => {
     expect(result).toContain("<rect");
   });
 
+  it("does not allow SVG classes to position artwork over the application", () => {
+    const result = sanitizeAgentSvg(
+      '<svg xmlns="http://www.w3.org/2000/svg" class="fixed inset-0 z-50 w-screen pointer-events-auto"><rect class="fixed top-0" width="100%" height="100%"/></svg>',
+    );
+    expect(result).toContain("<rect");
+    expect(result).not.toMatch(/class=|fixed|z-50|pointer-events-auto/);
+  });
+
   it("rejects malformed, non-SVG, and excessively large input", () => {
     expect(sanitizeAgentSvg("<div>Hi</div>")).toBeNull();
     expect(sanitizeAgentSvg("<svg><circle></svg>")).toBeNull();

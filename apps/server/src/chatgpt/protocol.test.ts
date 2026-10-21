@@ -92,6 +92,29 @@ describe("ChatGPT protocol", () => {
     expect(normalized.text).toContain(`\`\`\`\`svg\n${svg}\n\`\`\`\``);
   });
 
+  it("preserves nested SVG viewports as a complete illustration", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><svg x="2"><circle r="1"/></svg></svg>';
+    const normalized = normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [`<box>${svg}</box>`] },
+      },
+    });
+    expect(normalized.text).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
+    expect(normalized.text).not.toContain("<box>");
+    expect(normalized.text?.match(/<\/svg>/g)).toHaveLength(2);
+  });
+
+  it("handles quoted angle brackets in nested SVG tags", () => {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><svg aria-label="a > b"><path d="M0 0"/></svg></svg>';
+    const normalized = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [svg] } },
+    });
+    expect(normalized.text).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
+  });
+
   it("degrades a final DIL component into readable Markdown when no fallback exists", () => {
     const rich = [
       "## Ready",

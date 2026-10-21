@@ -43,10 +43,50 @@ export function normalizeStreamMessage(
       .split(/(```[\s\S]*?```)/g)
       .map((section, index) => {
         if (index % 2 === 1) return section;
-        return section
-          .split(/(<svg\b[\s\S]*?<\/svg\s*>)/gi)
-          .map((part, svgIndex) => {
-            if (svgIndex % 2 === 1) {
+        const chunks: { value: string; svg: boolean }[] = [];
+        let cursor = 0;
+        let svgStart = -1;
+        let depth = 0;
+        const svgTag = /<\/?svg\b/gi;
+        let match: RegExpExecArray | null;
+        while ((match = svgTag.exec(section)) !== null) {
+          const opening = !match[0].startsWith("</");
+          if (depth === 0 && !opening) continue;
+          // Scan the tag boundary without mistaking '>' inside quoted attributes
+          // for the end of a nested SVG opening tag.
+          let quote: string | null = null;
+          let tagEnd = -1;
+          for (let i = match.index + match[0].length; i < section.length; i++) {
+            const char = section[i];
+            if (quote) {
+              if (char === quote) quote = null;
+            } else if (char === '"' || char === "'") {
+              quote = char;
+            } else if (char === ">") {
+              tagEnd = i;
+              break;
+            }
+          }
+          if (tagEnd < 0) break;
+          svgTag.lastIndex = tagEnd + 1;
+          if (opening) {
+            if (depth === 0) svgStart = match.index;
+            if (section[tagEnd - 1] !== "/") depth++;
+          } else {
+            depth--;
+          }
+          if (depth === 0 && svgStart >= 0) {
+            if (svgStart > cursor)
+              chunks.push({ value: section.slice(cursor, svgStart), svg: false });
+            chunks.push({ value: section.slice(svgStart, tagEnd + 1), svg: true });
+            cursor = tagEnd + 1;
+            svgStart = -1;
+          }
+        }
+        chunks.push({ value: section.slice(cursor), svg: false });
+        return chunks
+          .map(({ value: part, svg }) => {
+            if (svg) {
               let longestTicks = 2;
               for (const match of part.matchAll(/`+/g)) {
                 longestTicks = Math.max(longestTicks, match[0].length);

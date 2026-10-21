@@ -41,7 +41,7 @@ export function sanitizeAgentSvg(source: string): string | null {
       "animateTransform",
       "set",
     ],
-    FORBID_ATTR: ["href", "xlink:href", "src", "srcset", "style"],
+    FORBID_ATTR: ["class", "href", "xlink:href", "src", "srcset", "style"],
   });
   return /^<svg(?:\s|>)/i.test(svg) ? svg : null;
 }
