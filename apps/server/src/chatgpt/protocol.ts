@@ -596,50 +596,85 @@ export function normalizeStreamMessage(
       rawOpen.lastIndex = end;
     }
     const protectedRanges = mergeRanges([...literals, ...protectedRaw]);
-    // A complete inner card must not be promoted out of an unsupported or
-    // incomplete outer card. Scan tag ownership once, including attribute-
-    // bearing opening tags, before converting the narrow literal subset.
+    // Scan all markup once. Card-like tokens inside other tags' quoted
+    // attributes are data, not actual opening or closing tags.
     const nested = new Set<number>();
     const invalidRoots = new Set<number>();
+    const actualCardOpenings = new Set<number>();
     const stack: number[] = [];
-    const tags = /<\/?card(?=[\s/>])/g;
-    let tag: RegExpExecArray | null;
     let tagCount = 0;
-    while ((tag = tags.exec(source))) {
-      if (++tagCount > 1_000) return [];
-      if (inRanges(protectedRanges, tag.index)) continue;
+    let scanAt = 0;
+    while (scanAt < source.length) {
+      const at = source.indexOf("<", scanAt);
+      if (at < 0) break;
+      scanAt = at + 1;
+      if (inRanges(protectedRanges, at)) continue;
+      const opener = /^<\/?[A-Za-z][A-Za-z0-9:-]*/.exec(source.slice(at, at + 80));
+      if (!opener) continue;
+      if (++tagCount > 4_000) return [];
       let quote: string | null = null;
-      let tagEnd = -1;
-      for (let i = tags.lastIndex; i < source.length; i++) {
+      let end = -1;
+      for (let i = at + opener[0].length; i < source.length && i - at <= 4_096; i++) {
         const ch = source[i];
         if (quote) {
-          if (quote === ch) quote = null;
+          if (ch === quote) quote = null;
         } else if (ch === '"' || ch === "'") quote = ch;
         else if (ch === ">") {
-          tagEnd = i + 1;
+          end = i + 1;
           break;
         } else if (ch === "<") break;
       }
-      if (tagEnd < 0) return [];
-      tags.lastIndex = tagEnd;
-      if (tag[0].startsWith("</")) {
-        stack.pop();
-      } else if (!/\/\s*>$/.test(source.slice(tag.index, tagEnd))) {
-        if (stack.length > 0) {
-          nested.add(tag.index);
+      if (end < 0) return [];
+      scanAt = end;
+      if (!/^<\/?card$/i.test(opener[0])) continue;
+      if (opener[0].startsWith("</")) {
+        if (stack.length) stack.pop();
+      } else if (!/\/\s*>$/.test(source.slice(at, end))) {
+        actualCardOpenings.add(at);
+        if (stack.length) {
+          nested.add(at);
           invalidRoots.add(stack[0]!);
         }
-        stack.push(tag.index);
+        stack.push(at);
       }
     }
     for (const open of stack) invalidRoots.add(open);
+
+    // CommonMark lazy continuation lines can belong to a quoted/listed
+    // paragraph even without a marker or indentation.
+    const containerCardStarts = new Set<number>();
+    let quotedOrListedParagraph = false;
+    let lineStart = 0;
+    while (lineStart < source.length) {
+      const newline = source.indexOf("\n", lineStart);
+      const end = newline < 0 ? source.length : newline;
+      const line = source.slice(lineStart, end);
+      if (!line.trim()) {
+        quotedOrListedParagraph = false;
+      } else {
+        const marker = /^ {0,3}(?:>\s?|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line);
+        const interrupt = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(line);
+        if (interrupt) quotedOrListedParagraph = false;
+        else if (marker) quotedOrListedParagraph = true;
+        else if (quotedOrListedParagraph && line.startsWith("<card>"))
+          containerCardStarts.add(lineStart);
+      }
+      if (newline < 0) break;
+      lineStart = end + 1;
+    }
     const cards: Array<{ json: string; start: number; end: number }> = [];
     const opening = /<card>/g;
     let match: RegExpExecArray | null;
     let attempts = 0;
     while ((match = opening.exec(source)) && cards.length < 6 && ++attempts <= 40) {
       const start = match.index;
-      if (inRanges(protectedRanges, start) || nested.has(start) || invalidRoots.has(start))
+      if (
+        inRanges(protectedRanges, start) ||
+        !actualCardOpenings.has(start) ||
+        nested.has(start) ||
+        invalidRoots.has(start) ||
+        containerCardStarts.has(start)
+      )
         continue;
       // Avoid promoting Markdown list or blockquote content to a root card.
       if (source.lastIndexOf("\n", start - 1) + 1 !== start) continue;

@@ -1092,6 +1092,39 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("does not treat card-looking tokens inside quoted attributes as real markup", () => {
+    for (const content of [
+      '<card padding={3}>\n<box label="</card>">\n' + card + "\n</box>\n</card>",
+      '<box label="\n' + card + '\n">\nUnrelated text\n</box>',
+      '<card padding={3}>\n<box label="<card>">\n' + card + "\n</box>\n</card>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("does not promote cards in lazy Markdown blockquote/list continuations", () => {
+    for (const text of [
+      "> A code-review quotation\n" + card,
+      "- A list item\n" + card,
+      "1. First numbered item\n" + card,
+      "> First quoted line\nsecond lazy line\n" + card,
+      "- First item\nplain lazy continuation\n" + card,
+    ]) {
+      expect(normalize(text)).not.toContain("t3-card");
+    }
+  });
+
+  it("allows top-level cards after blank or interrupting heading boundaries", () => {
+    for (const content of [
+      "> Quoted paragraph\n\n" + card,
+      "- List item\n\n" + card,
+      "> Quoted paragraph\n# New heading\n" + card,
+      "Intro paragraph\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
   it("still renders independent cards after a completed invalid card", () => {
     const output = normalize("<card padding={2}><title>Unsupported</title></card>\n" + card);
     expect(output.match(/t3-card/g)).toHaveLength(1);
