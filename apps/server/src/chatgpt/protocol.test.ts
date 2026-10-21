@@ -407,4 +407,53 @@ describe("ChatGPT protocol", () => {
     expect(output).toContain("    " + svg);
     expect((output ?? "").split("```svg".replaceAll("`", String.fromCharCode(96)))).toHaveLength(2);
   });
+  it("does not extract SVG after literal quote characters in a top-level fence", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const input = ["~~~xml", "> " + svg, "~~~"].join("\n");
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+      }).text,
+    ).toBe(input);
+  });
+
+  it("extracts SVG after an unfinished list-continuation fence ends", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const input = "- item\n  ~~~xml\n  literal\n\n" + svg;
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+      }).text,
+    ).toContain("```svg\n" + svg + "\n```");
+  });
+
+  it("does not mistake SVG in an indented paragraph continuation for code", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const input = "Intro paragraph\n    " + svg;
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+      }).text,
+    ).toContain("```svg\n" + svg + "\n```");
+  });
+
+  it("preserves tab-indented list fence content and extracts following SVG", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const input = "- ~~~xml\n\tinside\n  ~~~\n" + svg;
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+      }).text,
+    ).toContain("```svg\n" + svg + "\n```");
+  });
+
+  it("preserves literal nested quote markers as fenced SVG code", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const input = ["> ~~~xml", "> > " + svg, "> ~~~"].join("\n");
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+      }).text,
+    ).toBe(input);
+  });
 });

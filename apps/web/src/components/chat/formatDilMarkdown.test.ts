@@ -227,4 +227,42 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(formatDilMarkdown(input)).toContain("[real](<https://example.com/>)");
     expect(performance.now() - start).toBeLessThan(1_000);
   });
+  it("does not treat literal blockquote markers inside a top-level fence as new containers", () => {
+    const literal = "urlliteralhttps://example.com";
+    const outside = "urloutsidehttps://example.com";
+    const source = ["~~~xml", "> " + literal, "> <svg><circle r='1'/></svg>", "~~~", outside].join(
+      "\n",
+    );
+    const output = formatDilMarkdown(source);
+    expect(output).toContain("> " + literal);
+    expect(output).toContain("[outside](<https://example.com/>)");
+  });
+
+  it("recognizes a fence on a continuation line and ends it at the list boundary", () => {
+    const outside = "urloutsidehttps://example.com";
+    const source = "- item\n  ~~~xml\n  literal\n\n" + outside;
+    expect(formatDilMarkdown(source)).toContain("[outside](<https://example.com/>)");
+  });
+
+  it("converts links in paragraph continuation despite four-space indentation", () => {
+    const marker = "urlcontinuedhttps://example.com";
+    expect(formatDilMarkdown("Intro paragraph\n    " + marker)).toContain(
+      "[continued](<https://example.com/>)",
+    );
+  });
+
+  it("accepts tab-indented content within a list-nested fence", () => {
+    const marker = "urloutsidehttps://example.com";
+    const source = "- ~~~xml\n\tinside\n  ~~~\n" + marker;
+    expect(formatDilMarkdown(source)).toContain("[outside](<https://example.com/>)");
+  });
+
+  it("keeps extra quote markers as literal content within a blockquoted fence", () => {
+    const marker = "urlliteralhttps://example.com";
+    const outside = "urloutsidehttps://example.com";
+    const source = ["> ~~~xml", "> > " + marker, "> ~~~", outside].join("\n");
+    const output = formatDilMarkdown(source);
+    expect(output).toContain("> > " + marker);
+    expect(output).toContain("[outside](<https://example.com/>)");
+  });
 });

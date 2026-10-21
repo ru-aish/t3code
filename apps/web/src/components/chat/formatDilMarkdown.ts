@@ -155,76 +155,124 @@ type MarkdownFence = {
   listIndent: number;
 };
 
-// Keep both fenced and indented Markdown source literal. A nested fence stops
-// when its list or blockquote container ends, not only on a closing delimiter.
+// Markdown's container and indentation boundaries must be tracked before
+// interpreting embedded links or SVGs as presentation markup. Keep this
+// self-contained: the ChatGPT protocol function is serialized into the browser.
 function markdownCodeRanges(text: string): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
   let fence: MarkdownFence | null = null;
   let start = -1;
   let indented = false;
+  let paragraph = false;
+  let listIndent = 0;
   let cursor = 0;
+  function columns(value: string): number {
+    let col = 0;
+    for (const char of value) {
+      if (char === " ") col++;
+      else if (char === "\t") col += 4 - (col % 4);
+      else break;
+    }
+    return col;
+  }
+  function quotesFrom(line: string, maxDepth = Infinity): { count: number; rest: string } {
+    let count = 0;
+    let rest = line;
+    while (count < maxDepth) {
+      const match = /^ {0,3}>[ \t]?/.exec(rest);
+      if (!match) break;
+      rest = rest.slice(match[0].length);
+      count++;
+    }
+    return { count, rest };
+  }
   while (cursor < text.length) {
     const lineEnd = text.indexOf("\n", cursor);
     const end = lineEnd < 0 ? text.length : lineEnd + 1;
     const line = text.slice(cursor, lineEnd < 0 ? end : lineEnd);
-    let rest = line;
-    let quotes = 0;
-    while (true) {
-      const quote = /^ {0,3}>[ \t]?/.exec(rest);
-      if (!quote) break;
-      quotes++;
-      rest = rest.slice(quote[0].length);
-    }
-    const blank = rest.trim().length === 0;
     if (fence) {
-      const indent = /^ */.exec(rest)![0].length;
-      if (quotes !== fence.quoteDepth || (!blank && indent < fence.listIndent)) {
+      // A top-level fence owns every character of its body, including leading
+      // ">" characters that would otherwise be blockquote delimiters.
+      const { count, rest } = fence.quoteDepth
+        ? quotesFrom(line, fence.quoteDepth)
+        : { count: 0, rest: line };
+      const blank = rest.trim() === "";
+      const indent = columns(rest);
+      if (count !== fence.quoteDepth || (!blank && indent < fence.listIndent)) {
         ranges.push({ start, end: cursor });
         start = -1;
         fence = null;
-        // Revisit this line outside the previous Markdown container.
+        paragraph = false;
+        // The current line is outside the just-ended container.
         continue;
       }
-      const content = rest.slice(fence.listIndent);
-      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*\r?$/.exec(content);
-      if (close && close[1]![0] === fence.marker && close[1]!.length >= fence.length) {
+      const candidate = /^([ \t]*)(`{3,}|~{3,})[ \t]*\r?$/.exec(rest);
+      if (
+        candidate &&
+        indent >= fence.listIndent &&
+        indent - fence.listIndent <= 3 &&
+        candidate[2]![0] === fence.marker &&
+        candidate[2]!.length >= fence.length
+      ) {
         ranges.push({ start, end });
-        start = -1;
         fence = null;
+        start = -1;
+        paragraph = false;
       }
       cursor = end;
       continue;
     }
-    const codeIndented = /^(?: {4}|\t)/.test(rest);
+    const { count, rest } = quotesFrom(line);
+    const blank = rest.trim() === "";
+    const indent = columns(rest);
+    const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
     if (indented) {
-      if (codeIndented || blank) {
+      if (blank || indent >= listIndent + 4) {
         cursor = end;
         continue;
       }
       ranges.push({ start, end: cursor });
-      start = -1;
       indented = false;
+      start = -1;
+      paragraph = false;
       continue;
     }
-    if (codeIndented) {
+    if (list) {
+      listIndent = 0;
+      for (const char of list[0]) {
+        listIndent += char === "\t" ? 4 - (listIndent % 4) : 1;
+      }
+      paragraph = false;
+    } else if (!blank && listIndent && indent < listIndent) {
+      listIndent = 0;
+      paragraph = false;
+    }
+    // A fence on a list continuation uses the list content column rather
+    // than a new zero-indent container. Tabs advance to four-column stops.
+    const relative = list ? 0 : indent - listIndent;
+    const content = list ? rest.slice(list[0].length) : rest.trimStart();
+    const opening = relative >= 0 && relative <= 3 ? /^(`{3,}|~{3,})(.*)$/.exec(content) : null;
+    if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
+      fence = {
+        marker: opening[1]![0] as "`" | "~",
+        length: opening[1]!.length,
+        quoteDepth: count,
+        listIndent,
+      };
+      start = cursor;
+      paragraph = false;
+      cursor = end;
+      continue;
+    }
+    // Indented code cannot interrupt an existing paragraph. A four-space
+    // continuation after ordinary prose is still prose per CommonMark.
+    if (!blank && !paragraph && !list && relative >= 4) {
       start = cursor;
       indented = true;
       cursor = end;
       continue;
     }
-    const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(rest);
-    const listIndent = list?.[0].length ?? 0;
-    const content = list ? rest.slice(listIndent) : rest.replace(/^ {0,3}/, "");
-    const opening = /^(`{3,}|~{3,})(.*)$/.exec(content);
-    if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
-      fence = {
-        marker: opening[1]![0] as "`" | "~",
-        length: opening[1]!.length,
-        quoteDepth: quotes,
-        listIndent,
-      };
-      start = cursor;
-    }
+    paragraph = !blank;
     cursor = end;
   }
   if (start >= 0) ranges.push({ start, end: text.length });
