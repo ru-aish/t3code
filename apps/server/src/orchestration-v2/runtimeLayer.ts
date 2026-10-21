@@ -137,10 +137,12 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
     Layer.mergeAll(
       layerCommandOutputHubProvided,
       layerProviderAdapterRegistryProvided,
+      ProviderContinuationRequests.layer,
       layerEventSinkProvided,
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
       ProjectionStore.layer,
+      ProviderContinuationRequests.layer,
     ),
   ),
 );
@@ -382,7 +384,14 @@ export const layerProduction = Layer.mergeAll(
   ),
   layerProviderContinuationWorkerProvided,
   ChatGPTActions.layerWorker.pipe(
-    Layer.provide(Layer.merge(ChatGPTActions.layer, layerOrchestratorProvided)),
+    Layer.provide(
+      Layer.mergeAll(
+        ChatGPTActions.layer,
+        layerOrchestratorProvided,
+        layerChatGPTThreadSyncProvided,
+      ),
+    ),
+    Layer.provide(layerProjectService),
   ),
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),

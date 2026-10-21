@@ -1229,8 +1229,19 @@ export const layer: Layer.Layer<
                     runId: input.run.id,
                     nodeId: input.rootNode.id,
                     event: deliveredEvent,
-                    ...(isRootProviderThreadUpdate
-                      ? rootTerminalAlreadySeen
+                    // Every pre-terminal root event must still own the run
+                    // at the atomic commit boundary, not only provider-thread
+                    // updates. Once terminal, owned background items may keep
+                    // arriving while the root run is no longer "running".
+                    ...(!rootTerminalAlreadySeen
+                      ? {
+                          writeIfRunCurrent: {
+                            runId: input.run.id,
+                            activeAttemptId: input.attempt.id,
+                            expectedStatus: "running" as const,
+                          },
+                        }
+                      : isRootProviderThreadUpdate
                         ? {
                             writeIfProviderThreadOwner: {
                               providerThreadId: input.providerThread.id,
@@ -1239,14 +1250,7 @@ export const layer: Layer.Layer<
                               expectedLastRunOrdinal: input.run.ordinal,
                             },
                           }
-                        : {
-                            writeIfRunCurrent: {
-                              runId: input.run.id,
-                              activeAttemptId: input.attempt.id,
-                              expectedStatus: "running" as const,
-                            },
-                          }
-                      : {}),
+                        : {}),
                   });
                   storedEventCount = storedEvents.length;
                   if (

@@ -3641,6 +3641,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             case "monitor":
             case "background_task":
               return { kind: task.kind, label, outcome };
+            case "process":
+              return { kind: "background_task", label, outcome };
             case "command":
             case undefined:
               return { kind: "command", label, outcome };

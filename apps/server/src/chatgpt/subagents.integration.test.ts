@@ -338,8 +338,13 @@ describe("ChatGPT app-owned delegation", () => {
             // No status/wait call: the existing completion worker resumes ChatGPT.
             const continuation = yield* Queue.take(submissions);
             expect(continuation.threadId).toBe(parentId);
-            expect(continuation.text).toContain(task.taskId);
+            expect(continuation.text.length).toBeLessThan(600);
+            expect(continuation.text).toContain("task_status");
             const completed = yield* orchestrator.getThreadProjection(parentId);
+            const delivery = completed.messages.find((message) =>
+              message.delegatedCompletion?.taskIds.includes(task.taskId),
+            );
+            expect(delivery?.delegatedCompletion?.taskIds).toEqual([task.taskId]);
             expect(completed.subagents.find((agent) => agent.id === task.taskId)).toMatchObject({
               status: "completed",
               result: "Result: Review the API",

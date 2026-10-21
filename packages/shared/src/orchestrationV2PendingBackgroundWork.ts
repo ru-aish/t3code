@@ -59,6 +59,7 @@ export function backgroundWorkHoldsCompletion(
 function backgroundWorkKindHoldsCompletion(kind: PendingBackgroundWorkTask["kind"]): boolean {
   switch (kind) {
     case "command":
+    case "process":
       return false;
     case "subagent":
     case "monitor":

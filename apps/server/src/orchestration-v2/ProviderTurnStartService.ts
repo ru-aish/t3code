@@ -9,6 +9,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2ThreadProjection,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -28,6 +29,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventSink from "./EventSink.ts";
+import { mailboxMessageAtSend } from "./NotificationMailbox.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
@@ -52,6 +54,20 @@ import {
   restartCancelledBackgroundWorkNote,
 } from "./RestartBackgroundNote.ts";
 
+/** Identify only handoffs linked to completed app-owned child transfers. */
+export const legacyAppOwnedResultHandoffIds = (
+  transfers: OrchestrationV2ThreadProjection["contextTransfers"],
+) =>
+  new Set(
+    transfers
+      .filter((transfer) => transfer.type === "subagent_result")
+      .map((transfer) =>
+        transfer.resolution !== null && "contextHandoffId" in transfer.resolution
+          ? transfer.resolution.contextHandoffId
+          : undefined)
+      .filter((id) => id !== undefined),
+  );
+
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
   "ProviderTurnStartError",
   {
@@ -65,6 +81,7 @@ const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 /** Claude refuses to replace a process running background work before it reads the prompt. */
 const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
+  Predicate.isTagged(error, "ChatGPTTurnNotSubmittedError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
 export interface ProviderTurnStartServiceV2Shape {
@@ -231,8 +248,10 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
+      const legacyChildHandoffIds = legacyAppOwnedResultHandoffIds(projection.contextTransfers);
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
+          !legacyChildHandoffIds.has(handoff.id) &&
           handoff.status === "ready" &&
           (handoff.targetRunId === run.id ||
             (handoff.toProviderThreadId === run.providerThreadId &&
@@ -569,6 +588,52 @@ export const layer: Layer.Layer<
         });
         return;
       }
+      // A locally settled run is not proof that ChatGPT's native generation
+      // stopped. Retire the uncertain native conversation instead of blocking
+      // the durable T3 thread forever (or resending to the same conversation).
+      // This rule is ChatGPT-specific; other providers have their own lifecycle.
+      const terminalAttemptIds = new Set(
+        projection.providerTurns
+          .filter(
+            (source) =>
+              source.providerThreadId === providerThread.id &&
+              source.runAttemptId !== null &&
+              source.status === "completed",
+          )
+          .map((source) => source.runAttemptId),
+      );
+      const recoveredThroughOrdinal = Math.max(
+        0,
+        ...projection.contextHandoffs
+          .filter(
+            (handoff) =>
+              handoff.toProviderThreadId === providerThread.id &&
+              handoff.strategy === "full_thread_summary" &&
+              handoff.delivery?.status !== "pending" &&
+              handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId,
+          )
+          .map((handoff) => handoff.coveredRunOrdinals.to),
+      );
+      const requiresFreshNative =
+        sessionResult.success.driver === "chatgpt" &&
+        projection.runs.some((source) => {
+          if (
+            source.providerThreadId !== providerThread.id ||
+            source.ordinal >= run.ordinal ||
+            source.ordinal <= recoveredThroughOrdinal ||
+            source.startedAt === null
+          ) return false;
+          const attempts = projection.attempts.filter((candidate) => candidate.runId === source.id);
+          // A prior native identity cannot poison a successfully rotated one.
+          const matching = attempts.filter(
+            (candidate) =>
+              candidate.nativeThreadId === undefined ||
+              candidate.nativeThreadId === providerThread.nativeThreadRef?.nativeId,
+          );
+          return matching.length > 0 && matching.some(
+            (candidate) => !terminalAttemptIds.has(candidate.id),
+          );
+        });
       const session = sessionResult.success;
       const loadFromProvider = (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
@@ -636,25 +701,30 @@ export const layer: Layer.Layer<
               modelSelection: run.modelSelection,
               runtimePolicy: resolvedRuntimePolicy,
               providerSessionId,
-              existingProviderThread: providerThread,
+              existingProviderThread: requiresFreshNative
+                ? { ...providerThread, nativeThreadRef: null }
+                : providerThread,
             }),
           );
         }
         const uncertainDelivery = projection.contextHandoffs.some(
           (handoff) =>
+            !legacyChildHandoffIds.has(handoff.id) &&
             handoff.toProviderThreadId === providerThread.id &&
             handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
             handoff.delivery?.status === "pending",
         );
         const resumed = yield* Effect.result(
-          uncertainDelivery
+          uncertainDelivery || requiresFreshNative
             ? Effect.fail(
                 new ProviderAdapter.ProviderAdapterTurnStartError({
                   driver: session.driver,
                   threadId: projection.thread.id,
                   providerThreadId: providerThread.id,
                   runId,
-                  cause: "Uncertain native history injection",
+                  cause: requiresFreshNative
+                    ? "Previous ChatGPT native generation lacks terminal proof"
+                    : "Uncertain native history injection",
                 }),
               )
             : session.resumeThread({
@@ -672,7 +742,9 @@ export const layer: Layer.Layer<
           driver: session.driver,
           providerThreadId: providerThread.id,
           runId,
-          reason: uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
+          reason: requiresFreshNative
+            ? "unverified_native_generation"
+            : uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
           errorTag: resumed.failure._tag,
         });
         const replacement = yield* loadFromProvider(
@@ -958,6 +1030,7 @@ export const layer: Layer.Layer<
       );
       const settledHandoffs = projection.contextHandoffs.filter(
         (handoff) =>
+          !legacyChildHandoffIds.has(handoff.id) &&
           handoff.toProviderThreadId === providerThread.id &&
           handoff.delivery?.nativeThreadId === runningProviderThread.nativeThreadRef?.nativeId &&
           handoff.delivery?.status !== "pending",
@@ -1137,6 +1210,21 @@ export const layer: Layer.Layer<
               }),
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
+          // A queued mailbox message can absorb other completed children while
+          // provider setup runs. Snapshot its committed payload at the actual
+          // send boundary, never from the earlier turn-start projection.
+          const latestMessage =
+            message.delegatedCompletion === undefined
+              ? undefined
+              : yield* projectionStore.getRunMessage(input.threadId, run.id);
+          const effectiveMessage = mailboxMessageAtSend(message, latestMessage);
+          const finalUserText =
+            effectiveMessage === message
+              ? userText
+              : projectComposerContextForProvider({
+                  text: effectiveMessage.text,
+                  records: effectiveMessage.context?.records ?? [],
+                });
           const start = compact ? session.compactThread! : session.startTurn;
           const context = [delivery.context, restartNote]
             .filter((part) => part !== "")
@@ -1146,7 +1234,8 @@ export const layer: Layer.Layer<
             ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
-              text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
+              text:
+                context === "" ? finalUserText : `${context}\n\nUser message:\n${finalUserText}`,
             },
           }).pipe(
             // A pending marker would make the next turn abandon this native
