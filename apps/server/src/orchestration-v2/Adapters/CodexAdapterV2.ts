@@ -6253,7 +6253,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           command: CodexGoalCommand,
         ) =>
           Effect.gen(function* () {
-            const threadId = yield* getNativeThreadId(turnInput.providerThread);
+            const proveNotSubmitted = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                      driver: CODEX_PROVIDER,
+                      cause,
+                    }),
+                ),
+              );
+            // Lookup and thread/goal/get cannot start a native turn.
+            const threadId = yield* proveNotSubmitted(getNativeThreadId(turnInput.providerThread));
             rootProviderThreads.set(threadId, turnInput.providerThread);
             const readGoal = client
               .request("thread/goal/get", { threadId })
@@ -6262,7 +6273,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   response.goal == null ? null : providerGoalFromCodex(response.goal),
                 ),
               );
-            const current = yield* readGoal;
+            const current = yield* proveNotSubmitted(readGoal);
             goalsByNativeThread.set(threadId, current);
             if (command.type === "show") {
               return yield* completeGoalCommandTurn(
@@ -6310,10 +6321,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* startNativeTurn(
                 turnInput,
                 command.type === "set"
-                  ? yield* toCodexInput({
-                      ...turnInput,
-                      message: { ...turnInput.message, text: command.objective },
-                    })
+                  ? yield* proveNotSubmitted(
+                      toCodexInput({
+                        ...turnInput,
+                        message: { ...turnInput.message, text: command.objective },
+                      }),
+                    )
                   : [],
               );
               if (activation.stopped) return;

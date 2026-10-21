@@ -8358,7 +8358,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                         }),
                     ),
                   );
-            const querySession = yield* openQuery(turnInput, nativeThreadId);
+            // openQuery configures or creates the SDK query but cannot deliver this
+            // turn's prompt. A failed open is a proven pre-submission rejection.
+            const querySession = yield* openQuery(turnInput, nativeThreadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                    driver: CLAUDE_PROVIDER,
+                    cause,
+                  }),
+              ),
+            );
             const attachTurn = Effect.gen(function* () {
               querySession.lastTurn = context;
               yield* Ref.set(activeTurn, context);

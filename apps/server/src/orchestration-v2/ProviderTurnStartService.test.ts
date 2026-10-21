@@ -45,6 +45,30 @@ import * as RuntimePolicy from "./RuntimePolicy.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
+it("marks context handoffs unsent only for proven pre-prompt rejection", () => {
+  const rejection = new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+    driver: ProviderDriverKind.make("codex"),
+    cause: new Error("no native turn/start attempted"),
+  });
+  const wrapped = new ProviderAdapter.ProviderAdapterTurnStartError({
+    driver: ProviderDriverKind.make("codex"),
+    threadId: ThreadId.make("handoff-proof-thread"),
+    providerThreadId: ProviderThreadId.make("handoff-proof-provider-thread"),
+    runId: RunId.make("handoff-proof-run"),
+    cause: rejection,
+  });
+  expect(ProviderTurnStart.refusedBeforePrompt(wrapped)).toBe(true);
+  expect(ProviderTurnStart.refusedBeforePrompt(
+    new ProviderAdapter.ProviderAdapterTurnStartError({
+      driver: ProviderDriverKind.make("codex"),
+      threadId: ThreadId.make("handoff-ambiguous-thread"),
+      providerThreadId: ProviderThreadId.make("handoff-ambiguous-provider-thread"),
+      runId: RunId.make("handoff-ambiguous-run"),
+      cause: new Error("turn/start response lost"),
+    }),
+  )).toBe(false);
+});
+
 it("does not commit running state when inherited background routing cannot be read", async () => {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
