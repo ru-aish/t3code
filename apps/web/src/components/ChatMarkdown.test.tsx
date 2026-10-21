@@ -114,6 +114,18 @@ describe("ChatGPT legacy link rendering", () => {
 });
 
 describe("ChatGPT static table Markdown preview", () => {
+  it("displays preserved entities literally without creating executable markup", () => {
+    const text = "| Company |\n| --- |\n| Research &amp; Development &lt;script&gt; \\| no link |";
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
+      "text/html",
+    );
+    const cell = document.querySelector("tbody td");
+    expect(cell?.textContent).toBe("Research & Development <script> | no link");
+    expect(document.querySelector("script")).toBeNull();
+    expect(document.querySelector("tbody a")).toBeNull();
+  });
+
   it("renders bounded DIL table fallback output as an accessible data table", () => {
     const text =
       "Before.\n\n| Month | Sales |\n| --- | --- |\n| January | 120 |\n| February | 250 |\n\nAfter.";

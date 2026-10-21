@@ -841,13 +841,54 @@ describe("ChatGPT static DIL table preservation", () => {
 
   it("escapes Markdown-special text and HTML-looking entities in cells", () => {
     const table =
-      "<table><table-row><table-cell>Name</table-cell><table-cell>Value</table-cell></table-row>" +
+      "<table><table-row header><table-cell>Name</table-cell><table-cell>Value</table-cell></table-row>" +
       "<table-row><table-cell>x | y</table-cell><table-cell>[link](javascript:bad) &amp; *bold*</table-cell></table-row></table>";
     const result = normalize(table);
     expect(result).toContain("x \\| y");
     expect(result).toContain("\\[link\\]\\(javascript:bad\\)");
-    expect(result).toContain("&amp;amp;");
+    expect(result).toContain("&amp;");
+    expect(result).not.toContain("&amp;amp;");
     expect(result).toContain("\\*bold\\*");
+  });
+
+  it("does not promote data rows into headers or relocate later headers", () => {
+    const noHeader = source.replace("<table-row header>", "<table-row>");
+    const laterHeader = source
+      .replace("<table-row header>", "<table-row>")
+      .replace("<table-row><table-cell>January", "<table-row header><table-cell>January");
+    const doubleHeader = source.replace(
+      "<table-row><table-cell>January",
+      "<table-row header><table-cell>January",
+    );
+    for (const invalid of [noHeader, laterHeader, doubleHeader]) {
+      const result = normalize(invalid);
+      expect(result).not.toContain("| Month | Sales |");
+      expect(result).toContain("<table");
+    }
+    expect(normalize(source)).toContain("| Month | Sales |");
+  });
+
+  it("rejects rowSpan, colSpan, and unsupported structural cell properties", () => {
+    for (const attribute of ["rowSpan=2", "colSpan=2", 'rowSpan="2"', "header", "align=right"]) {
+      const invalid = source.replace("<table-cell>January", `<table-cell ${attribute}>January`);
+      const result = normalize(invalid);
+      expect(result).not.toContain("| Month | Sales |");
+      expect(result).toContain("<table-cell");
+    }
+  });
+
+  it("preserves decoded literal HTML entities without double-encoding or executing markup", () => {
+    const text =
+      "Research &amp; Development, &lt;script&gt; &quot;Hi&quot; &#124; &#x3C; &apos; &#39;";
+    const table = `<table><table-row header><table-cell>Company</table-cell></table-row><table-row><table-cell>${text}</table-cell></table-row></table>`;
+    const result = normalize(table);
+    expect(result).toContain("Research &amp; Development");
+    expect(result).toContain("&lt;script&gt;");
+    expect(result).toContain('"Hi"');
+    expect(result).toContain("\\|");
+    expect(result).not.toContain("&amp;amp;");
+    expect(result).not.toContain("<script>");
+    expect(result).not.toContain("&amp;lt;");
   });
 
   it("skips tables embedded in fenced, inline, or raw code and HTML comments", () => {

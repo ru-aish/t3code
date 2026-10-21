@@ -394,9 +394,9 @@ export function normalizeStreamMessage(
       let slashes = 0;
       for (let i = start - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
       if (slashes % 2) continue;
-      const opening = /^<table(?:\s[^<>]*)?>/.exec(source.slice(start, start + 256));
-      if (!opening || /[{}]|\bon[A-Z]/.test(opening[0])) continue;
-      const contentStart = start + opening[0].length;
+      // Only a plain table can be represented faithfully in GFM.
+      if (!source.startsWith("<table>", start)) continue;
+      const contentStart = start + "<table>".length;
       const closeAt = source.indexOf("</table>", contentStart);
       if (closeAt < 0 || closeAt - contentStart > 24_000) continue;
       const content = source.slice(contentStart, closeAt);
@@ -406,12 +406,19 @@ export function normalizeStreamMessage(
       while (cursor < content.length) {
         while (/\s/.test(content[cursor] ?? "")) cursor++;
         if (cursor >= content.length) break;
-        const rowOpen = /^<table-row(?:\s[^<>]*)?>/.exec(content.slice(cursor, cursor + 256));
-        if (!rowOpen || /[{}]|\bon[A-Z]/.test(rowOpen[0]) || rows.length >= 60) {
+        const rowIsHeader = content.startsWith("<table-row header>", cursor);
+        const rowOpen = rowIsHeader
+          ? "<table-row header>"
+          : content.startsWith("<table-row>", cursor)
+            ? "<table-row>"
+            : null;
+        // GFM has exactly one header at the top. Never promote a data row or
+        // relocate a header row, because both change the table's semantics.
+        if (!rowOpen || rowIsHeader !== (rows.length === 0) || rows.length >= 60) {
           valid = false;
           break;
         }
-        cursor += rowOpen[0].length;
+        cursor += rowOpen.length;
         const cells: string[] = [];
         let rowClosed = false;
         while (cursor < content.length) {
@@ -421,12 +428,13 @@ export function normalizeStreamMessage(
             rowClosed = true;
             break;
           }
-          const cellOpen = /^<table-cell(?:\s[^<>]*)?>/.exec(content.slice(cursor, cursor + 256));
-          if (!cellOpen || /[{}]|\bon[A-Z]/.test(cellOpen[0]) || cells.length >= 16) {
+          // A cell with rowSpan, colSpan, or other DIL properties cannot be
+          // faithfully converted to a plain Markdown column.
+          if (!content.startsWith("<table-cell>", cursor) || cells.length >= 16) {
             valid = false;
             break;
           }
-          cursor += cellOpen[0].length;
+          cursor += "<table-cell>".length;
           const cellEnd = content.indexOf("</table-cell>", cursor);
           if (cellEnd < 0) {
             valid = false;
@@ -437,12 +445,36 @@ export function normalizeStreamMessage(
             valid = false;
             break;
           }
-          // Prevent Markdown/HTML injection and avoid interpreting DIL cell text.
-          const cell = text
+          // Decode a small, known entity subset once before escaping as text.
+          // This preserves &amp; and &lt; without creating active HTML or links.
+          const decoded = text.replace(
+            /&(?:amp|lt|gt|quot|apos|nbsp|#[0-9]+|#[xX][0-9a-fA-F]+);/g,
+            (entity) => {
+              const named: Record<string, string> = {
+                "&amp;": "&",
+                "&lt;": "<",
+                "&gt;": ">",
+                "&quot;": '"',
+                "&apos;": "'",
+                "&nbsp;": " ",
+              };
+              if (named[entity] !== undefined) return named[entity];
+              const hex = entity[2]?.toLowerCase() === "x";
+              const codepoint = Number.parseInt(entity.slice(hex ? 3 : 2, -1), hex ? 16 : 10);
+              return codepoint > 0 &&
+                codepoint <= 0x10ffff &&
+                !(codepoint >= 0xd800 && codepoint <= 0xdfff)
+                ? String.fromCodePoint(codepoint)
+                : "\ufffd";
+            },
+          );
+          const cell = decoded
             .replace(/\s+/g, " ")
             .trim()
             .replace(/&/g, "&amp;")
-            .replace(/([\\`*_{}()#+.!|>~-])/g, "\\$1")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/([\\`*_{}()#+.!|~-])/g, "\\$1")
             .replace(/\[/g, "\\[")
             .replace(/\]/g, "\\]");
           cells.push(cell);
