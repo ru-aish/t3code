@@ -1125,6 +1125,46 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("ignores escaped closing card delimiters when tracking parent ownership", () => {
+    for (const content of [
+      "<card padding={3}>\n\\</card>\n" + card + "\n</card>",
+      "<card padding={3}>\n\\\\\\</card>\n" + card + "\n</card>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("does not treat quoted or escaped raw-block markers as real comments", () => {
+    for (const content of [
+      '<box label="<!--">Ignored</box>\n' + card,
+      '<box label="<CodeBlock>">Ignored</box>\n' + card,
+      '<box label="<WritingBlock>">Ignored</box>\n' + card,
+      "\\<!-- Escaped comment\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("does not terminate raw blocks on closing tags embedded in attributes", () => {
+    for (const content of [
+      '<CodeBlock language="text">\n<box label="</CodeBlock>">\n' + card + "\n</box>\n</CodeBlock>",
+      '<WritingBlock>\n<box label="</WritingBlock>">\n' + card + "\n</box>\n</WritingBlock>",
+      "<AppBlock>\n\\</AppBlock>\n" + card + "\n</AppBlock>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("ends lazy list or blockquote ownership across fenced code blocks", () => {
+    for (const content of [
+      "- A list item\n```js\nconsole.log(1)\n```\n" + card,
+      "> A quote\n~~~js\nconsole.log(1)\n~~~\n" + card,
+      "1. A numbered item\n````js\nconsole.log(1)\n````\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
   it("still renders independent cards after a completed invalid card", () => {
     const output = normalize("<card padding={2}><title>Unsupported</title></card>\n" + card);
     expect(output.match(/t3-card/g)).toHaveLength(1);

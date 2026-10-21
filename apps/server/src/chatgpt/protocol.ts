@@ -565,11 +565,50 @@ export function normalizeStreamMessage(
   ): Array<{ json: string; start: number; end: number }> {
     if (!source.includes("<card>") || source.length > 500_000) return [];
     const literals = markdownLiteralRanges(source);
+    // Tokenize markup before detecting raw blocks or card ownership. This
+    // rejects escaped delimiters and ignores tag-like strings in attributes.
+    const markupStarts = new Set<number>();
+    let markupAt = 0;
+    let markupCount = 0;
+    while (markupAt < source.length) {
+      const at = source.indexOf("<", markupAt);
+      if (at < 0) break;
+      markupAt = at + 1;
+      if (inRanges(literals, at)) continue;
+      let slashes = 0;
+      for (let i = at - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+      if (slashes % 2 === 1) continue;
+      if (source.startsWith("<!--", at)) {
+        if (++markupCount > 4_000) return [];
+        markupStarts.add(at);
+        const close = source.indexOf("-->", at + 4);
+        markupAt = close < 0 ? source.length : close + 3;
+        continue;
+      }
+      const opener = /^<\/?[A-Za-z][A-Za-z0-9:-]*(?=[\s/>])/.exec(source.slice(at, at + 80));
+      if (!opener) continue;
+      if (++markupCount > 4_000) return [];
+      let quote: string | null = null;
+      let end = -1;
+      for (let i = at + opener[0].length; i < source.length && i - at <= 4_096; i++) {
+        const ch = source[i];
+        if (quote) {
+          if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") {
+          end = i + 1;
+          break;
+        } else if (ch === "<") break;
+      }
+      if (end < 0) return [];
+      markupStarts.add(at);
+      markupAt = end;
+    }
     const protectedRaw: Span[] = [];
     const rawOpen = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b/g;
     let raw: RegExpExecArray | null;
     while ((raw = rawOpen.exec(source))) {
-      if (inRanges(literals, raw.index)) continue;
+      if (!markupStarts.has(raw.index)) continue;
       if (raw[0] !== "<!--") {
         let quote: string | null = null;
         let openingEnd = -1;
@@ -590,7 +629,14 @@ export function normalizeStreamMessage(
         rawOpen.lastIndex = openingEnd;
       }
       const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
-      const closeAt = source.indexOf(closing, rawOpen.lastIndex);
+      let closeAt = source.indexOf(closing, rawOpen.lastIndex);
+      if (raw[0] !== "<!--") {
+        // A closing marker inside another tag's attribute or Markdown escape
+        // cannot terminate a raw block.
+        while (closeAt >= 0 && !markupStarts.has(closeAt)) {
+          closeAt = source.indexOf(closing, closeAt + 1);
+        }
+      }
       const end = closeAt < 0 ? source.length : closeAt + closing.length;
       protectedRaw.push({ start: raw.index, end });
       rawOpen.lastIndex = end;
@@ -608,7 +654,7 @@ export function normalizeStreamMessage(
       const at = source.indexOf("<", scanAt);
       if (at < 0) break;
       scanAt = at + 1;
-      if (inRanges(protectedRanges, at)) continue;
+      if (inRanges(protectedRanges, at) || !markupStarts.has(at)) continue;
       const opener = /^<\/?[A-Za-z][A-Za-z0-9:-]*/.exec(source.slice(at, at + 80));
       if (!opener) continue;
       if (++tagCount > 4_000) return [];
@@ -644,20 +690,32 @@ export function normalizeStreamMessage(
     // paragraph even without a marker or indentation.
     const containerCardStarts = new Set<number>();
     let quotedOrListedParagraph = false;
+    let fenced: { marker: string; length: number } | null = null;
     let lineStart = 0;
     while (lineStart < source.length) {
       const newline = source.indexOf("\n", lineStart);
       const end = newline < 0 ? source.length : newline;
       const line = source.slice(lineStart, end);
-      if (!line.trim()) {
+      if (fenced) {
+        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+        if (closing && closing[1]![0] === fenced.marker && closing[1]!.length >= fenced.length)
+          fenced = null;
         quotedOrListedParagraph = false;
       } else {
-        const marker = /^ {0,3}(?:>\s?|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line);
-        const interrupt = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(line);
-        if (interrupt) quotedOrListedParagraph = false;
-        else if (marker) quotedOrListedParagraph = true;
-        else if (quotedOrListedParagraph && line.startsWith("<card>"))
-          containerCardStarts.add(lineStart);
+        const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+        if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
+          fenced = { marker: opening[1]![0]!, length: opening[1]!.length };
+          quotedOrListedParagraph = false;
+        } else if (!line.trim()) {
+          quotedOrListedParagraph = false;
+        } else {
+          const marker = /^ {0,3}(?:>\s?|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line);
+          const interrupt = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(line);
+          if (interrupt) quotedOrListedParagraph = false;
+          else if (marker) quotedOrListedParagraph = true;
+          else if (quotedOrListedParagraph && line.startsWith("<card>"))
+            containerCardStarts.add(lineStart);
+        }
       }
       if (newline < 0) break;
       lineStart = end + 1;
