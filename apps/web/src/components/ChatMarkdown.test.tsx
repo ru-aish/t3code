@@ -81,6 +81,7 @@ vi.mock("~/lib/openPullRequestLink", () => ({
   useOpenChangeRequestLink: () => vi.fn(),
 }));
 
+import { formatDilMarkdown } from "./chat/formatDilMarkdown";
 import ChatMarkdown, {
   canUseMarkdownFileShellActions,
   hasMarkdownFilePrimaryAction,
@@ -94,6 +95,23 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
   if (!button) throw new Error(`Missing code button: ${label}`);
   return button.props as ComponentProps<typeof Button>;
 }
+
+describe("ChatGPT legacy link rendering", () => {
+  it("renders the reported malformed reference as a clean clickable link", () => {
+    const raw =
+      "I checked the live GitHub PR list for **urlru-aish/t3code[https://github.com/ru-aish/t3code/pulls**\\](https://github.com/ru-aish/t3code/pulls%EE%88%81**%5C).";
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd={undefined} text={formatDilMarkdown(raw)} />),
+      "text/html",
+    );
+    const anchor = document.querySelector("a");
+    expect(anchor?.textContent).toBe("ru-aish/t3code");
+    expect(anchor?.getAttribute("href")).toBe("https://github.com/ru-aish/t3code/pulls");
+    expect(document.querySelector("strong")?.textContent).toBe("ru-aish/t3code");
+    expect(document.body.textContent).not.toContain("url");
+    expect(document.body.textContent).not.toContain("%EE%88%81");
+  });
+});
 
 describe("ChatMarkdown bare anchor placeholders", () => {
   it.each(["<A>", "<a>", "<a >", "<a/>", "<A/>", "<a />"])(
