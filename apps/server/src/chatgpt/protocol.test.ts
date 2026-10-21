@@ -891,6 +891,50 @@ describe("ChatGPT static DIL table preservation", () => {
     expect(result).not.toContain("&amp;lt;");
   });
 
+  it("does not move tables out of quoted, listed, or indented Markdown containers", () => {
+    for (const container of [
+      `> Quote before\n> ${source}\n> Quote after`,
+      `- List item\n  ${source}\n  More list content`,
+      `1. List item\n   ${source}`,
+      `    ${source}`,
+      `Text ${source} more text`,
+    ]) {
+      const output = normalize(container);
+      expect(output).not.toContain("| Month | Sales |");
+      expect(output).toContain("<table>");
+    }
+    expect(normalize(`Intro\n${source}\nOutro`)).toContain("| Month | Sales |");
+  });
+
+  it("keeps nested tables intact when outer DIL attributes contain angle brackets", () => {
+    const inner = source.replaceAll("Month", "Inner");
+    for (const attribute of [
+      'emptyLabel="<no data>"',
+      'emptyLabel="a > b < c"',
+      "emptyLabel='<missing>'",
+    ]) {
+      const outer =
+        `<table ${attribute}><table-row header><table-cell>Outer</table-cell></table-row>` +
+        `<table-row><table-cell>${inner}</table-cell></table-row></table>`;
+      const output = normalize(outer + "\n" + source);
+      expect(output).not.toContain("| Inner | Sales |");
+      expect(output).toContain("| Month | Sales |");
+    }
+  });
+
+  it("bounds malformed raw component scans and does not expose nested tables", () => {
+    const malformed = "<CodeBlock foo ".repeat(4_000);
+    const output = normalize(malformed + source);
+    expect(output).not.toContain("| Month | Sales |");
+    expect(output).toContain("<CodeBlock");
+    expect(normalize("<CodeBlock data-test='x > y'>" + source + "</CodeBlock>")).not.toContain(
+      "| Month | Sales |",
+    );
+    expect(normalize("<CodeBlock>literal</CodeBlock>\n" + source)).toContain(
+      "| Month | Sales |",
+    );
+  });
+
   it("never promotes a nested table inside unsupported outer table markup", () => {
     const inner = source.replaceAll("Month", "Inner");
     const outer = `<table><table-row header><table-cell>Outer</table-cell></table-row><table-row><table-cell>${inner}</table-cell></table-row></table>`;

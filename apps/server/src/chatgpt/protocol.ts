@@ -373,10 +373,30 @@ export function normalizeStreamMessage(
     if (!source.includes("<table") || source.length > 500_000) return [];
     const literalRanges = markdownLiteralRanges(source);
     const rawRanges: Span[] = [];
-    const rawOpening = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b[^>]*>/g;
+    // Match only opening names to avoid quadratic scans on malformed tags.
+    const rawOpening = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b/g;
     let raw: RegExpExecArray | null;
     while ((raw = rawOpening.exec(source))) {
       if (inRanges(literalRanges, raw.index)) continue;
+      if (raw[0] !== "<!--") {
+        let quote: string | null = null;
+        let openingEnd = -1;
+        for (let index = rawOpening.lastIndex; index < source.length; index++) {
+          const ch = source[index];
+          if (quote) {
+            if (ch === quote) quote = null;
+          } else if (ch === '"' || ch === "'") quote = ch;
+          else if (ch === ">") {
+            openingEnd = index + 1;
+            break;
+          } else if (ch === "<") break;
+        }
+        if (openingEnd < 0) {
+          rawRanges.push({ start: raw.index, end: source.length });
+          break;
+        }
+        rawOpening.lastIndex = openingEnd;
+      }
       const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
       const closeAt = source.indexOf(closing, rawOpening.lastIndex);
       const end = closeAt < 0 ? source.length : closeAt + closing.length;
@@ -391,7 +411,7 @@ export function normalizeStreamMessage(
     const rootsWithNested = new Set<number>();
     const unclosed = new Set<number>();
     const stack: number[] = [];
-    const tableTags = /<\/?table(?=[\s>])[^<>]*>/g;
+    const tableTags = /<\/?table(?=[\s>])/g;
     let tag: RegExpExecArray | null;
     let tagCount = 0;
     while ((tag = tableTags.exec(source))) {
@@ -400,6 +420,21 @@ export function normalizeStreamMessage(
       let backslashes = 0;
       for (let i = tag.index - 1; i >= 0 && source[i] === "\\"; i--) backslashes++;
       if (backslashes % 2) continue;
+      // Recognize outer tags even with quoted '<' or '>' in their properties.
+      let quote: string | null = null;
+      let tagEnd = -1;
+      for (let i = tableTags.lastIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (quote) {
+          if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") {
+          tagEnd = i + 1;
+          break;
+        } else if (ch === "<") break;
+      }
+      if (tagEnd < 0) return [];
+      tableTags.lastIndex = tagEnd;
       if (tag[0].startsWith("</")) {
         stack.pop();
       } else {
@@ -424,6 +459,10 @@ export function normalizeStreamMessage(
         unclosed.has(start)
       )
         continue;
+      // A table inside Markdown list or quote markup cannot be converted to
+      // unprefixed GFM lines without losing the containing block's semantics.
+      const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+      if (lineStart !== start) continue;
       let slashes = 0;
       for (let i = start - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
       if (slashes % 2) continue;
