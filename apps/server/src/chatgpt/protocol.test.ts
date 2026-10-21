@@ -456,6 +456,35 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(input);
   });
+  it("promotes SVG following lazy equals lines but protects it after a real heading", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    for (const lazy of ["=", "==", "===", "====="]) {
+      const source = "> text\n" + lazy + "\n>     " + svg;
+      const output =
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [source] },
+          },
+        }).text ?? "";
+      expect(output).toContain("```svg\n" + svg + "\n```");
+    }
+    for (const prefix of ["> text\n> ===\n>     ", "Paragraph\n===\n    "]) {
+      const source = prefix + svg;
+      const output =
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [source] },
+          },
+        }).text ?? "";
+      expect(output).toContain(prefix + svg);
+      expect(output).not.toContain("```svg");
+    }
+  });
+
   it("recognizes SVG after explicit quote markers resume following lazy paragraph lines", () => {
     const svg = '<svg><circle r="1"/></svg>';
     for (const prefix of [

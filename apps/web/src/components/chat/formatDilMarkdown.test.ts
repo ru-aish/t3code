@@ -265,6 +265,22 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("> > " + marker);
     expect(output).toContain("[outside](<https://example.com/>)");
   });
+  it("keeps setext-like lazy lines inside quoted paragraphs but parses explicit delimiters", () => {
+    const marker = "urlLiteralhttps://example.com";
+    for (const lazy of ["=", "==", "===", "====="]) {
+      const source = "> text\n" + lazy + "\n>     " + marker;
+      expect(formatDilMarkdown(source)).toContain("[Literal](<https://example.com/>)");
+      const repeated = "> text\n" + lazy + "\n    continued\n>     " + marker;
+      expect(formatDilMarkdown(repeated)).toContain("[Literal](<https://example.com/>)");
+    }
+    const explicit = "> text\n> ===\n>     " + marker;
+    expect(formatDilMarkdown(explicit)).toContain(">     " + marker);
+    expect(formatDilMarkdown(explicit)).not.toContain("[Literal](<https://example.com/>)");
+    const outside = "Paragraph\n===\n    " + marker;
+    expect(formatDilMarkdown(outside)).toContain("    " + marker);
+    expect(formatDilMarkdown(outside)).not.toContain("[Literal](<https://example.com/>)");
+  });
+
   it("preserves an open quoted paragraph when explicit markers resume after lazy lines", () => {
     const marker = "urlLiteralhttps://example.com";
     for (const prefix of [

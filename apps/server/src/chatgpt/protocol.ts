@@ -86,12 +86,10 @@ export function normalizeStreamMessage(
       // Retain the logical quote depth across those lines so a later explicit
       // '>' prefix resumes the same paragraph instead of starting indented code.
       const interruptsQuotedParagraph =
-        /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-+*]|\d{1,9}[.)])[ \t]+|(?:`{3,}|~{3,})|(?:={3,})[ \t]*$)/.test(
-          rest,
-        ) ||
+        /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-+*]|\d{1,9}[.)])[ \t]+|(?:`{3,}|~{3,}))/.test(rest) ||
         (columns(rest) <= 3 &&
           /^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(rest.trimStart()));
-      const lazyQuotedParagraph =
+      const lazyQuotedParagraph: boolean =
         count < previousQuoteDepth && paragraph && !blank && !interruptsQuotedParagraph;
       if (count !== previousQuoteDepth && !lazyQuotedParagraph) {
         paragraph = false;
@@ -156,7 +154,12 @@ export function normalizeStreamMessage(
       const atxHeading =
         !list && relative >= 0 && relative <= 3 && /^#{1,6}(?:[ \t]|$)/.test(content);
       const setextHeading: boolean =
-        !list && paragraph && relative >= 0 && relative <= 3 && /^(?:=+|-+)[ \t]*$/.test(content);
+        !list &&
+        paragraph &&
+        !lazyQuotedParagraph &&
+        relative >= 0 &&
+        relative <= 3 &&
+        /^(?:=+|-+)[ \t]*$/.test(content);
       paragraph = !blank && !atxHeading && !thematicBreak && !setextHeading;
       cursor = end;
     }
