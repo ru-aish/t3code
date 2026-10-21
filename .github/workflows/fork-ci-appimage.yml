@@ -31,12 +31,23 @@ jobs:
           vp test run \
             apps/server/src/chatgpt/connection.test.ts \
             apps/server/src/chatgpt/adapter.test.ts \
+            apps/server/src/chatgpt/actions.test.ts \
+            apps/server/src/chatgpt/processCompletionWorker.test.ts \
             apps/server/src/chatgpt/protocol.test.ts \
             apps/server/src/chatgpt/driver.test.ts \
             apps/server/src/chatgpt/threadSync.test.ts \
             apps/server/src/chatgpt/mcpBridge.test.ts \
             apps/server/src/chatgpt/mcpBridge.windows.test.ts \
             apps/server/src/chatgpt/subagents.integration.test.ts \
+            apps/server/src/mcp/AcpMcpStdioBridge.test.ts \
+            apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts \
+            apps/server/src/orchestration-v2/EffectWorker.test.ts \
+            apps/server/src/orchestration-v2/NotificationMailbox.test.ts \
+            apps/server/src/orchestration-v2/ProviderContinuationService.test.ts \
+            apps/server/src/orchestration-v2/ProviderEventIngestor.test.ts \
+            apps/server/src/orchestration-v2/ProviderSessionManager.test.ts \
+            apps/server/src/orchestration-v2/ProviderTurnStartService.test.ts \
+            apps/server/src/orchestration-v2/RestartContinuation.test.ts \
             apps/server/src/provider/ProviderInstanceRegistryHydration.test.ts \
             packages/contracts/src/settings.test.ts \
             apps/web/src/components/chat/ModelPickerContent.test.ts \
