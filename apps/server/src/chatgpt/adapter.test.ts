@@ -21,10 +21,11 @@ import {
   OrchestrationV2AppThread,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import type { ChatGPTUpdate, TerminalEvent } from "./connection.ts";
+import { ChatGPTSubmissionNotStartedError, type ChatGPTUpdate, type TerminalEvent } from "./connection.ts";
 
 const fakes = vi.hoisted(() => ({
   failNextSend: false,
+  rejectNextSendBeforeSubmission: false,
   failNextStop: false,
   failNextPause: false,
   failNextReset: false,
@@ -123,6 +124,10 @@ vi.mock("./connection.ts", () => ({
       };
     }
     async send(id: string) {
+      if (fakes.rejectNextSendBeforeSubmission) {
+        fakes.rejectNextSendBeforeSubmission = false;
+        throw new ChatGPTSubmissionNotStartedError("Native turn was never submitted");
+      }
       this.sent.push(id);
       this.onSend?.(id);
       if (fakes.failNextSend) {
@@ -1204,10 +1209,21 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
-  it.live("pauses recovery when a submission fails before the generation starts", () =>
+  it.live("does not pause an uncertain submission failure", () =>
     Effect.scoped(
       Effect.gen(function* () {
         fakes.failNextSend = true;
+        const result = yield* Effect.result(fixture);
+        expect(result._tag).toBe("Failure");
+        expect(fakes.connections.at(-1)?.controls).toEqual(["register", "activate"]);
+      }),
+    ),
+  );
+
+  it.live("pauses recovery after a proven pre-submission failure", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        fakes.rejectNextSendBeforeSubmission = true;
         const result = yield* Effect.result(fixture);
         expect(result._tag).toBe("Failure");
         expect(fakes.connections.at(-1)?.controls).toEqual(["register", "activate", "pause"]);

@@ -225,6 +225,7 @@ interface ActiveTurnAdmission {
   readonly finished: Deferred.Deferred<void>;
   readonly submitted: Deferred.Deferred<void>;
   readonly nativeSendSettled: boolean;
+  readonly nativeSendSucceeded: boolean;
   readonly pendingTerminal?: ProviderTurnId;
 }
 
@@ -1493,6 +1494,7 @@ export const layerWithOptions = (
                 finished,
                 submitted,
                 nativeSendSettled: false,
+                nativeSendSucceeded: false,
               });
               const updated = new Map(current);
               updated.set(key, {
@@ -1579,11 +1581,12 @@ export const layerWithOptions = (
           yield* scheduleThreadUnload(providerSessionId, providerThreadId);
         });
 
-      const markSubmitted = (
+      const settleNativeSend = (
         providerSessionId: ProviderSessionId,
         providerThreadId: ProviderThreadId,
         attemptId: RunAttemptId,
         runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        succeeded: boolean,
       ) =>
         Effect.gen(function* () {
           const key = sessionKey(providerSessionId);
@@ -1594,7 +1597,11 @@ export const layerWithOptions = (
               return [undefined, current] as const;
             }
             const turns = new Map(entry.activeTurnByThread);
-            turns.set(providerThreadId, { ...turn, nativeSendSettled: true });
+            turns.set(providerThreadId, {
+              ...turn,
+              nativeSendSettled: true,
+              nativeSendSucceeded: succeeded,
+            });
             return [
               turn,
               new Map(current).set(key, { ...entry, activeTurnByThread: turns }),
@@ -1953,14 +1960,6 @@ export const layerWithOptions = (
               acquired
                 ? send.pipe(
                     turnMetrics("send", input.modelSelection.model),
-                    Effect.tap(() =>
-                      markSubmitted(
-                        providerSessionId,
-                        input.providerThread.id,
-                        input.attemptId,
-                        runtime,
-                      ),
-                    ),
                     Effect.tapError((error) =>
                       definitelyNotSubmitted(error)
                         ? releaseNotSubmitted(
@@ -1970,6 +1969,18 @@ export const layerWithOptions = (
                             runtime,
                           )
                         : Effect.void,
+                    ),
+                    // An ambiguous failed send can still have a real native terminal.
+                    // Settle the send on every exit so that terminal can release the
+                    // admission, but never grant steering after a failed send.
+                    Effect.onExit((exit) =>
+                      settleNativeSend(
+                        providerSessionId,
+                        input.providerThread.id,
+                        input.attemptId,
+                        runtime,
+                        Exit.isSuccess(exit),
+                      ),
                     ),
                   )
                 : Effect.void,
@@ -2136,6 +2147,8 @@ export const layerWithOptions = (
                 latest?.runtime !== runtime ||
                 latest.activeTurnByThread.get(input.providerThread.id)?.submitted !==
                   active.submitted ||
+                latest.activeTurnByThread.get(input.providerThread.id)?.nativeSendSucceeded !==
+                  true ||
                 latest.activeTurnByThread.get(input.providerThread.id)?.providerTurnId !==
                   input.providerTurnId
               ) {

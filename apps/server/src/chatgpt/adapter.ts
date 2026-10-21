@@ -1538,13 +1538,16 @@ export const makeChatGPTAdapter = (
                   })
                 : error,
             ),
-            Effect.tapError(() =>
-              Effect.gen(function* () {
-                yield* attempt(() =>
-                  connection.control("pause", { requestId: `failed-${request.message.messageId}` }),
-                ).pipe(Effect.ignore);
-                active = null;
-              }),
+            Effect.tapError((error) =>
+              error._tag === "ProviderAdapterTurnStartError" &&
+              error.cause instanceof ChatGPTTurnNotSubmittedError
+                ? Effect.gen(function* () {
+                    yield* attempt(() =>
+                      connection.control("pause", { requestId: `failed-${request.message.messageId}` }),
+                    ).pipe(Effect.ignore);
+                    active = null;
+                  })
+                : requestRecovery(),
             ),
           );
         });
