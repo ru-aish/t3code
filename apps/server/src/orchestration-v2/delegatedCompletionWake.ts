@@ -7,7 +7,9 @@ export function delegatedCompletionWakeDetail(taskIds: ReadonlyArray<string>): s
   return taskIds.length === 1
     ? "Delegated task " +
         taskList +
-        " reached a terminal state. Use task_status with its full taskId to read the result."
+        (taskIds[0]!.length > 80
+          ? " reached a terminal state. Use t3_thread_read activity to discover its full taskId before calling task_status."
+          : " reached a terminal state. Use task_status with its full taskId to read the result.")
     : "Delegated tasks " +
         taskList +
         suffix +

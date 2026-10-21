@@ -388,7 +388,7 @@ export class ChatGPTConnection {
             method === "Runtime.executionContextsCleared" ||
             method === "Inspector.detached"
           ) {
-            if (this.cdp !== socket) return;
+            if (!socket || this.cdp !== socket) return;
             this.cdp = undefined;
             ++this.rendererGeneration;
             if (method !== "disconnected") socket?.close();
@@ -538,11 +538,22 @@ export class ChatGPTConnection {
     // Renderer callbacks retain the binding name used at submission. Retiring
     // that name also fences delayed updates which lack a known request ID.
     this.binding = "__t3_chatgpt_" + NodeCrypto.randomUUID().replaceAll("-", "");
-    if (this.cdp) await this.cdp.call("Runtime.addBinding", { name: this.binding });
     for (const id of Object.keys(this.cache.dispatches)) this.retiredRequestIds.add(id);
     this.cache = { conversationId: null, messages: {}, dispatches: {}, handledEvents: [] };
     this.snapshotRead = undefined;
     await this.persist();
+    if (this.cdp) {
+      try {
+        await this.cdp.call("Runtime.addBinding", { name: this.binding });
+      } catch {
+        // Reset has already succeeded. The next renderer handshake installs
+        // the rotated binding rather than reattaching a poisoned conversation.
+        const stale = this.cdp;
+        this.cdp = undefined;
+        ++this.rendererGeneration;
+        stale.close();
+      }
+    }
     return binding;
   }
   async adoptConversation(conversationId: string) {

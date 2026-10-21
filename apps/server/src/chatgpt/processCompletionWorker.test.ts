@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
+import * as TestClock from "effect/testing/TestClock";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import {
   startProcessCompletionWorker,
@@ -74,6 +75,41 @@ describe("detached process completion delivery", () => {
       expect(accepted._tag).toBe("Some");
       expect(acknowledgments).toEqual(["persisted-completion-1"]);
       yield* Scope.close(instanceScope, Exit.void);
+    }),
+  );
+
+  it.effect("reopens durable events after a transient long-poll failure", () =>
+    Effect.gen(function* () {
+      let ready!: () => void;
+      const firstAttempt = new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+      let attempts = 0;
+      const source: ProcessCompletionTransport = {
+        async *events() {
+          attempts++;
+          if (attempts === 1) {
+            ready();
+            throw new Error("transient transport failure");
+          }
+          yield completed;
+        },
+        claim: async () => true,
+        acknowledge: async () => {},
+      };
+      const offered =
+        yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const scope = yield* Scope.make();
+      yield* startProcessCompletionWorker(source, {
+        offer: (request) => Queue.offer(offered, request).pipe(Effect.asVoid),
+      }).pipe(Effect.provideService(Scope.Scope, scope));
+      yield* Effect.promise(() => firstAttempt);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("5 seconds");
+      const delivered = yield* Queue.take(offered);
+      expect(delivered.messageId).toBe(MessageId.make("process:persisted-completion-1"));
+      expect(attempts).toBe(2);
+      yield* Scope.close(scope, Exit.void);
     }),
   );
 

@@ -1355,6 +1355,43 @@ describe("ChatGPT handoff submission boundary", () => {
     }
   });
 
+  it("persists the reset when the renderer cannot register the rotated binding", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "chatgpt-reset-binding-error-"),
+    );
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "reset-binding-error",
+      cacheDir: directory,
+    });
+    try {
+      await connection.adoptConversation("poisoned");
+      Reflect.get(connection, "cache").dispatches.old = {
+        state: "submitted", messageId: stableMessageId("old"),
+      };
+      let closed = false;
+      Object.assign(connection, {
+        control: async () => ({ conversation_id: null }),
+        cdp: {
+          call: async () => { throw new Error("renderer disconnected"); },
+          close: () => { closed = true; },
+        },
+      });
+      await connection.resetNativeConversation();
+      expect(connection.conversationId).toBeNull();
+      expect(Reflect.get(connection, "cdp")).toBeUndefined();
+      expect(Reflect.get(connection, "retiredRequestIds").has("old")).toBe(true);
+      expect(closed).toBe(true);
+    } finally {
+      connection.close();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a fresh native reset without terminal detachment, and fences retired streams", async () => {
     const directory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "chatgpt-handoff-reset-"),

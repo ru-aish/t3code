@@ -57,7 +57,10 @@ export function makeProcessCompletionTransport(
         url.searchParams.set("providerId", config.providerId);
         url.searchParams.set("afterSeq", String(after));
         url.searchParams.set("waitSeconds", "25");
-        const response = await fetch(url, { headers, signal });
+        const response = await fetch(url, {
+          headers,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]),
+        });
         if (!response.ok) throw new Error(`Terminal MCP events failed (${response.status})`);
         const body = (await response.json()) as { events: TerminalEvent[] };
         for (const event of body.events) {
@@ -139,9 +142,9 @@ export const startProcessCompletionWorker = (
   Effect.gen(function* () {
     const abort = new AbortController();
     yield* Effect.addFinalizer(() => Effect.sync(() => abort.abort()));
-    yield* Stream.fromAsyncIterable(
-      transport.events(abort.signal),
-      (cause) => new Error(String(cause)),
+    // An async generator is single-use after it fails. Reopen it on each retry.
+    yield* Stream.suspend(() =>
+      Stream.fromAsyncIterable(transport.events(abort.signal), (cause) => new Error(String(cause))),
     ).pipe(
       Stream.runForEach((event) => {
         const request = processCompletionRequest(event, transport);

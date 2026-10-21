@@ -598,7 +598,9 @@ export const layer: Layer.Layer<
             (source) =>
               source.providerThreadId === providerThread.id &&
               source.runAttemptId !== null &&
-              source.status === "completed",
+              (source.status === "completed" ||
+                source.status === "interrupted" ||
+                source.status === "cancelled"),
           )
           .map((source) => source.runAttemptId),
       );
