@@ -5,6 +5,24 @@ import {
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 
+/**
+ * Read the durable mailbox payload at the last possible provider send boundary.
+ * Generation and parent identity prevent a stale preparation from adopting
+ * another delivery's message; ordinary user turns are never rewritten.
+ */
+export function mailboxMessageAtSend(
+  initial: OrchestrationV2ConversationMessage,
+  latest: OrchestrationV2ConversationMessage | undefined,
+): OrchestrationV2ConversationMessage {
+  const ownership = initial.delegatedCompletion;
+  return ownership !== undefined &&
+    latest?.id === initial.id &&
+    latest.delegatedCompletion?.parentRunId === ownership.parentRunId &&
+    latest.delegatedCompletion?.generation === ownership.generation
+    ? latest
+    : initial;
+}
+
 export function isBufferedProviderNotification(
   message: OrchestrationV2ConversationMessage,
 ): boolean {

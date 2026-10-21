@@ -15,9 +15,11 @@ import {
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
@@ -26,11 +28,20 @@ import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
 import { mergeFinalAnswer } from "./protocol.ts";
 import {
   ChatGPTConnection,
+  ChatGPTSubmissionNotStartedError,
   type ChatGPTUpdate,
   type ChatGPTImage,
+  type ConversationSnapshot,
   type TerminalBinding,
   type TerminalEvent,
 } from "./connection.ts";
+
+export class ChatGPTTurnNotSubmittedError extends Error {
+  readonly _tag = "ChatGPTTurnNotSubmittedError";
+  constructor(cause: unknown) {
+    super("ChatGPT turn was not submitted", { cause });
+  }
+}
 
 export const CHATGPT_DRIVER = ProviderDriverKind.make("chatgpt");
 
@@ -235,6 +246,12 @@ function terminalToolProjection(
 type Update =
   | { kind: "chat"; update: ChatGPTUpdate }
   | { kind: "terminal"; event: TerminalEvent }
+  | { kind: "recover"; token: number; retry: number }
+  | {
+      kind: "recover_snapshot";
+      token: number;
+      result: Deferred.Deferred<boolean, ProviderAdapter.ProviderAdapterProtocolError>;
+    }
   | {
       kind: "refresh";
       input: ProviderAdapter.ProviderAdapterV2ReadThreadSnapshotInput;
@@ -251,6 +268,11 @@ export const makeChatGPTAdapter = (
     readonly environmentId: string;
     readonly cacheDir: string;
     readonly attachMcp: Effect.Success<typeof ChatGPTMcpBridge.make>;
+    readonly recovery?: {
+      readonly permit: Semaphore.Semaphore;
+      unavailableUntil: number;
+    };
+    readonly refreshThread?: (threadId: ThreadId) => Effect.Effect<void, ChatGPTActionError>;
     readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
     readonly linkPullRequest?: (
       threadId: ThreadId,
@@ -268,6 +290,10 @@ export const makeChatGPTAdapter = (
       Effect.gen(function* () {
         const now = yield* DateTime.now;
         const sessionScope = yield* Effect.scope;
+        const recoveryGate = transport.recovery ?? {
+          permit: yield* Semaphore.make(1),
+          unavailableUntil: 0,
+        };
         const cwd = input.runtimePolicy.cwd;
         if (!cwd)
           return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -349,7 +375,22 @@ export const makeChatGPTAdapter = (
         const reasoningKeys = new Set<string>();
         let streamComplete = false;
         let completionRecoveryRequestId: string | null = null;
-        const suppressedRequestIds = new Set<string>();
+        let recoveredFinalRecoveryRequestId: string | null = null;
+        let transportInterrupted = false;
+        let recoveryToken = 0;
+        let recoveryScheduled = false;
+        const cancelRecovery = () => {
+          ++recoveryToken;
+          recoveryScheduled = false;
+        };
+        const requestRecovery = Effect.fnUntraced(function* () {
+          transportInterrupted = true;
+          if (recoveryScheduled || !thread || (active && retiredRequestIds.has(active.requestId)))
+            return;
+          recoveryScheduled = true;
+          yield* Queue.offer(incoming, { kind: "recover", token: ++recoveryToken, retry: 0 });
+        });
+        const retiredRequestIds = new Set<string>();
         let usedTerminalTools = false;
         let generation = 0;
         let interrupting = false;
@@ -585,6 +626,10 @@ export const makeChatGPTAdapter = (
         ) {
           if (!active || !thread) return;
           const completed = active;
+          cancelRecovery();
+          // Stop acknowledgments can precede late renderer callbacks. Retire the
+          // old request before a steering replacement reuses this adapter.
+          if (status !== "completed") retiredRequestIds.add(completed.requestId);
           active = null;
           // Interrupted submissions can leave reasoning open in the same run.
           for (const turn of new Set(outputTurns.values())) {
@@ -686,8 +731,13 @@ export const makeChatGPTAdapter = (
           requestId: string,
           recoveringAfterRestart = false,
         ) {
+          if (transportInterrupted) {
+            yield* requestRecovery();
+            return;
+          }
           if (completionRecoveryRequestId === requestId) return;
           completionRecoveryRequestId = requestId;
+          const recoveryGeneration = active?.generation;
           yield* Effect.gen(function* () {
             // Normal streaming wins. Only refresh if Terminal MCP is done and
             // the completion callback is still missing after three minutes.
@@ -698,12 +748,22 @@ export const makeChatGPTAdapter = (
               : (["3 minutes"] as const);
             for (const delay of delays) {
               yield* Effect.sleep(delay);
-              if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
+              if (
+                active?.requestId !== requestId ||
+                active.generation !== recoveryGeneration ||
+                streamComplete ||
+                binding.state !== "done"
+              )
                 return;
               const updates = yield* attempt(() => connection.readCompletion(requestId)).pipe(
-                Effect.catch(() => Effect.succeed(null)),
+                Effect.catch(() => requestRecovery().pipe(Effect.as(null))),
               );
-              if (active?.requestId !== requestId || streamComplete || binding.state !== "done")
+              if (
+                active?.requestId !== requestId ||
+                active.generation !== recoveryGeneration ||
+                streamComplete ||
+                binding.state !== "done"
+              )
                 return;
               if (updates) {
                 // Recovered text must be ingested before the completion event.
@@ -712,15 +772,22 @@ export const makeChatGPTAdapter = (
                 return;
               }
             }
-            if (active?.requestId === requestId && !streamComplete && binding.state === "done") {
+            if (
+              active?.requestId === requestId &&
+              active.generation === recoveryGeneration &&
+              !streamComplete &&
+              binding.state === "done" &&
+              !transportInterrupted
+            ) {
               yield* Effect.logWarning(
                 "ChatGPT completion remained unconfirmed after the recovery refresh; forcing the turn closed",
                 {
                   threadId: input.threadId,
                 },
               );
-              suppressedRequestIds.add(requestId);
+              retiredRequestIds.add(requestId);
               yield* attempt(() => connection.stop(requestId)).pipe(
+                Effect.timeout("10 seconds"),
                 Effect.catch((cause) =>
                   Effect.logWarning("Failed to stop ChatGPT while forcing the turn closed", {
                     threadId: input.threadId,
@@ -728,7 +795,15 @@ export const makeChatGPTAdapter = (
                   }),
                 ),
               );
-              yield* finish("forced");
+              // A newer provider generation may have started while stop() was in flight.
+              // Never terminalize that replacement on behalf of this stale recovery.
+              if (
+                active?.requestId === requestId &&
+                active.generation === recoveryGeneration &&
+                !streamComplete
+              ) {
+                yield* finish("forced");
+              }
             }
           }).pipe(
             Effect.ensuring(
@@ -738,8 +813,68 @@ export const makeChatGPTAdapter = (
             ),
           );
         });
+        const recoverCompletedProviderWithoutTask = Effect.fnUntraced(function* (
+          requestId: string,
+        ) {
+          if (recoveredFinalRecoveryRequestId === requestId) return;
+          recoveredFinalRecoveryRequestId = requestId;
+          const recoveryGeneration = active?.generation;
+          yield* Effect.gen(function* () {
+            // A recovered native final is strong evidence that the provider turn
+            // ended, but Terminal MCP may still legitimately issue a continuation.
+            // Give it the same three-minute grace period used by missing-stream
+            // recovery before treating the orphaned task as stale.
+            yield* Effect.sleep("3 minutes");
+            if (
+              active?.requestId !== requestId ||
+              active.generation !== recoveryGeneration ||
+              binding.state === "done"
+            )
+              return;
+            yield* Effect.logWarning(
+              "Recovered ChatGPT final answer while Terminal MCP remained active; forcing the turn closed",
+              { threadId: input.threadId },
+            );
+            retiredRequestIds.add(requestId);
+            // Pause the orphaned Terminal activation so its inactivity recovery
+            // cannot revive a provider turn that we are about to terminalize.
+            yield* attempt(() =>
+              connection.control("pause", { requestId: `recovered-final-${requestId}` }),
+            ).pipe(
+              Effect.timeout("5 seconds"),
+              Effect.catch((cause) =>
+                Effect.logWarning(
+                  "Failed to pause orphaned Terminal activation before closing its recovered final",
+                  { threadId: input.threadId, cause },
+                ),
+              ),
+            );
+            // The native final is already completed: stopCompletion is unnecessary
+            // and can hang after a renderer restart (or stop a later generation).
+            // Do not let an unresponsive Terminal endpoint prevent terminalization.
+            binding = yield* attempt(() => connection.control<TerminalBinding>("get")).pipe(
+              Effect.timeout("5 seconds"),
+              Effect.catch(() => Effect.succeed(binding)),
+            );
+            // A Terminal continuation or newer provider generation may have won
+            // while pause/read was in flight.
+            if (
+              active?.requestId === requestId &&
+              active.generation === recoveryGeneration &&
+              binding.state !== "done"
+            )
+              yield* finish("forced");
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (recoveredFinalRecoveryRequestId === requestId)
+                  recoveredFinalRecoveryRequestId = null;
+              }),
+            ),
+          );
+        });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
-          if (update.requestId && suppressedRequestIds.has(update.requestId)) return;
+          if (update.requestId && retiredRequestIds.has(update.requestId)) return;
           if (
             update.role === "assistant" &&
             (update.recipient?.includes("fedora_t3code") ||
@@ -901,6 +1036,96 @@ export const makeChatGPTAdapter = (
             });
           }
         });
+        const applySnapshot = Effect.fnUntraced(function* (snapshot: ConversationSnapshot) {
+          if (active?.requestId === snapshot.latestRequestId && snapshot.usesTerminalTools)
+            usedTerminalTools = true;
+          for (const update of snapshot.updates) yield* acceptUpdate(update);
+          if (
+            snapshot.idle &&
+            snapshot.complete &&
+            active !== null &&
+            active.requestId === snapshot.latestRequestId
+          )
+            yield* acceptUpdate({
+              kind: "complete",
+              requestId: active.requestId,
+              conversationId: binding.conversation_id,
+            });
+          const recoveredFinal = snapshot.updates.some(
+            (update) =>
+              update.kind === "update" &&
+              update.requestId === snapshot.latestRequestId &&
+              update.role === "assistant" &&
+              (!update.channel || update.channel === "final") &&
+              (!update.recipient || update.recipient === "all") &&
+              update.hidden !== true &&
+              update.status === "finished_successfully",
+          );
+          if (
+            recoveredFinal &&
+            active !== null &&
+            active.requestId === snapshot.latestRequestId &&
+            binding.state !== "done"
+          )
+            yield* recoverCompletedProviderWithoutTask(active.requestId).pipe(
+              Effect.forkIn(sessionScope),
+            );
+        });
+        const recoverTransport = Effect.fnUntraced(function* (
+          event: Extract<Update, { kind: "recover" }>,
+        ) {
+          if (event.token !== recoveryToken) return;
+          let retry = true;
+          yield* recoveryGate.permit.withPermits(1)(
+            Effect.gen(function* () {
+              if (event.token !== recoveryToken) return;
+              const now = yield* Clock.currentTimeMillis;
+              if (now < recoveryGate.unavailableUntil) return;
+              const recovered = yield* Effect.result(
+                Effect.gen(function* () {
+                  if (transport.refreshThread) {
+                    // The Refresh service persists recovered output even when no
+                    // live run subscriber exists. It may, however, reconcile via
+                    // another provider-session instance, so it is not sufficient
+                    // to update this actor's active generation by itself.
+                    yield* transport.refreshThread(input.threadId);
+                  }
+                  // Always reconcile the original live adapter actor as well.
+                  // This is where generation fencing, Terminal task state, and the
+                  // recovered-final forced-completion timer are owned.
+                  const result = yield* Deferred.make<
+                    boolean,
+                    ProviderAdapter.ProviderAdapterProtocolError
+                  >();
+                  yield* Queue.offer(incoming, {
+                    kind: "recover_snapshot",
+                    token: event.token,
+                    result,
+                  });
+                  retry = yield* Deferred.await(result);
+                }),
+              );
+              if (recovered._tag === "Failure") {
+                // One unhealthy desktop must not receive a reconnect burst from
+                // every thread sharing this provider instance.
+                recoveryGate.unavailableUntil = (yield* Clock.currentTimeMillis) + 5_000;
+                if (event.retry === 0)
+                  yield* Effect.logWarning("ChatGPT refresh waits for the runtime to recover", {
+                    threadId: input.threadId,
+                  });
+              } else recoveryGate.unavailableUntil = 0;
+            }),
+          );
+          if (event.token !== recoveryToken) return;
+          if (!retry) {
+            recoveryScheduled = false;
+            return;
+          }
+          yield* Effect.sleep(Math.min(30_000, 1_000 * 2 ** Math.min(event.retry, 5))).pipe(
+            Effect.andThen(Queue.offer(incoming, { ...event, retry: event.retry + 1 })),
+            Effect.forkIn(sessionScope),
+          );
+        });
         const synchronize = Effect.fnUntraced(function* (
           request: ProviderAdapter.ProviderAdapterV2ReadThreadSnapshotInput,
         ) {
@@ -980,19 +1205,7 @@ export const makeChatGPTAdapter = (
               usedTerminalTools = true;
             }
           }
-          for (const update of snapshot.updates) yield* acceptUpdate(update);
-          if (
-            snapshot.idle &&
-            snapshot.complete &&
-            binding.state === "done" &&
-            active !== null &&
-            active.requestId === snapshot.latestRequestId
-          )
-            yield* acceptUpdate({
-              kind: "complete",
-              requestId: active.requestId,
-              conversationId: binding.conversation_id,
-            });
+          yield* applySnapshot(snapshot);
           return {
             providerThread: thread,
             providerTurns: [],
@@ -1024,7 +1237,38 @@ export const makeChatGPTAdapter = (
           Stream.runForEach((event) =>
             Effect.gen(function* () {
               if (event.kind === "chat") {
+                if (
+                  event.update.kind === "disconnected" ||
+                  (event.update.kind === "error" &&
+                    (!event.update.requestId || event.update.requestId === active?.requestId))
+                ) {
+                  yield* requestRecovery();
+                  return;
+                }
                 yield* acceptUpdate(event.update);
+                return;
+              }
+              if (event.kind === "recover") {
+                // Refresh asks this actor for a snapshot; never await it on
+                // the actor itself or recovery would wait on its own queue.
+                yield* recoverTransport(event).pipe(Effect.forkIn(sessionScope));
+                return;
+              }
+              if (event.kind === "recover_snapshot") {
+                yield* Effect.gen(function* () {
+                  if (event.token !== recoveryToken) return false;
+                  const snapshot = yield* attempt(() => connection.readConversation());
+                  const currentBinding = yield* attempt(() =>
+                    connection.control<TerminalBinding>("get"),
+                  );
+                  if (event.token !== recoveryToken) return false;
+                  binding = currentBinding;
+                  yield* applySnapshot(snapshot);
+                  return active !== null && !streamComplete;
+                }).pipe(
+                  Effect.flatMap((retry) => Deferred.succeed(event.result, retry)),
+                  Effect.catch((cause) => Deferred.fail(event.result, cause)),
+                );
                 return;
               }
               if (event.kind === "refresh") {
@@ -1035,6 +1279,9 @@ export const makeChatGPTAdapter = (
                 return;
               }
               const control = event.event;
+              // The provider-instance listener owns detached process events
+              // independently of the lifetime of this native provider session.
+              if (control.kind === "process.completed") return;
               if (control.epoch !== binding.epoch) {
                 yield* attempt(() => connection.acknowledge(control));
                 return;
@@ -1086,7 +1333,7 @@ export const makeChatGPTAdapter = (
             }).pipe(
               Effect.catch(() =>
                 Effect.gen(function* () {
-                  if (event.kind === "terminal")
+                  if (event.kind === "terminal" && event.event.kind !== "process.completed")
                     yield* attempt(() => connection.acknowledge(event.event)).pipe(Effect.ignore);
                   yield* Effect.logWarning(
                     "ChatGPT control event failed; Terminal MCP retains task authority.",
@@ -1107,7 +1354,42 @@ export const makeChatGPTAdapter = (
         const ensureThread = Effect.fnUntraced(function* (
           request: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
         ) {
-          if (thread) return thread;
+          const freshRequested = request.existingProviderThread?.nativeThreadRef === null;
+          if (
+            thread &&
+            !(
+              freshRequested &&
+              (thread.nativeThreadRef !== null ||
+                connection.conversationId !== null ||
+                binding.conversation_id !== null)
+            )
+          )
+            return thread;
+          if (
+            freshRequested &&
+            (connection.conversationId !== null || binding.conversation_id !== null)
+          ) {
+            if (active)
+              return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                driver: CHATGPT_DRIVER,
+                threadId: input.threadId,
+                providerThreadId: active.turn.providerThreadId,
+                runId: active.input.runId,
+              });
+            binding = yield* attempt(() => connection.resetNativeConversation());
+            generation++;
+            outputTurns.clear();
+            retiredRequestIds.clear();
+            messages.clear();
+            finalFragments.clear();
+            reasoningKeys.clear();
+            itemOrdinals.clear();
+            itemIds.clear();
+            restoredItems.clear();
+            nativeMessageIds.clear();
+            streamComplete = false;
+            thread = null;
+          }
           const timestamp = yield* DateTime.now;
           thread = request.existingProviderThread
             ? {
@@ -1211,6 +1493,8 @@ export const makeChatGPTAdapter = (
             generation: ++generation,
             requestId: recoveryRequestId ?? request.message.messageId,
           };
+          cancelRecovery();
+          transportInterrupted = false;
           outputTurns.set(active.requestId, active);
           streamComplete = false;
           usedTerminalTools = false;
@@ -1243,13 +1527,27 @@ export const makeChatGPTAdapter = (
                   )?.value as string | undefined),
             ),
           ).pipe(
-            Effect.tapError(() =>
-              Effect.gen(function* () {
-                yield* attempt(() =>
-                  connection.control("pause", { requestId: `failed-${request.message.messageId}` }),
-                ).pipe(Effect.ignore);
-                active = null;
-              }),
+            Effect.mapError((error) =>
+              error.cause instanceof ChatGPTSubmissionNotStartedError
+                ? new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: CHATGPT_DRIVER,
+                    threadId: input.threadId,
+                    providerThreadId: request.providerThread.id,
+                    runId: request.runId,
+                    cause: new ChatGPTTurnNotSubmittedError(error),
+                  })
+                : error,
+            ),
+            Effect.tapError((error) =>
+              error._tag === "ProviderAdapterTurnStartError" &&
+              error.cause instanceof ChatGPTTurnNotSubmittedError
+                ? Effect.gen(function* () {
+                    yield* attempt(() =>
+                      connection.control("pause", { requestId: `failed-${request.message.messageId}` }),
+                    ).pipe(Effect.ignore);
+                    active = null;
+                  })
+                : requestRecovery(),
             ),
           );
         });
@@ -1276,10 +1574,11 @@ export const makeChatGPTAdapter = (
           interruptTurn: () =>
             Effect.gen(function* () {
               interrupting = true;
+              cancelRecovery();
               const timestamp = yield* DateTime.now;
               const requestId = active?.requestId;
               if (!streamComplete && requestId) yield* attempt(() => connection.stop(requestId));
-              if (requestId) suppressedRequestIds.add(requestId);
+              if (requestId) retiredRequestIds.add(requestId);
               yield* attempt(() =>
                 connection.control("pause", {
                   requestId: `stop-${input.threadId}-${DateTime.toEpochMillis(timestamp)}`,

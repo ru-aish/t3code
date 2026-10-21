@@ -1,7 +1,11 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
+  type OrchestrationV2ThreadProjection,
   NodeId,
+  ProjectId,
+  ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -161,6 +165,254 @@ function layerExecutorFor(input: {
     ),
   );
 }
+
+it.effect("replays one delegated completion obligation without a duplicate native dispatch", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const taskId = NodeId.make("node:mailbox-persisted-task");
+    const parentRunId = RunId.make("run:mailbox-persisted-parent");
+    const completionMessageId = MessageId.make("message:mailbox-persisted-completion");
+    const calls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const accepted = yield* Ref.make(false);
+    const layer = layerExecutorFor({
+      events: calls,
+      threads: {
+        getThreadRecords: () =>
+          Ref.get(accepted).pipe(
+            Effect.map(
+              (done) =>
+                ({
+                  thread: { archivedAt: null, deletedAt: null },
+                  runs: [
+                    {
+                      id: parentRunId,
+                      delegatedCompletion: {
+                        disposition: "open",
+                        delivery: {
+                          generation: 1,
+                          messageId: completionMessageId,
+                          taskIds: [taskId],
+                        },
+                      },
+                    },
+                  ],
+                  subagents: [
+                    {
+                      id: taskId,
+                      origin: "app_owned",
+                      runId: parentRunId,
+                      completionDelivery: { state: "claimed" },
+                    },
+                  ],
+                  messages: done ? [{ id: completionMessageId, runId: parentRunId }] : [],
+                  providerTurns: [],
+                }) as unknown as OrchestrationV2ThreadProjection,
+            ),
+          ),
+        dispatch: (command) =>
+          Effect.gen(function* () {
+            yield* Ref.update(calls, (old) => [...old, command.type]);
+            if (command.type === "message.dispatch") {
+              assert.equal(command.messageId, completionMessageId);
+              assert.include(command.text, String(taskId));
+              yield* Ref.set(accepted, true);
+            }
+            return { sequence: 1, storedEvents: [] };
+          }),
+      },
+    });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: `effect:delegated-completion:${taskId}`,
+      commandId: CommandId.make(`command:delegated-completion:${taskId}`),
+      threadId,
+      request: { type: "delegated-completion.dispatch", taskId },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute(effect);
+      yield* executor.execute({ ...effect, attemptCount: 2 });
+    }).pipe(Effect.provide(layer));
+    assert.deepEqual(yield* Ref.get(calls), ["message.dispatch"]);
+  }),
+);
+
+it.effect("retains a disabled-provider obligation until delivery is accepted", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const taskId = NodeId.make("node:disabled-provider-task");
+    const taskIds = [
+      taskId,
+      ...Array.from({ length: 79 }, (_, i) =>
+        NodeId.make(`node:recovered-${i}-${"x".repeat(150)}`),
+      ),
+    ];
+    const parentRunId = RunId.make("run:disabled-provider-parent");
+    const messageId = MessageId.make("message:disabled-provider-completion");
+    const enabled = yield* Ref.make(false);
+    const accepted = yield* Ref.make(false);
+    const commands = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerExecutorFor({
+      events: yield* Ref.make<ReadonlyArray<string>>([]),
+      threads: {
+        getThreadRecords: () =>
+          Ref.get(accepted).pipe(
+            Effect.map(
+              (delivered) =>
+                ({
+                  thread: { archivedAt: null, deletedAt: null },
+                  runs: [
+                    {
+                      id: parentRunId,
+                      delegatedCompletion: {
+                        disposition: "open",
+                        delivery: { generation: 1, messageId, taskIds },
+                      },
+                    },
+                  ],
+                  subagents: [
+                    {
+                      id: taskId,
+                      origin: "app_owned",
+                      runId: parentRunId,
+                      completionDelivery: { state: "claimed" },
+                    },
+                  ],
+                  messages: delivered ? [{ id: messageId, runId: parentRunId }] : [],
+                  providerTurns: [],
+                }) as unknown as OrchestrationV2ThreadProjection,
+            ),
+          ),
+        dispatch: (command) =>
+          Effect.gen(function* () {
+            yield* Ref.update(commands, (current) => [...current, command.type]);
+            if (command.type === "message.dispatch") {
+              if (!(yield* Ref.get(enabled)))
+                return yield* new ThreadManagementService.ThreadManagementProviderInstanceDisabledError(
+                  {
+                    projectId: ProjectId.make("project:disabled-delivery"),
+                    instanceId: ProviderInstanceId.make("instance-disabled-delivery"),
+                  },
+                );
+              assert.equal(command.messageId, messageId);
+              assert.isBelow(command.text.length, 600);
+              assert.deepEqual(command.delegatedCompletion?.taskIds, taskIds);
+              yield* Ref.set(accepted, true);
+            }
+            return { sequence: 1, storedEvents: [] };
+          }),
+      },
+    });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: "effect:disabled-provider",
+      commandId: CommandId.make("command:disabled-provider"),
+      threadId,
+      request: { type: "delegated-completion.dispatch", taskId },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      const refused = yield* executor.execute(effect).pipe(Effect.result);
+      assert.equal(refused._tag, "Failure");
+      if (refused._tag === "Failure") {
+        assert.instanceOf(
+          refused.failure.cause,
+          ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+        );
+      }
+      assert.deepEqual(yield* Ref.get(commands), ["message.dispatch"]);
+      assert.isFalse(yield* Ref.get(accepted));
+      yield* Ref.set(enabled, true);
+      yield* executor.execute({ ...effect, attemptCount: 2 });
+      yield* executor.execute({ ...effect, attemptCount: 3 });
+    }).pipe(Effect.provide(layer));
+    assert.isTrue(yield* Ref.get(accepted));
+    assert.deepEqual(yield* Ref.get(commands), ["message.dispatch", "message.dispatch"]);
+  }),
+);
+
+it.effect("settles archived and disposed delegated delivery obligations without dispatch", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const taskId = NodeId.make("node:mailbox-abandoned-task");
+    const parentRunId = RunId.make("run:mailbox-abandoned-parent");
+    const messageId = MessageId.make("message:mailbox-abandoned");
+    const dispatches = yield* Ref.make(0);
+    for (const mode of ["archived", "disposed"] as const) {
+      const layer = layerExecutorFor({
+        events: yield* Ref.make<ReadonlyArray<string>>([]),
+        threads: {
+          getThreadRecords: () =>
+            Effect.succeed({
+              thread: {
+                archivedAt: mode === "archived" ? now : null,
+                deletedAt: null,
+              },
+              runs: [
+                {
+                  id: parentRunId,
+                  delegatedCompletion: {
+                    disposition: "open",
+                    delivery: { generation: 1, messageId, taskIds: [taskId] },
+                  },
+                },
+              ],
+              subagents: [
+                {
+                  id: taskId,
+                  origin: "app_owned",
+                  runId: parentRunId,
+                  completionDelivery: { state: mode === "disposed" ? "disposed" : "claimed" },
+                },
+              ],
+              messages: [],
+              providerTurns: [],
+            } as unknown as OrchestrationV2ThreadProjection),
+          dispatch: () =>
+            Ref.update(dispatches, (count) => count + 1).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            ),
+        },
+      });
+      const effect: EffectOutbox.OrchestrationEffectV2 = {
+        id: "effect:mailbox-abandoned",
+        commandId: CommandId.make("command:mailbox-abandoned"),
+        threadId,
+        request: { type: "delegated-completion.dispatch", taskId },
+        status: "running",
+        attemptCount: 7,
+        availableAt: now,
+        leaseOwner: "worker",
+        leaseExpiresAt: now,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+        lastError: null,
+      };
+      yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(
+        Effect.flatMap((executor) => executor.execute(effect)),
+        Effect.provide(layer),
+      );
+    }
+    assert.equal(yield* Ref.get(dispatches), 0);
+  }),
+);
 
 it("does not retry pure interrupt races where the turn is already gone", () => {
   assert.isTrue(

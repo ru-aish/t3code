@@ -3641,6 +3641,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             case "monitor":
             case "background_task":
               return { kind: task.kind, label, outcome };
+            case "process":
+              return { kind: "background_task", label, outcome };
             case "command":
             case undefined:
               return { kind: "command", label, outcome };
@@ -8226,7 +8228,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const startTurn = Effect.fn("ClaudeAdapterV2.startTurn")(
           function* (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) {
             const startedAt = yield* DateTime.now;
-            const nativeThreadId = yield* getNativeThreadId(turnInput.providerThread);
+            const nativeThreadId = yield* getNativeThreadId(turnInput.providerThread).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                    driver: CLAUDE_PROVIDER,
+                    cause,
+                  }),
+              ),
+            );
             const nativeTurnId = `turn:${turnInput.attemptId}`;
             // Fresh for every offer: Claude acks a prompt whose uuid its
             // transcript already holds without running a turn, and a session
@@ -8234,17 +8244,28 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             // a uuid derived from run ids can repeat.
             const promptUuid = isClaudeProviderContinuationTurn(turnInput)
               ? null
-              : yield* crypto.randomUUIDv4().pipe(
-                  Effect.filterOrFail(isClaudePromptUuid),
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderAdapter.ProviderAdapterProtocolError({
-                        driver: CLAUDE_PROVIDER,
-                        detail: "Failed to allocate a Claude prompt uuid.",
-                        payload: cause,
-                      }),
-                  ),
-                );
+              : yield* crypto
+                  .randomUUIDv4()
+                  .pipe(
+                    Effect.filterOrFail(isClaudePromptUuid),
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: CLAUDE_PROVIDER,
+                          detail: "Failed to allocate a Claude prompt uuid.",
+                          payload: cause,
+                        }),
+                    ),
+                  )
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                          driver: CLAUDE_PROVIDER,
+                          cause,
+                        }),
+                    ),
+                  );
             const providerTurnId = idAllocator.derive.providerTurn({
               driver: CLAUDE_PROVIDER,
               nativeTurnId,
@@ -8252,9 +8273,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const providerTurnOrdinal = turnInput.providerTurnOrdinal;
             const currentTurn = yield* Ref.get(activeTurn);
             if (currentTurn !== null) {
-              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+              return yield* new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
                 driver: CLAUDE_PROVIDER,
-                detail: `Claude provider turn ${currentTurn.providerTurnId} is still active.`,
+                cause: new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: `Claude provider turn ${currentTurn.providerTurnId} is still active.`,
+                }),
               });
             }
             yield* Ref.update(lastTurnRouteByNativeThread, (current) => {
@@ -8312,18 +8336,39 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const userMessage =
               promptUuid === null
                 ? null
-                : yield* makeClaudeUserMessageWithAttachments({
-                    text: applyClaudePromptEffortPrefix(
-                      turnInput.message.text,
-                      compileClaudeModelSelection(turnInput.modelSelection).promptEffort,
+                : yield* Effect.gen(function* () {
+                    const skillNames = yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd);
+                    return yield* makeClaudeUserMessageWithAttachments({
+                      text: applyClaudePromptEffortPrefix(
+                        turnInput.message.text,
+                        compileClaudeModelSelection(turnInput.modelSelection).promptEffort,
+                      ),
+                      attachments: turnInput.message.attachments,
+                      attachmentsDir,
+                      fileSystem,
+                      skillNames,
+                      uuid: promptUuid,
+                    });
+                  }).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                          driver: CLAUDE_PROVIDER,
+                          cause,
+                        }),
                     ),
-                    attachments: turnInput.message.attachments,
-                    attachmentsDir,
-                    fileSystem,
-                    skillNames: yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd),
-                    uuid: promptUuid,
-                  });
-            const querySession = yield* openQuery(turnInput, nativeThreadId);
+                  );
+            // openQuery configures or creates the SDK query but cannot deliver this
+            // turn's prompt. A failed open is a proven pre-submission rejection.
+            const querySession = yield* openQuery(turnInput, nativeThreadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                    driver: CLAUDE_PROVIDER,
+                    cause,
+                  }),
+              ),
+            );
             const attachTurn = Effect.gen(function* () {
               querySession.lastTurn = context;
               yield* Ref.set(activeTurn, context);

@@ -37,6 +37,8 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as Option from "effect/Option";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -104,7 +106,11 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  EffectOutbox.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
@@ -524,6 +530,51 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
       assert.include(message?.text ?? "", String(firstTaskId));
       assert.include(message?.text ?? "", String(secondTaskId));
       assert.include(message?.text ?? "", "task_status");
+    }),
+  );
+
+  it.effect("bounds wake text for a large cohort without losing durable task IDs", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:delegated-delivery-large-cohort");
+      const projectId = ProjectId.make("project:delegated-delivery-large-cohort");
+      const runId = RunId.make("run:delegated-delivery-large-cohort");
+      const rootNodeId = NodeId.make("node:delegated-delivery-large-cohort-root");
+      const taskIds = Array.from({ length: 80 }, (_, i) =>
+        NodeId.make("node:delegated-delivery-large-cohort-" + String(i).padStart(3, "0")),
+      );
+      const messageId = MessageId.make("message:delegated-delivery:" + threadId);
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: taskIds[0]!,
+        deliveryState: "claimed",
+        completionWake: "always",
+        deliveryTaskIds: taskIds,
+        now,
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:delegated-delivery-large-cohort"),
+        threadId,
+        messageId,
+        text: "A delegated task completed.",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+        delegatedCompletion: { parentRunId: runId, generation: 1, taskIds: [taskIds[0]!] },
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const message = projection.messages.find((candidate) => candidate.id === messageId);
+      assert.deepEqual(message?.delegatedCompletion?.taskIds, taskIds);
+      assert.isBelow((message?.text ?? "").length, 600);
+      assert.include(message?.text ?? "", "77 more");
+      assert.include(message?.text ?? "", "task_status");
+      assert.notInclude(message?.text ?? "", String(taskIds[79]));
     }),
   );
 
@@ -965,6 +1016,14 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             now,
           });
           yield* orchestrator.recoverDelegatedTasks;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const obligation = yield* outbox.get(
+            `effect:delegated-completion:${child.taskId}:${child.childRunId}`,
+          );
+          assert.isTrue(Option.isSome(obligation));
+          if (Option.isSome(obligation)) {
+            assert.equal(obligation.value.request.type, "delegated-completion.dispatch");
+          }
           let firstWake = yield* requests.take;
           while (firstWake.threadId !== parentThreadId) firstWake = yield* requests.take;
           assert.equal(firstWake.delegatedCompletion?.parentRunId, parentRunId);
@@ -1113,6 +1172,12 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             finished.subagents.find((task) => task.id === child.taskId),
             original,
           );
+          // A real Orchestrator finalization persists the result and transfer, but
+          // never constructs an automatically injected full-child handoff.
+          assert.equal(finished.contextHandoffs.length, 0);
+          assert.isNotNull(
+            finished.subagents.find((task) => task.id === run.delegatedTaskId)?.result ?? null,
+          );
           const followup = finished.subagents.find((task) => task.id === run.delegatedTaskId)!;
           if (outcome === "overlapping") {
             const later = finished.subagents.find(
@@ -1158,6 +1223,24 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             ).length,
             2,
           );
+          // Completion persists an inspectable result, not a provider-facing manual handoff.
+          const childTransfers = finished.contextTransfers.filter(
+            (transfer) =>
+              transfer.type === "subagent_result" &&
+              transfer.sourceThreadId === child.childThreadId,
+          );
+          assert.isTrue(childTransfers.every((transfer) => transfer.resolution === null));
+          assert.isFalse(
+            finished.contextHandoffs.some((handoff) =>
+              childTransfers.some((transfer) =>
+                transfer.resolution !== null &&
+                "contextHandoffId" in transfer.resolution &&
+                transfer.resolution.contextHandoffId === handoff.id,
+              ),
+            ),
+          );
+          assert.isNotNull(followup.result);
+
           yield* orchestrator.recoverDelegatedTasks;
           const recovered = yield* orchestrator.getThreadProjection(parentThreadId);
           assert.equal(recovered.contextTransfers.length, finished.contextTransfers.length);

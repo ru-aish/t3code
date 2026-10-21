@@ -25,6 +25,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { ServerActivation } from "../serverActivation.ts";
 
 const threadId = ThreadId.make("thread-provider-continuation");
 const providerThreadId = ProviderThreadId.make("provider-thread-continuation");
@@ -108,6 +109,43 @@ function layerTest(input: {
 }
 
 describe("ProviderContinuationService", () => {
+  it.effect("retains process results until startup recovery has finished", () =>
+    Effect.gen(function* () {
+      const activation = yield* Deferred.make<void>();
+      const acknowledged = yield* Deferred.make<void>();
+      const dispatched = yield* Queue.unbounded<unknown>();
+      const messageId = MessageId.make("process:startup-replay");
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request((effect) =>
+            effect.pipe(
+              Effect.tap(() => Deferred.succeed(acknowledged, undefined)),
+              Effect.map(Option.some),
+            ),
+          ),
+          messageId,
+          delivery: "message_text",
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Queue.size(dispatched), 0);
+        assert.isFalse(yield* Deferred.isDone(acknowledged));
+
+        yield* Deferred.succeed(activation, undefined);
+        const command = (yield* Queue.take(dispatched)) as { messageId: MessageId };
+        yield* Deferred.await(acknowledged);
+        assert.equal(command.messageId, messageId);
+        assert.equal(yield* Queue.size(dispatched), 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({ dispatched, getThreadRecords: () => Effect.succeed(projection) }),
+        ),
+        Effect.provideService(ServerActivation, Deferred.await(activation)),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("recovers an unaccepted persisted steer using the same delivery identity", () =>
     Effect.gen(function* () {
       const dispatched = yield* Queue.unbounded<unknown>();
@@ -346,6 +384,165 @@ describe("ProviderContinuationService", () => {
     });
   });
 
+  it.effect("retries a durable process event after a transient command-commit failure", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const commandIds = yield* Ref.make<string[]>([]);
+      const accepted = yield* Queue.unbounded<string>();
+      const processMessageId = MessageId.make("process:durable-event");
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () => Effect.succeed(projection),
+        dispatch: (command) =>
+          Ref.update(commandIds, (ids) => [...ids, command.commandId]).pipe(
+            Effect.andThen(Ref.getAndUpdate(attempts, (count) => count + 1)),
+            Effect.flatMap((attempt) =>
+              attempt === 0
+                ? Effect.fail(new Error("transient database failure") as never)
+                : command.type === "message.dispatch"
+                  ? Queue.offer(accepted, command.messageId).pipe(Effect.as({} as never))
+                  : Effect.die("Expected a process notification dispatch"),
+            ),
+          ),
+      });
+      const worker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        const acknowledged = yield* Ref.make(false);
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process finished",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            Effect.gen(function* () {
+              const result = yield* effect;
+              yield* Ref.set(acknowledged, true);
+              return Option.some(result);
+            }),
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 1);
+        assert.isFalse(yield* Ref.get(acknowledged));
+        yield* TestClock.adjust("100 millis");
+        assert.equal(yield* Queue.take(accepted), processMessageId);
+        assert.equal(yield* Ref.get(attempts), 2);
+        const [initialCommand, retriedCommand] = yield* Ref.get(commandIds);
+        assert.notEqual(initialCommand, retriedCommand);
+        assert.isTrue(yield* Ref.get(acknowledged));
+      }).pipe(
+        Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("reconciles an already-persisted process wake without duplicating its message", () =>
+    Effect.gen(function* () {
+      const processMessageId = MessageId.make("process:already-committed");
+      const acknowledged = yield* Deferred.make<void>();
+      const dispatches = yield* Ref.make(0);
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () =>
+          Effect.succeed({
+            ...projection,
+            messages: [{ id: processMessageId }],
+          } as unknown as OrchestrationV2ThreadProjection),
+        dispatch: () =>
+          Ref.update(dispatches, (n) => n + 1).pipe(
+            Effect.andThen(Effect.fail(new Error("must not redispatch") as never)),
+          ),
+      });
+      const worker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process completed",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            effect.pipe(
+              Effect.tap(() => Deferred.succeed(acknowledged, undefined)),
+              Effect.map(Option.some),
+            ),
+        });
+        yield* Deferred.await(acknowledged);
+        assert.equal(yield* Ref.get(dispatches), 0);
+      }).pipe(
+        Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("retains an unacknowledged process event while its provider is disabled", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const acknowledged = yield* Ref.make(false);
+      const processMessageId = MessageId.make("process:disabled-then-enabled");
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () => Effect.succeed(projection),
+        dispatch: () =>
+          Ref.getAndUpdate(attempts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 0
+                ? Effect.fail(
+                    new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+                      projectId: ProjectId.make("project-disabled"),
+                      instanceId: ProviderInstanceId.make("instance-disabled"),
+                    }) as never,
+                  )
+                : Effect.succeed({} as never),
+            ),
+          ),
+      });
+      const worker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process completed",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            Effect.gen(function* () {
+              const value = yield* effect;
+              yield* Ref.set(acknowledged, true);
+              return Option.some(value);
+            }),
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 1);
+        assert.isFalse(yield* Ref.get(acknowledged));
+        yield* TestClock.adjust("100 millis");
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 2);
+        assert.isTrue(yield* Ref.get(acknowledged));
+      }).pipe(
+        Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("backs off repeated delegated completion dispatch failures", () => {
     return Effect.gen(function* () {
       const attempts = yield* Ref.make(0);
@@ -531,38 +728,47 @@ describe("ProviderContinuationService", () => {
   });
 
   it.effect(
-    "a project-disabled instance refuses a delegated-completion wake exactly once, acknowledges it, and never retries",
-    () => {
-      return Effect.gen(function* () {
-        const attempts = yield* Ref.make(0);
+    "retries a delegated completion after its provider is re-enabled without acknowledging rejection",
+    () =>
+      Effect.gen(function* () {
+        const enabled = yield* Ref.make(false);
         const cleared = yield* Ref.make(false);
-        const acknowledged = yield* Queue.unbounded<unknown>();
+        const dispatches = yield* Queue.unbounded<{ type: string; messageId?: MessageId }>();
+        const accepted = yield* Ref.make(false);
         const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadRecords: () => Effect.succeed(delegatedProjection()),
-          dispatch: (command) => {
-            if ((command as { type: string }).type === "message.dispatch") {
-              return Ref.update(attempts, (count) => count + 1).pipe(
-                Effect.andThen(
-                  Effect.fail(
-                    new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+          getThreadRecords: () =>
+            Ref.get(accepted).pipe(
+              Effect.map(
+                (delivered) =>
+                  ({
+                    ...delegatedProjection(),
+                    messages: delivered ? [{ id: delegatedMessageId }] : [],
+                  }) as unknown as OrchestrationV2ThreadProjection,
+              ),
+            ),
+          dispatch: (command) =>
+            Effect.gen(function* () {
+              yield* Queue.offer(dispatches, command);
+              if (command.type === "message.dispatch") {
+                if (!(yield* Ref.get(enabled)))
+                  return yield* new ThreadManagementService.ThreadManagementProviderInstanceDisabledError(
+                    {
                       projectId: ProjectId.make("project-provider-continuation-disabled"),
                       instanceId: ProviderInstanceId.make(
                         "instance-provider-continuation-disabled",
                       ),
-                    }) as never,
-                  ),
-                ),
-              );
-            }
-            return Queue.offer(acknowledged, command).pipe(Effect.as({} as never));
-          },
+                    },
+                  );
+                yield* Ref.set(accepted, true);
+              }
+              return {} as never;
+            }),
         });
         const layerWorker = ProviderContinuationService.layer.pipe(
           Layer.provide(
             Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
           ),
         );
-
         yield* Effect.gen(function* () {
           const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
           yield* requests.offer({
@@ -572,40 +778,32 @@ describe("ProviderContinuationService", () => {
             detail: null,
             delivery: "message_text",
             clearIfCurrent: () => Ref.set(cleared, true),
-            delegatedCompletion: {
-              parentRunId,
-              generation: 1,
-              messageId: delegatedMessageId,
-            },
+            delegatedCompletion: { parentRunId, generation: 1, messageId: delegatedMessageId },
           });
+          assert.equal((yield* Queue.take(dispatches)).type, "message.dispatch");
           yield* Effect.yieldNow;
-          assert.equal(yield* Ref.get(attempts), 1);
-          assert.isTrue(yield* Ref.get(cleared));
-
-          const acknowledgements = (yield* Queue.takeAll(acknowledged)) as ReadonlyArray<{
-            type: string;
-            taskId: string;
-            observedByRunId: string | null;
-          }>;
-          assert.deepEqual(
-            acknowledgements.map((command) => command.taskId),
-            ["node-provider-continuation-first", "node-provider-continuation-second"],
-          );
-          for (const command of acknowledgements) {
-            assert.equal(command.type, "delegated_task.completion-delivery.acknowledge");
-            assert.isNull(command.observedByRunId);
-          }
-
+          assert.isFalse(yield* Ref.get(cleared));
+          assert.isFalse(yield* Ref.get(accepted));
+          assert.equal(yield* Queue.size(dispatches), 0);
+          yield* TestClock.adjust("100 millis");
+          assert.equal((yield* Queue.take(dispatches)).type, "message.dispatch");
+          yield* Effect.yieldNow;
+          assert.isFalse(yield* Ref.get(accepted));
+          yield* Ref.set(enabled, true);
+          yield* TestClock.adjust("200 millis");
+          const delivered = yield* Queue.take(dispatches);
+          assert.equal(delivered.type, "message.dispatch");
+          assert.equal(delivered.messageId, delegatedMessageId);
+          yield* Effect.yieldNow;
+          assert.isTrue(yield* Ref.get(accepted));
+          assert.isFalse(yield* Ref.get(cleared));
           yield* TestClock.adjust("1 hour");
-          yield* Effect.yieldNow;
-          assert.equal(yield* Ref.get(attempts), 1);
-          assert.equal(yield* Queue.size(acknowledged), 0);
+          assert.equal(yield* Queue.size(dispatches), 0);
         }).pipe(
           Effect.provide(Layer.merge(ProviderContinuationRequests.layer, layerWorker)),
           Effect.scoped,
         );
-      });
-    },
+      }),
   );
 
   it.effect(
@@ -857,6 +1055,100 @@ describe("ProviderContinuationService", () => {
       }
     });
   });
+
+  it.effect("retries a durable process event after a transient commit failure", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const accepted = yield* Queue.unbounded<string>();
+      const processMessageId = MessageId.make("process:durable-event");
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () => Effect.succeed(projection),
+        dispatch: (command) =>
+          Ref.getAndUpdate(attempts, (count) => count + 1).pipe(
+            Effect.flatMap((attempt) =>
+              attempt === 0
+                ? Effect.fail(new Error("transient database failure") as never)
+                : command.type === "message.dispatch"
+                  ? Queue.offer(accepted, command.messageId).pipe(Effect.as({} as never))
+                  : Effect.die(new Error("Expected message.dispatch")),
+            ),
+          ),
+      });
+      const worker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        const acknowledged = yield* Ref.make(false);
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process finished",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            Effect.gen(function* () {
+              const result = yield* effect;
+              yield* Ref.set(acknowledged, true);
+              return Option.some(result);
+            }),
+        });
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(attempts), 1);
+        assert.isFalse(yield* Ref.get(acknowledged));
+        yield* TestClock.adjust("100 millis");
+        assert.equal(yield* Queue.take(accepted), processMessageId);
+        assert.equal(yield* Ref.get(attempts), 2);
+        assert.isTrue(yield* Ref.get(acknowledged));
+      }).pipe(
+        Effect.provide(Layer.merge(ProviderContinuationRequests.layer, worker)),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("does not duplicate a durable process completion when its source ACK failed", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      const acknowledged = yield* Ref.make(0);
+      const processMessageId = MessageId.make("process:already-dispatched");
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "Process finished",
+          delivery: "message_text",
+          messageId: processMessageId,
+          dispatchIfCurrent: (effect) =>
+            Effect.gen(function* () {
+              const result = yield* effect;
+              yield* Ref.update(acknowledged, (count) => count + 1);
+              return Option.some(result);
+            }),
+        });
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Queue.poll(dispatched)));
+        assert.equal(yield* Ref.get(acknowledged), 1);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            dispatched,
+            getThreadRecords: () =>
+              Effect.succeed({
+                ...projection,
+                messages: [{ id: processMessageId }],
+              } as unknown as OrchestrationV2ThreadProjection),
+          }),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
 
   it.effect("dispatches a current request exactly once", () => {
     return Effect.gen(function* () {

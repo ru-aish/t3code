@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -16,6 +16,7 @@ import {
   orchestrationEffectClaimsTotal,
   orchestrationEffectQueueWait,
 } from "../observability/Metrics.ts";
+import { delegatedCompletionWakeDetail } from "./delegatedCompletionWake.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -28,6 +29,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
@@ -101,6 +103,93 @@ export const layerExecutor: Layer.Layer<
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "delegated-completion.dispatch": {
+            const taskId = effect.request.taskId;
+            const read = () =>
+              threads.getThreadRecords(
+                effect.threadId,
+                ["runs", "subagents", "messages", "providerTurns"],
+                {
+                  messageRoles: ["user"],
+                },
+              );
+            const currentDelivery = (
+              projection: Pick<
+                OrchestrationV2ThreadProjection,
+                "runs" | "subagents" | "messages" | "providerTurns"
+              >,
+            ) => {
+              const task = projection.subagents.find(
+                (candidate) => candidate.id === taskId && candidate.origin === "app_owned",
+              );
+              const parent = projection.runs.find((candidate) => candidate.id === task?.runId);
+              const delivery = parent?.delegatedCompletion?.delivery;
+              if (
+                task?.completionDelivery?.state !== "claimed" ||
+                parent?.delegatedCompletion?.disposition !== "open" ||
+                delivery == null ||
+                !delivery.taskIds.includes(taskId)
+              )
+                return undefined;
+              if (
+                projection.messages.some((message) => message.id === delivery.messageId) &&
+                !isUndeliveredMailboxSteer(projection, delivery.messageId)
+              )
+                return undefined;
+              return { parentRunId: parent.id, delivery };
+            };
+            return Effect.gen(function* () {
+              const projection = yield* read();
+              if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null)
+                return;
+              const current = currentDelivery(projection);
+              if (current === undefined) return;
+              const { parentRunId, delivery } = current;
+              const prompt = delegatedCompletionWakeDetail(delivery.taskIds);
+              // A rejected dispatch receipt must not poison retries. The effect
+              // identity stays stable while each actual attempt has a fresh ID.
+              const commandId = CommandId.make(
+                `command:mailbox-effect:${effect.id}:${effect.attemptCount}`,
+              );
+              yield* threads
+                .dispatch({
+                  type: "message.dispatch",
+                  commandId,
+                  threadId: effect.threadId,
+                  messageId: delivery.messageId,
+                  text: prompt,
+                  attachments: [],
+                  dispatchMode: { type: "queue_after_active" },
+                  createdBy: "agent",
+                  creationSource: "server",
+                  delegatedCompletion: {
+                    parentRunId,
+                    generation: delivery.generation,
+                    taskIds: delivery.taskIds,
+                  },
+                })
+                .pipe(
+                  // The in-memory fast path can win the thread lock. If its
+                  // dispatch consumed our delivery, this obligation is settled.
+                  Effect.catch((error) =>
+                    read().pipe(
+                      Effect.flatMap((fresh) =>
+                        currentDelivery(fresh) === undefined ? Effect.void : Effect.fail(error),
+                      ),
+                    ),
+                  ),
+                );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
+          }
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
@@ -720,8 +809,11 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Completion delivery is a durable obligation, not best-effort cleanup.
+          // Only a successful or explicitly revoked delivery may settle it.
+          const deliveryCritical = effect.request.type === "delegated-completion.dispatch";
           const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
+            .execute(effect, { willRetry: deliveryCritical || effect.attemptCount < maxAttempts })
             .pipe(Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
@@ -757,7 +849,7 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : !deliveryCritical && effect.attemptCount >= maxAttempts
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
@@ -766,7 +858,12 @@ export const layerWithOptions = (
                     effectId: effect.id,
                     workerId,
                     error,
-                    delayMs: Math.min(30_000, 100 * 2 ** Math.max(0, effect.attemptCount - 1)),
+                    // Saturate the exponent as well as the duration; a very old
+                    // obligation must never overflow to Infinity.
+                    delayMs: Math.min(
+                      30_000,
+                      100 * 2 ** Math.min(9, Math.max(0, effect.attemptCount - 1)),
+                    ),
                   })
                   .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (!updated) {
