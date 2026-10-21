@@ -15,6 +15,10 @@ type Spec = {
   valueKey?: string;
   xAxisLabel?: string;
   axisLabel?: string;
+  yAxisMin?: number;
+  yAxisMax?: number;
+  xAxisScale?: "linear";
+  layout?: "vertical";
   series: Series[];
   data: Record<string, string | number>[];
 };
@@ -68,9 +72,45 @@ function parseChart(source: string): Spec | null {
     for (const prop of ["xKey", "nameKey", "valueKey", "xAxisLabel", "axisLabel"] as const) {
       if (typeof value[prop] === "string") spec[prop] = value[prop].slice(0, 100);
     }
+    if (value.xAxisScale !== undefined) {
+      if (chartType !== "line" || value.xAxisScale !== "linear") return null;
+      spec.xAxisScale = "linear";
+      if (!data.every((row) => typeof row[spec.xKey || "x"] === "number")) return null;
+    }
+    if (value.layout !== undefined) {
+      if (chartType !== "bar" || value.layout !== "vertical") return null;
+      spec.layout = "vertical";
+    }
+    for (const prop of ["yAxisMin", "yAxisMax"] as const) {
+      if (value[prop] !== undefined) {
+        if (typeof value[prop] !== "number" || !Number.isFinite(value[prop])) return null;
+        spec[prop] = value[prop];
+      }
+    }
+    if (
+      spec.yAxisMin !== undefined &&
+      spec.yAxisMax !== undefined &&
+      spec.yAxisMax <= spec.yAxisMin
+    )
+      return null;
     const valueKeys =
       chartType === "pie" ? [spec.valueKey || series[0]!.dataKey] : series.map((s) => s.dataKey);
-    if (!data.some((row) => valueKeys.some((key) => typeof row[key] === "number"))) return null;
+    const numericValues = data.flatMap((row) =>
+      valueKeys.map((key) => numeric(row[key])).filter((field): field is number => field !== null),
+    );
+    if (numericValues.length === 0) return null;
+    if (
+      spec.yAxisMin !== undefined &&
+      spec.yAxisMax === undefined &&
+      spec.yAxisMin >= Math.max(0, ...numericValues)
+    )
+      return null;
+    if (
+      spec.yAxisMax !== undefined &&
+      spec.yAxisMin === undefined &&
+      spec.yAxisMax <= Math.min(0, ...numericValues)
+    )
+      return null;
     return spec;
   } catch {
     return null;
@@ -89,17 +129,32 @@ function format(value: number, series?: Series): string {
 function PieChart({ spec }: { spec: Spec }) {
   const key = spec.valueKey || spec.series[0]!.dataKey;
   const nameKey = spec.nameKey || spec.xKey || "name";
-  const entries = spec.data
+  const positive = spec.data
     .map((row) => ({ name: String(row[nameKey] ?? ""), value: numeric(row[key]) ?? 0 }))
-    .filter((entry) => entry.value > 0)
-    .slice(0, 20);
-  const sum = entries.reduce((total, entry) => total + entry.value, 0);
-  if (!sum) return <p className="text-xs text-muted-foreground">No positive chart values.</p>;
+    .filter((entry) => entry.value > 0);
+  if (positive.length === 0)
+    return <p className="text-xs text-muted-foreground">No positive chart values.</p>;
+  // Normalize before summing so a chart of large finite values cannot overflow.
+  const scale = Math.max(...positive.map((entry) => entry.value));
+  const all = positive.map((entry) => ({ ...entry, weight: entry.value / scale }));
+  const totalWeight = all.reduce((sum, entry) => sum + entry.weight, 0);
+  // Include every data row in the pie total, even when only 20 slices fit.
+  const grouped = all.length > 20;
+  const entries: Array<{ name: string; value: number | null; weight: number }> = grouped
+    ? [
+        ...all.slice(0, 19),
+        {
+          name: `Other (${all.length - 19})`,
+          value: null,
+          weight: all.slice(19).reduce((sum, entry) => sum + entry.weight, 0),
+        },
+      ]
+    : all;
   const slices = entries.map((entry, i) => ({
     ...entry,
     startAngle:
       -Math.PI / 2 +
-      (entries.slice(0, i).reduce((total, previous) => total + previous.value, 0) / sum) *
+      (entries.slice(0, i).reduce((sum, previous) => sum + previous.weight, 0) / totalWeight) *
         Math.PI *
         2,
   }));
@@ -115,13 +170,13 @@ function PieChart({ spec }: { spec: Spec }) {
     >
       {slices.map((entry, i) => {
         const angle = entry.startAngle;
-        const sweep = (entry.value / sum) * Math.PI * 2;
+        const sweep = (entry.weight / totalWeight) * Math.PI * 2;
         const startX = cx + radius * Math.cos(angle);
         const startY = cy + radius * Math.sin(angle);
         const endX = cx + radius * Math.cos(angle + sweep);
         const endY = cy + radius * Math.sin(angle + sweep);
         const path =
-          entries.length === 1
+          slices.length === 1
             ? `M ${cx - radius} ${cy} a ${radius} ${radius} 0 1 0 ${radius * 2} 0 a ${radius} ${radius} 0 1 0 -${radius * 2} 0`
             : `M ${cx} ${cy} L ${startX} ${startY} A ${radius} ${radius} 0 ${sweep > Math.PI ? 1 : 0} 1 ${endX} ${endY} Z`;
         return (
@@ -132,18 +187,25 @@ function PieChart({ spec }: { spec: Spec }) {
             stroke="var(--background)"
             strokeWidth="2"
           >
-            <title>{`${entry.name}: ${format(entry.value, spec.series[0])} (${NUMBER.format((entry.value / sum) * 100)}%)`}</title>
+            <title>{`${entry.name}: ${entry.value === null ? "" : `${format(entry.value, spec.series[0])} `}(${NUMBER.format((entry.weight / totalWeight) * 100)}%)`}</title>
           </path>
         );
       })}
-      {slices.slice(0, 10).map((entry, i) => (
-        <g key={entry.startAngle} transform={`translate(368 ${36 + i * 26})`}>
-          <rect width="12" height="12" rx="2" fill={COLORS[i % COLORS.length]} />
-          <text x="21" y="11" fill="currentColor" fontSize="13">
-            {entry.name.slice(0, 26)}
-          </text>
-        </g>
-      ))}
+      {(grouped ? [...slices.slice(0, 9), slices[slices.length - 1]!] : slices.slice(0, 10)).map(
+        (entry, i) => (
+          <g key={entry.startAngle} transform={`translate(368 ${36 + i * 26})`}>
+            <rect
+              width="12"
+              height="12"
+              rx="2"
+              fill={COLORS[(grouped && i === 9 ? slices.length - 1 : i) % COLORS.length]}
+            />
+            <text x="21" y="11" fill="currentColor" fontSize="13">
+              {entry.name.slice(0, 26)}
+            </text>
+          </g>
+        ),
+      )}
     </svg>
   );
 }
@@ -155,17 +217,28 @@ function CartesianChart({ spec }: { spec: Spec }) {
       .map((series) => numeric(row[series.dataKey]))
       .filter((value): value is number => value !== null),
   );
-  const low = Math.min(0, ...values);
-  const high = Math.max(0, ...values);
-  const range = high === low ? 1 : high - low;
-  const y = (value: number) => TOP + PLOT_HEIGHT - ((value - low) / range) * PLOT_HEIGHT;
+  const low = spec.yAxisMin ?? Math.min(0, ...values);
+  const high = spec.yAxisMax ?? Math.max(0, ...values);
+  const scale = Math.max(1, Math.abs(low), Math.abs(high));
+  const range = high / scale - low / scale || 1;
+  const y = (value: number) =>
+    TOP + PLOT_HEIGHT - ((value / scale - low / scale) / range) * PLOT_HEIGHT;
+  const xKey = spec.xKey || "x";
+  const xValues = rows.map((row) => numeric(row[xKey]) ?? 0);
+  const xMin = Math.min(...xValues);
+  const xMax = Math.max(...xValues);
+  const xScale = Math.max(1, Math.abs(xMin), Math.abs(xMax));
+  const xRange = xMax / xScale - xMin / xScale || 1;
   const x = (index: number) =>
     LEFT +
-    ((index + (spec.chartType === "bar" ? 0.5 : 0)) /
-      Math.max(1, rows.length - (spec.chartType === "bar" ? 0 : 1))) *
-      PLOT_WIDTH;
-  const xKey = spec.xKey || "x";
-  const zero = y(0);
+    (spec.xAxisScale === "linear"
+      ? xMax === xMin
+        ? PLOT_WIDTH / 2
+        : ((xValues[index]! / xScale - xMin / xScale) / xRange) * PLOT_WIDTH
+      : ((index + (spec.chartType === "bar" ? 0.5 : 0)) /
+          Math.max(1, rows.length - (spec.chartType === "bar" ? 0 : 1))) *
+        PLOT_WIDTH);
+  const zero = y(Math.min(high, Math.max(low, 0)));
   const gap = PLOT_WIDTH / rows.length;
   const barWidth = Math.min(34, (gap * 0.76) / spec.series.length);
   const visibleTicks = new Set([0, rows.length - 1]);
@@ -178,7 +251,7 @@ function CartesianChart({ spec }: { spec: Spec }) {
       className="w-full max-h-80"
     >
       {Array.from({ length: 5 }, (_, i) => {
-        const value = low + (range * i) / 4;
+        const value = (low / scale + (range * i) / 4) * scale;
         return (
           <g key={i}>
             <line
@@ -318,6 +391,110 @@ function CartesianChart({ spec }: { spec: Spec }) {
   );
 }
 
+function VerticalBarChart({ spec }: { spec: Spec }) {
+  const rows = spec.data.slice(0, 100);
+  const values = rows.flatMap((row) =>
+    spec.series
+      .map((series) => numeric(row[series.dataKey]))
+      .filter((value): value is number => value !== null),
+  );
+  const low = spec.yAxisMin ?? Math.min(0, ...values);
+  const high = spec.yAxisMax ?? Math.max(0, ...values);
+  const scale = Math.max(1, Math.abs(low), Math.abs(high));
+  const range = high / scale - low / scale || 1;
+  const x = (value: number) => LEFT + ((value / scale - low / scale) / range) * PLOT_WIDTH;
+  const baseline = x(Math.min(high, Math.max(low, 0)));
+  const groupHeight = PLOT_HEIGHT / rows.length;
+  const barHeight = Math.min(24, (groupHeight * 0.75) / spec.series.length);
+  const nameKey = spec.xKey || "x";
+  const visibleTicks = new Set([0, rows.length - 1]);
+  for (let i = 1; i < 6; i++) visibleTicks.add(Math.round((i * (rows.length - 1)) / 6));
+  return (
+    <svg
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+      role="img"
+      aria-label="vertical bar chart"
+      className="w-full max-h-80"
+    >
+      {Array.from({ length: 5 }, (_, i) => {
+        const value = low / scale + ((high / scale - low / scale) * i) / 4;
+        const tickX = LEFT + (i / 4) * PLOT_WIDTH;
+        return (
+          <g key={i}>
+            <line
+              x1={tickX}
+              y1={TOP}
+              x2={tickX}
+              y2={TOP + PLOT_HEIGHT}
+              stroke="currentColor"
+              strokeOpacity=".13"
+            />
+            <text
+              x={tickX}
+              y={TOP + PLOT_HEIGHT + 20}
+              textAnchor="middle"
+              fill="currentColor"
+              opacity=".7"
+              fontSize="11"
+            >
+              {COMPACT.format(value * scale)}
+            </text>
+          </g>
+        );
+      })}
+      <line
+        x1={baseline}
+        y1={TOP}
+        x2={baseline}
+        y2={TOP + PLOT_HEIGHT}
+        stroke="currentColor"
+        strokeOpacity=".35"
+      />
+      {rows.map((row, index) =>
+        visibleTicks.has(index) ? (
+          <text
+            key={TOP + groupHeight * (index + 0.5)}
+            x={LEFT - 7}
+            y={TOP + groupHeight * (index + 0.5) + 4}
+            textAnchor="end"
+            fill="currentColor"
+            opacity=".75"
+            fontSize="11"
+          >
+            {String(row[nameKey] ?? index + 1).slice(0, 9)}
+          </text>
+        ) : null,
+      )}
+      {spec.series.flatMap((series, seriesIndex) =>
+        rows.map((row, index) => {
+          const value = numeric(row[series.dataKey]);
+          if (value === null) return null;
+          const destination = x(value);
+          const label = String(row[nameKey] ?? index + 1);
+          return (
+            <rect
+              key={`${series.dataKey}-${TOP + groupHeight * (index + 0.5)}`}
+              x={Math.min(baseline, destination)}
+              y={
+                TOP +
+                groupHeight * (index + 0.5) -
+                (spec.series.length * barHeight) / 2 +
+                seriesIndex * barHeight
+              }
+              width={Math.max(0.5, Math.abs(destination - baseline))}
+              height={Math.max(0.5, barHeight - 1)}
+              fill={COLORS[seriesIndex]}
+              rx="1"
+            >
+              <title>{`${label} · ${series.label || series.dataKey}: ${format(value, series)}`}</title>
+            </rect>
+          );
+        }),
+      )}
+    </svg>
+  );
+}
+
 /** Visualize only the bounded, declarative data subset of ChatGPT DIL Chart. */
 export function SafeAgentChart({ source }: { source: string }) {
   const spec = useMemo(() => parseChart(source), [source]);
@@ -330,7 +507,18 @@ export function SafeAgentChart({ source }: { source: string }) {
   }
   return (
     <figure className="my-2 w-full overflow-x-auto rounded-md border border-border/60 bg-background px-3 py-3">
-      {spec.chartType === "pie" ? <PieChart spec={spec} /> : <CartesianChart spec={spec} />}
+      {spec.chartType === "pie" ? (
+        <PieChart spec={spec} />
+      ) : spec.chartType === "bar" && spec.layout === "vertical" ? (
+        <VerticalBarChart spec={spec} />
+      ) : (
+        <CartesianChart spec={spec} />
+      )}
+      {spec.chartType !== "pie" && spec.data.length > 100 ? (
+        <p className="text-center text-xs text-muted-foreground">
+          Showing first 100 of {spec.data.length} data points.
+        </p>
+      ) : null}
       <figcaption className="mt-1 flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
         {spec.series.map((series, i) => (
           <span key={series.dataKey} className="inline-flex items-center gap-1.5">
