@@ -885,7 +885,9 @@ export const makeChatGPTAdapter = (
               restoredItems.set(`${item.providerTurnId}:${item.nativeItemRef.nativeId}`, item);
             const nativeItemId = item.nativeItemRef?.nativeId;
             if (
-              nativeItemId?.startsWith("tool-") &&
+              nativeItemId &&
+              item.id ===
+                TurnItemId.make(`chatgpt:${input.threadId}:terminal-tool:${nativeItemId}`) &&
               (item.type === "dynamic_tool" ||
                 item.type === "command_execution" ||
                 item.type === "file_change")

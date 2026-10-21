@@ -15,6 +15,7 @@ import {
   RunAttemptId,
   NodeId,
   MessageId,
+  TurnItemId,
   OrchestrationV2AppThread,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
@@ -370,6 +371,91 @@ describe("ChatGPT task authority", () => {
         expect(completed.turnItem.status).toBe("completed");
         expect(completed.turnItem.input).toBe("pwd");
         expect(completed.turnItem.output).toBe("ok");
+      }),
+    ),
+  );
+
+  it.live("restores terminal tool identity for operation IDs without a tool- prefix", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, turnInput } = yield* fixture;
+        yield* Queue.take(events);
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "tool-template",
+            toolName: "fedora_t3code.run_command",
+            input: { command: "pwd" },
+          }),
+        );
+        const original = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "command_execution",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const first = original[0];
+        if (first?.type !== "turn_item.updated" || first.turnItem.type !== "command_execution")
+          throw new Error("Missing initial command item");
+
+        const operationId = "a1234567-89ab-4cde-8123-456789abcdef";
+        const restored = {
+          ...first.turnItem,
+          id: TurnItemId.make(`chatgpt:test-thread:terminal-tool:${operationId}`),
+          nativeItemRef: { ...first.turnItem.nativeItemRef!, nativeId: operationId },
+          ordinal: 42,
+        };
+        const projection = yield* Schema.decodeUnknownEffect(OrchestrationV2ThreadProjection)({
+          thread: turnInput.appThread,
+          runs: [],
+          attempts: [],
+          nodes: [],
+          subagents: [],
+          providerSessions: [],
+          providerThreads: [],
+          providerTurns: [],
+          runtimeRequests: [],
+          messages: [],
+          plans: [],
+          turnItems: [restored],
+          checkpointScopes: [],
+          checkpoints: [],
+          contextHandoffs: [],
+          contextTransfers: [],
+          visibleTurnItems: [],
+          updatedAt: turnInput.appThread.updatedAt,
+        });
+        yield* session.readThreadSnapshot({
+          providerThread: turnInput.providerThread,
+          existingProjection: projection,
+        });
+        fake.publish(
+          terminalTool("tool_completed", {
+            operationId,
+            toolName: "fedora_t3code.run_command",
+            status: "completed",
+            output: { result: "ok" },
+          }),
+        );
+        const updated = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.nativeItemRef?.nativeId === operationId,
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const result = updated[0];
+        if (result?.type !== "turn_item.updated" || result.turnItem.type !== "command_execution")
+          throw new Error("Missing restored command item");
+        expect(result.turnItem.id).toBe(restored.id);
+        expect(result.turnItem.ordinal).toBe(42);
+        expect(result.turnItem.input).toBe("pwd");
+        expect(result.turnItem.output).toBe("ok");
+        expect(result.turnItem.status).toBe("completed");
       }),
     ),
   );
