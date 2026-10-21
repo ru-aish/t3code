@@ -83,12 +83,18 @@ export function normalizeStreamMessage(
       const { count, rest } = quotesFrom(line);
       const blank = rest.trim() === "";
       // Omitted '>' markers can lazily continue an existing quoted paragraph.
-      // Four-space continuation text is not an indented code block unless the
-      // previous quoted paragraph was already terminated (e.g. by a blank).
+      // Retain the logical quote depth across those lines so a later explicit
+      // '>' prefix resumes the same paragraph instead of starting indented code.
+      const interruptsQuotedParagraph =
+        /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-+*]|\d{1,9}[.)])[ \t]+|(?:`{3,}|~{3,})|(?:={3,})[ \t]*$)/.test(
+          rest,
+        ) ||
+        (columns(rest) <= 3 &&
+          /^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(rest.trimStart()));
       const lazyQuotedParagraph =
-        count < previousQuoteDepth && paragraph && !blank && columns(rest) >= 4;
-      if (count !== previousQuoteDepth) {
-        if (!lazyQuotedParagraph) paragraph = false;
+        count < previousQuoteDepth && paragraph && !blank && !interruptsQuotedParagraph;
+      if (count !== previousQuoteDepth && !lazyQuotedParagraph) {
+        paragraph = false;
         listIndent = 0;
         previousQuoteDepth = count;
       }

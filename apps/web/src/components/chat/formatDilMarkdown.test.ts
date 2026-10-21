@@ -265,6 +265,21 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("> > " + marker);
     expect(output).toContain("[outside](<https://example.com/>)");
   });
+  it("preserves an open quoted paragraph when explicit markers resume after lazy lines", () => {
+    const marker = "urlLiteralhttps://example.com";
+    for (const prefix of [
+      "> text\ncontinued\n>     ",
+      "> text\ncontinued\ncontinued again\n>     ",
+      "> text\n    continued\n>     ",
+      "> text\ncontinued\n> continued\n>     ",
+    ]) {
+      expect(formatDilMarkdown(prefix + marker)).toContain("[Literal](<https://example.com/>)");
+    }
+    const terminated = "> text\ncontinued\n\n>     " + marker;
+    expect(formatDilMarkdown(terminated)).toContain(">     " + marker);
+    expect(formatDilMarkdown(terminated)).not.toContain("[Literal](<https://example.com/>)");
+  });
+
   it("preserves lazy blockquote paragraph continuations rather than hiding links as code", () => {
     const marker = "urlLiteralhttps://example.com";
     for (const input of [
