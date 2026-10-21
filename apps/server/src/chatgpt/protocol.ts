@@ -627,6 +627,11 @@ export function normalizeStreamMessage(
           break;
         }
         rawOpen.lastIndex = openingEnd;
+        if (/\/\s*>$/.test(source.slice(raw.index, openingEnd))) {
+          // Self-closing raw nodes own only their opening tag.
+          protectedRaw.push({ start: raw.index, end: openingEnd });
+          continue;
+        }
       }
       const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
       let closeAt = source.indexOf(closing, rawOpen.lastIndex);
@@ -647,7 +652,25 @@ export function normalizeStreamMessage(
     const nested = new Set<number>();
     const invalidRoots = new Set<number>();
     const actualCardOpenings = new Set<number>();
-    const stack: number[] = [];
+    const stack: Array<{ name: string; start: number }> = [];
+    // A raw HTML/DIL parent changes the meaning of a contained card, even
+    // when the parent is not itself a card. Track every non-void element.
+    const voidTags = new Set([
+      "area",
+      "base",
+      "br",
+      "col",
+      "embed",
+      "hr",
+      "img",
+      "input",
+      "link",
+      "meta",
+      "param",
+      "source",
+      "track",
+      "wbr",
+    ]);
     let tagCount = 0;
     let scanAt = 0;
     while (scanAt < source.length) {
@@ -672,19 +695,27 @@ export function normalizeStreamMessage(
       }
       if (end < 0) return [];
       scanAt = end;
-      if (!/^<\/?card$/i.test(opener[0])) continue;
+      const name = opener[0].replace(/^<\/?/, "").toLowerCase();
       if (opener[0].startsWith("</")) {
-        if (stack.length) stack.pop();
-      } else if (!/\/\s*>$/.test(source.slice(at, end))) {
+        // An unmatched closer must not pop an unrelated enclosing element.
+        if (stack[stack.length - 1]?.name === name) stack.pop();
+        continue;
+      }
+      const selfClosing = /\/\s*>$/.test(source.slice(at, end)) || voidTags.has(name);
+      if (name === "card" && !selfClosing) {
         actualCardOpenings.add(at);
         if (stack.length) {
           nested.add(at);
-          invalidRoots.add(stack[0]!);
+          for (const parent of stack) {
+            if (parent.name === "card") invalidRoots.add(parent.start);
+          }
         }
-        stack.push(at);
       }
+      if (!selfClosing) stack.push({ name, start: at });
     }
-    for (const open of stack) invalidRoots.add(open);
+    for (const open of stack) {
+      if (open.name === "card") invalidRoots.add(open.start);
+    }
 
     // CommonMark lazy continuation lines can belong to a quoted/listed
     // paragraph even without a marker or indentation.
@@ -696,21 +727,24 @@ export function normalizeStreamMessage(
       const newline = source.indexOf("\n", lineStart);
       const end = newline < 0 ? source.length : newline;
       const line = source.slice(lineStart, end);
+      // A heading, blank line or completed fence inside a quote cannot
+      // lazily continue a paragraph on the following unquoted line.
+      const quoteContent = line.replace(/^ {0,3}(?:>[ \t]?)+/, "");
       if (fenced) {
-        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(quoteContent);
         if (closing && closing[1]![0] === fenced.marker && closing[1]!.length >= fenced.length)
           fenced = null;
         quotedOrListedParagraph = false;
       } else {
-        const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+        const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(quoteContent);
         if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
           fenced = { marker: opening[1]![0]!, length: opening[1]!.length };
           quotedOrListedParagraph = false;
-        } else if (!line.trim()) {
+        } else if (!quoteContent.trim()) {
           quotedOrListedParagraph = false;
         } else {
-          const marker = /^ {0,3}(?:>\s?|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line);
-          const interrupt = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(line);
+          const marker = /^ {0,3}(?:>[ \t]?|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line);
+          const interrupt = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(quoteContent);
           if (interrupt) quotedOrListedParagraph = false;
           else if (marker) quotedOrListedParagraph = true;
           else if (quotedOrListedParagraph && line.startsWith("<card>"))

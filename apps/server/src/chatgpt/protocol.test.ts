@@ -1165,6 +1165,45 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("promotes root cards after completed quoted headings and quoted fences", () => {
+    for (const content of [
+      "> # Done\n" + card,
+      "> ## Heading\n" + card,
+      "> ```js\n> console.log(1)\n> ```\n" + card,
+      "> ~~~\n> source\n> ~~~\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("keeps card markup inside unsupported HTML and DIL parents inert", () => {
+    for (const content of [
+      "<div>\n" + card + "\n</div>",
+      "<section>\n" + card + "\n</section>",
+      "<box>\n" + card + "\n</box>",
+      "<row>\n" + card + "\n</row>",
+      "<div>\n<article>\n" + card + "\n</article>\n</div>",
+      "<div>\n" + card,
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("retains independent cards after self-closing raw components and HTML", () => {
+    for (const before of [
+      "<CodeBlock />",
+      '<CodeBlock language="typescript" />',
+      "<WritingBlock />",
+      "<AppBlock />",
+      '<escape char="\\\\">\u003c/escape>\u0020',
+      "<escape />",
+      "<div />",
+      "<br>",
+    ]) {
+      expect(normalize(before + "\n" + card)).toContain("t3-card");
+    }
+  });
+
   it("still renders independent cards after a completed invalid card", () => {
     const output = normalize("<card padding={2}><title>Unsupported</title></card>\n" + card);
     expect(output.match(/t3-card/g)).toHaveLength(1);
