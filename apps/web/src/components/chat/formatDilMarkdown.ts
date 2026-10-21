@@ -66,7 +66,8 @@ function closingInlineCode(text: string, start: number, ticks: number): number {
   while ((candidate = text.indexOf("`", candidate)) >= 0) {
     let end = candidate + 1;
     while (text[end] === "`") end++;
-    if (end - candidate === ticks && !isEscapedTick(text, candidate)) return end;
+    // Backslashes within a code span are literal, not closing-delimiter escapes.
+    if (end - candidate === ticks) return end;
     candidate = end;
   }
   return -1;
@@ -82,22 +83,21 @@ function formatOutsideFence(text: string): string {
       // consume a later complete link or rescan every remaining prefix.
       const next = text.indexOf(URL_START, cursor + URL_START.length);
       const limit = next < 0 ? text.length : next;
-      const split = text.indexOf(URL_SEPARATOR, cursor + URL_START.length);
-      const end =
-        split < 0 || split >= limit ? -1 : text.indexOf(URL_END, split + URL_SEPARATOR.length);
-      const extra =
-        split < 0 || split >= limit
-          ? -1
-          : text.indexOf(URL_SEPARATOR, split + URL_SEPARATOR.length);
-      if (end < 0 || end >= limit || (extra >= 0 && extra < end)) {
-        result += text.slice(cursor, limit);
+      // Search only this bounded token; an incomplete reference must not scan
+      // through every subsequent reference in the message.
+      const segment = text.slice(cursor, limit);
+      const split = segment.indexOf(URL_SEPARATOR, URL_START.length);
+      const end = split < 0 ? -1 : segment.indexOf(URL_END, split + URL_SEPARATOR.length);
+      const extra = split < 0 ? -1 : segment.indexOf(URL_SEPARATOR, split + URL_SEPARATOR.length);
+      if (end < 0 || (extra >= 0 && extra < end)) {
+        result += segment;
         cursor = limit;
         continue;
       }
-      const label = markdownLabel(text.slice(cursor + URL_START.length, split));
-      const destination = text.slice(split + URL_SEPARATOR.length, end);
+      const label = markdownLabel(segment.slice(URL_START.length, split));
+      const destination = segment.slice(split + URL_SEPARATOR.length, end);
       result += safeLink(label, destination);
-      cursor = end + URL_END.length;
+      cursor += end + URL_END.length;
       // Historical malformed fallbacks duplicated the reference into a
       // broken Markdown destination. Retain only the bold closing delimiter.
       const suffix = DAMAGED_LINK_SUFFIX.exec(text.slice(cursor, cursor + 4096));

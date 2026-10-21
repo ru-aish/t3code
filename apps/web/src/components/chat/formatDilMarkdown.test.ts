@@ -139,6 +139,20 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(formatDilMarkdown(source)).toContain("[real](<https://example.com/>)");
   });
 
+  it("recognizes closing backticks preceded by literal backslashes within code", () => {
+    const tick = String.fromCharCode(96);
+    const source = [tick, "abc \\", tick, " urlOutsidehttps://good.test ", tick, "tail", tick].join("");
+    expect(formatDilMarkdown(source)).toContain("[Outside](<https://good.test/>)");
+  });
+
+  it("avoids quadratic rescanning on 12,000 incomplete URL markers", () => {
+    const incomplete = "urlbrokenhttps://a.test ".repeat(12_000);
+    const started = performance.now();
+    const output = formatDilMarkdown(incomplete);
+    expect(output).toBe(incomplete);
+    expect(performance.now() - started).toBeLessThan(1_100);
+  });
+
   it("scans thousands of incomplete prefixes in bounded time", () => {
     const broken = "urlbrokenhttps://one.test ".repeat(2_000);
     const source = broken + "urlvalidhttps://two.test";
