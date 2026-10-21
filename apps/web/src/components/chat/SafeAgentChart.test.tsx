@@ -159,6 +159,80 @@ describe("safe ChatGPT chart previews", () => {
     expect(markup).not.toContain('cy="Infinity"');
   });
 
+  it("clips large numeric values to narrow explicit axis bounds without invalid SVG geometry", () => {
+    for (const layout of [undefined, "vertical"] as const) {
+      const source = JSON.stringify({
+        chartType: layout ? "bar" : "line",
+        ...(layout ? { layout } : {}),
+        xKey: "year",
+        yAxisMin: 0,
+        yAxisMax: 1e-308,
+        series: [{ dataKey: "value" }],
+        data: [
+          { year: "A", value: 1e308 },
+          { year: "B", value: 5e307 },
+        ],
+      });
+      const markup = renderToStaticMarkup(<SafeAgentChart source={source} />);
+      expect(markup).not.toContain("NaN");
+      expect(markup).not.toContain('="Infinity"');
+      expect(markup).not.toContain('="-Infinity"');
+      expect(markup).toContain("<svg");
+    }
+    const bar = JSON.stringify({
+      chartType: "bar",
+      yAxisMin: 0,
+      yAxisMax: 1e-308,
+      series: [{ dataKey: "value" }],
+      data: [{ x: "A", value: 1e308 }],
+    });
+    const markup = renderToStaticMarkup(<SafeAgentChart source={bar} />);
+    expect(markup).not.toContain('height="Infinity"');
+  });
+
+  it("renders both axis labels on horizontal-bar layouts", () => {
+    const source = JSON.stringify({
+      chartType: "bar",
+      layout: "vertical",
+      xKey: "store",
+      xAxisLabel: "Sales in dollars",
+      axisLabel: "Store",
+      series: [{ dataKey: "sales" }],
+      data: [
+        { store: "East", sales: 12 },
+        { store: "West", sales: 7 },
+      ],
+    });
+    const markup = renderToStaticMarkup(<SafeAgentChart source={source} />);
+    expect(markup).toContain("Sales in dollars");
+    expect(markup).toContain(">Store</text>");
+  });
+
+  it("reports numeric subtotals for grouped pie categories", () => {
+    const source = JSON.stringify({
+      chartType: "pie",
+      nameKey: "name",
+      valueKey: "value",
+      series: [{ dataKey: "value" }],
+      data: Array.from({ length: 25 }, (_, index) => ({
+        name: `Category ${index + 1}`,
+        value: index < 19 ? 1 : 10,
+      })),
+    });
+    const markup = renderToStaticMarkup(<SafeAgentChart source={source} />);
+    expect(markup).toContain("Other (6): 60 (75.95%)");
+    const overflow = JSON.stringify({
+      chartType: "pie",
+      nameKey: "name",
+      valueKey: "value",
+      series: [{ dataKey: "value" }],
+      data: Array.from({ length: 25 }, (_, index) => ({ name: `${index}`, value: 1e308 })),
+    });
+    expect(renderToStaticMarkup(<SafeAgentChart source={overflow} />)).toContain(
+      "Other (6): Total exceeds numeric range",
+    );
+  });
+
   it("escapes hostile labels and never interprets HTML as markup", () => {
     const value = JSON.stringify({
       chartType: "bar",

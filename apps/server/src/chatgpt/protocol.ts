@@ -196,6 +196,21 @@ export function normalizeStreamMessage(
   function chartSnapshots(source: string): Array<{ json: string; start: number; end: number }> {
     if (!source.includes("<Chart") || source.length > 500_000) return [];
     const protectedRanges = markdownCodeRanges(source);
+    // Literal DIL bodies and HTML comments must never turn into live charts.
+    // An unfinished raw block remains protected through the stream's current end.
+    for (const comment of source.matchAll(/<!--[\s\S]*?(?:-->|$)/g)) {
+      protectedRanges.push({ start: comment.index, end: comment.index + comment[0].length });
+    }
+    const rawOpening = /<(CodeBlock|WritingBlock|AppBlock|escape)\b[^>]*>/g;
+    let raw: RegExpExecArray | null;
+    while ((raw = rawOpening.exec(source))) {
+      if (protectedRanges.some((r) => raw!.index >= r.start && raw!.index < r.end)) continue;
+      const closing = `</${raw[1]}>`;
+      const closeAt = source.indexOf(closing, rawOpening.lastIndex);
+      const end = closeAt < 0 ? source.length : closeAt + closing.length;
+      protectedRanges.push({ start: raw.index, end });
+      rawOpening.lastIndex = end;
+    }
     const ticks: RegExpExecArray[] = [];
     const tickPattern = /`+/g;
     let tick: RegExpExecArray | null;
@@ -285,10 +300,37 @@ export function normalizeStreamMessage(
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
   let displayText = (isFinal && fallback?.trim()) || originalText || fallback || "";
+  const chartFence = (json: string) => `\n\n\`\`\`t3-chart\n${json}\n\`\`\`\n\n`;
   if (charts.length > 0 && !(isFinal && fallback?.trim())) {
-    // Omit the original JSX props: only the validated chart JSON is rendered.
+    // Replace at the original offsets before degrading surrounding DIL markup.
     for (const chart of charts.toReversed()) {
-      displayText = displayText.slice(0, chart.start) + displayText.slice(chart.end);
+      displayText =
+        displayText.slice(0, chart.start) + chartFence(chart.json) + displayText.slice(chart.end);
+    }
+  } else if (charts.length > 0) {
+    // Prefer the official Markdown fallback, anchoring a chart beside matching
+    // nearby visible text when the fallback retains it. Do not guess positions
+    // when the fallback has substantially rewritten its prose.
+    let searchFrom = 0;
+    for (const chart of charts) {
+      const before = originalText
+        .slice(Math.max(0, chart.start - 256), chart.start)
+        .replace(/<[^>]*>/g, "")
+        .trim()
+        .slice(-120);
+      let insertAt = -1;
+      for (let len = before.length; len >= 12; len--) {
+        const anchor = before.slice(-len);
+        const hit = displayText.indexOf(anchor, searchFrom);
+        if (hit >= 0) {
+          insertAt = hit + anchor.length;
+          break;
+        }
+      }
+      if (insertAt < 0) insertAt = displayText.length;
+      const fence = chartFence(chart.json);
+      displayText = displayText.slice(0, insertAt) + fence + displayText.slice(insertAt);
+      searchFrom = insertAt + fence.length;
     }
   }
   if (
@@ -475,9 +517,6 @@ export function normalizeStreamMessage(
       })
       .join("")
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
-  }
-  if (charts.length > 0) {
-    displayText += charts.map((chart) => "\n\n```t3-chart\n" + chart.json + "\n```").join("");
   }
   return {
     messageId: message.id,

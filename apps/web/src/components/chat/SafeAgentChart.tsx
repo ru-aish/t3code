@@ -140,13 +140,15 @@ function PieChart({ spec }: { spec: Spec }) {
   const totalWeight = all.reduce((sum, entry) => sum + entry.weight, 0);
   // Include every data row in the pie total, even when only 20 slices fit.
   const grouped = all.length > 20;
+  const otherValues = all.slice(19);
+  const otherTotal = otherValues.reduce((sum, entry) => sum + entry.value, 0);
   const entries: Array<{ name: string; value: number | null; weight: number }> = grouped
     ? [
         ...all.slice(0, 19),
         {
           name: `Other (${all.length - 19})`,
-          value: null,
-          weight: all.slice(19).reduce((sum, entry) => sum + entry.weight, 0),
+          value: Number.isFinite(otherTotal) ? otherTotal : null,
+          weight: otherValues.reduce((sum, entry) => sum + entry.weight, 0),
         },
       ]
     : all;
@@ -187,7 +189,7 @@ function PieChart({ spec }: { spec: Spec }) {
             stroke="var(--background)"
             strokeWidth="2"
           >
-            <title>{`${entry.name}: ${entry.value === null ? "" : `${format(entry.value, spec.series[0])} `}(${NUMBER.format((entry.weight / totalWeight) * 100)}%)`}</title>
+            <title>{`${entry.name}: ${entry.value === null ? "Total exceeds numeric range " : `${format(entry.value, spec.series[0])} `}(${NUMBER.format((entry.weight / totalWeight) * 100)}%)`}</title>
           </path>
         );
       })}
@@ -221,8 +223,10 @@ function CartesianChart({ spec }: { spec: Spec }) {
   const high = spec.yAxisMax ?? Math.max(0, ...values);
   const scale = Math.max(1, Math.abs(low), Math.abs(high));
   const range = high / scale - low / scale || 1;
-  const y = (value: number) =>
-    TOP + PLOT_HEIGHT - ((value / scale - low / scale) / range) * PLOT_HEIGHT;
+  const y = (value: number) => {
+    const clipped = Math.max(low, Math.min(high, value));
+    return TOP + PLOT_HEIGHT - ((clipped / scale - low / scale) / range) * PLOT_HEIGHT;
+  };
   const xKey = spec.xKey || "x";
   const xValues = rows.map((row) => numeric(row[xKey]) ?? 0);
   const xMin = Math.min(...xValues);
@@ -402,7 +406,10 @@ function VerticalBarChart({ spec }: { spec: Spec }) {
   const high = spec.yAxisMax ?? Math.max(0, ...values);
   const scale = Math.max(1, Math.abs(low), Math.abs(high));
   const range = high / scale - low / scale || 1;
-  const x = (value: number) => LEFT + ((value / scale - low / scale) / range) * PLOT_WIDTH;
+  const x = (value: number) => {
+    const clipped = Math.max(low, Math.min(high, value));
+    return LEFT + ((clipped / scale - low / scale) / range) * PLOT_WIDTH;
+  };
   const baseline = x(Math.min(high, Math.max(low, 0)));
   const groupHeight = PLOT_HEIGHT / rows.length;
   const barHeight = Math.min(24, (groupHeight * 0.75) / spec.series.length);
@@ -491,6 +498,31 @@ function VerticalBarChart({ spec }: { spec: Spec }) {
           );
         }),
       )}
+      {spec.xAxisLabel ? (
+        <text
+          x={LEFT + PLOT_WIDTH / 2}
+          y={HEIGHT - 7}
+          textAnchor="middle"
+          fill="currentColor"
+          opacity=".8"
+          fontSize="12"
+        >
+          {spec.xAxisLabel}
+        </text>
+      ) : null}
+      {spec.axisLabel ? (
+        <text
+          x="14"
+          y={TOP + PLOT_HEIGHT / 2}
+          transform={`rotate(-90 14 ${TOP + PLOT_HEIGHT / 2})`}
+          textAnchor="middle"
+          fill="currentColor"
+          opacity=".8"
+          fontSize="12"
+        >
+          {spec.axisLabel}
+        </text>
+      ) : null}
     </svg>
   );
 }

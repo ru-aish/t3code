@@ -624,6 +624,44 @@ describe("ChatGPT rich chart preservation", () => {
     expect(normalize('<Chart content={{"chartType":"bar","data":[]}}', "Plain")).toBe("Plain");
   });
 
+  it("keeps inline charts where they appeared in the answer, not at the end", () => {
+    const content = `Before the chart.\n<Chart content={${JSON.stringify(chart)}} />\nAfter the chart.`;
+    const result = normalize(content) ?? "";
+    expect(result.indexOf("Before the chart.")).toBeLessThan(result.indexOf("```t3-chart"));
+    expect(result.indexOf("```t3-chart")).toBeLessThan(result.indexOf("After the chart."));
+    expect(result.split("```t3-chart")).toHaveLength(2);
+  });
+
+  it("anchors charts beside matching fallback prose when both are available", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />\nOur outlook remains positive.`;
+    const result =
+      normalize(content, "Monthly sales rose steadily.\n\nOur outlook remains positive.") ?? "";
+    expect(result.indexOf("Monthly sales rose steadily.")).toBeLessThan(
+      result.indexOf("```t3-chart"),
+    );
+    expect(result.indexOf("```t3-chart")).toBeLessThan(
+      result.indexOf("Our outlook remains positive."),
+    );
+  });
+
+  it("does not preview chart-looking markup in literal DIL blocks or HTML comments", () => {
+    const literal = `<Chart content={${JSON.stringify(chart)}} />`;
+    for (const content of [
+      `<CodeBlock language="jsx">${literal}</CodeBlock>`,
+      `<escape>${literal}</escape>`,
+      `<!-- ${literal} -->`,
+      `<WritingBlock variant="document">${literal}</WritingBlock>`,
+      `<AppBlock>${literal}</AppBlock>`,
+      `<CodeBlock>${literal}`,
+      `<!-- ${literal}`,
+    ]) {
+      expect(normalize(content, "A plain text example.")).toBe("A plain text example.");
+    }
+    expect(normalize(`<CodeBlock>Example</CodeBlock>\n${literal}`, "A real chart")).toContain(
+      "```t3-chart",
+    );
+  });
+
   it("retains complete snapshots during partial final streaming", () => {
     expect(normalize(source.slice(0, source.indexOf("/>")), "Fallback")).toBe("Fallback");
     expect(normalize(source, "Fallback")).toContain("t3-chart");
