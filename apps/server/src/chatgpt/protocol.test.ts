@@ -662,6 +662,49 @@ describe("ChatGPT rich chart preservation", () => {
     );
   });
 
+  it("does not let a fenced HTML-comment example hide a real chart", () => {
+    const real = `<Chart content={${JSON.stringify(chart)}} />`;
+    const content = `\`\`\`html\n<!--\n\`\`\`\n\nHere is the real chart.\n${real}`;
+    const result = normalize(content, "Here is the real chart.") ?? "";
+    expect(result).toContain("Here is the real chart.");
+    expect(result).toContain("```t3-chart");
+  });
+
+  it("does not anchor fallback charts inside fenced or inline code", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    for (const fallback of [
+      "```text\nMonthly sales rose steadily.\n```\n\nMonthly sales rose steadily.\nOur outlook remains positive.",
+      "`Monthly sales rose steadily.`\n\nMonthly sales rose steadily.\nOur outlook remains positive.",
+    ]) {
+      const result = normalize(content, fallback) ?? "";
+      expect(result.indexOf("```t3-chart")).toBeGreaterThan(
+        result.lastIndexOf("Monthly sales rose steadily."),
+      );
+      expect(result.indexOf("```t3-chart")).toBeLessThan(
+        result.indexOf("Our outlook remains positive."),
+      );
+    }
+  });
+
+  it("does not treat comment-shaped strings inside chart data as real comments", () => {
+    const data = {
+      ...chart,
+      data: [{ month: "<!-- unclosed literal comment", sales: 10 }],
+    };
+    const content = `<Chart content={${JSON.stringify(data)}} />`;
+    expect(normalize(content, "Data chart")).toContain("```t3-chart");
+    const next = `<Chart content={${JSON.stringify(chart)}} />`;
+    expect(normalize(content + "\n" + next, "Charts")).toContain(
+      `\`\`\`t3-chart\n${JSON.stringify(chart)}`,
+    );
+  });
+
+  it("keeps extraction correct across thousands of literal raw blocks", () => {
+    const literals = "<CodeBlock>not a chart</CodeBlock>\n".repeat(8_000);
+    const result = normalize(literals + `<Chart content={${JSON.stringify(chart)}} />`, "Chart");
+    expect(result?.split("```t3-chart")).toHaveLength(2);
+  });
+
   it("retains complete snapshots during partial final streaming", () => {
     expect(normalize(source.slice(0, source.indexOf("/>")), "Fallback")).toBe("Fallback");
     expect(normalize(source, "Fallback")).toContain("t3-chart");

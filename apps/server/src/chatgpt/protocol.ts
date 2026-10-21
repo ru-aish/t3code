@@ -167,6 +167,73 @@ export function normalizeStreamMessage(
     return ranges;
   }
 
+  type Span = { start: number; end: number };
+
+  function inRanges(ranges: Span[], position: number): boolean {
+    let low = 0;
+    let high = ranges.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (ranges[mid]!.end <= position) low = mid + 1;
+      else high = mid;
+    }
+    return low < ranges.length && ranges[low]!.start <= position;
+  }
+
+  function intersectsRanges(ranges: Span[], start: number, end: number): boolean {
+    let low = 0;
+    let high = ranges.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (ranges[mid]!.end <= start) low = mid + 1;
+      else high = mid;
+    }
+    return low < ranges.length && ranges[low]!.start < end;
+  }
+
+  function mergeRanges(ranges: Span[]): Span[] {
+    const merged: Span[] = [];
+    for (const span of ranges.toSorted((a, b) => a.start - b.start)) {
+      const last = merged[merged.length - 1];
+      if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+      else merged.push({ ...span });
+    }
+    return merged;
+  }
+
+  function markdownLiteralRanges(text: string): Span[] {
+    const blocks = markdownCodeRanges(text);
+    const ticks: RegExpExecArray[] = [];
+    const tickPattern = /`+/g;
+    let tick: RegExpExecArray | null;
+    while ((tick = tickPattern.exec(text))) {
+      ticks.push(tick);
+      // A pathological answer is safer without chart extraction/anchoring.
+      if (ticks.length > 1_000) return [{ start: 0, end: text.length }];
+    }
+    const nextCloser = new Map<number, number>();
+    const nextEnd = new Map<number, number>();
+    for (let index = ticks.length - 1; index >= 0; index--) {
+      const run = ticks[index]!;
+      nextCloser.set(run.index, nextEnd.get(run[0].length) ?? -1);
+      nextEnd.set(run[0].length, run.index + run[0].length);
+    }
+    const inline: Span[] = [];
+    let until = -1;
+    for (const run of ticks) {
+      if (run.index < until || inRanges(blocks, run.index)) continue;
+      let slashes = 0;
+      for (let i = run.index - 1; i >= 0 && text[i] === "\\"; i--) slashes++;
+      if (slashes % 2) continue;
+      const closing = nextCloser.get(run.index) ?? -1;
+      if (closing > run.index && !intersectsRanges(blocks, run.index, closing)) {
+        inline.push({ start: run.index, end: closing });
+        until = closing;
+      }
+    }
+    return mergeRanges([...blocks, ...inline]);
+  }
+
   type Message = {
     message?: Message;
     data?: Message;
@@ -195,61 +262,63 @@ export function normalizeStreamMessage(
   // validated JSON snapshots without interpreting any executable DIL syntax.
   function chartSnapshots(source: string): Array<{ json: string; start: number; end: number }> {
     if (!source.includes("<Chart") || source.length > 500_000) return [];
-    const protectedRanges = markdownCodeRanges(source);
-    // Literal DIL bodies and HTML comments must never turn into live charts.
-    // An unfinished raw block remains protected through the stream's current end.
-    for (const comment of source.matchAll(/<!--[\s\S]*?(?:-->|$)/g)) {
-      protectedRanges.push({ start: comment.index, end: comment.index + comment[0].length });
+    // Collect protected ranges in source order. Raw blocks and comments are
+    // skipped as complete units; membership checks use a sorted code-span index.
+    const literalRanges = markdownLiteralRanges(source);
+    const rawRanges: Span[] = [];
+    const rawOpening = /<!--|<Chart(?=[\s/>])|<(CodeBlock|WritingBlock|AppBlock|escape)\b[^>]*>/g;
+    function chartTagEnd(offset: number): number {
+      const opening = /^<Chart\s+content=\{/.exec(source.slice(offset, offset + 64));
+      if (!opening) return -1;
+      let depth = 1;
+      let quote: string | null = null;
+      let escaped = false;
+      const start = offset + opening[0].length;
+      for (let i = start; i < source.length && i - start <= 30_000; i++) {
+        const ch = source[i]!;
+        if (quote) {
+          if (escaped) escaped = false;
+          else if (ch === "\\") escaped = true;
+          else if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") {
+          quote = ch;
+        } else if (ch === "{") {
+          depth++;
+        } else if (ch === "}" && --depth === 0) {
+          const closing = /^\s*\/>/.exec(source.slice(i + 1, i + 16));
+          return closing ? i + 1 + closing[0].length : -1;
+        }
+      }
+      return -1;
     }
-    const rawOpening = /<(CodeBlock|WritingBlock|AppBlock|escape)\b[^>]*>/g;
     let raw: RegExpExecArray | null;
     while ((raw = rawOpening.exec(source))) {
-      if (protectedRanges.some((r) => raw!.index >= r.start && raw!.index < r.end)) continue;
-      const closing = `</${raw[1]}>`;
-      const closeAt = source.indexOf(closing, rawOpening.lastIndex);
-      const end = closeAt < 0 ? source.length : closeAt + closing.length;
-      protectedRanges.push({ start: raw.index, end });
+      if (inRanges(literalRanges, raw.index)) continue;
+      if (raw[0] === "<Chart") {
+        // Comment-like strings in a complete chart's JSON are data, not markup.
+        const end = chartTagEnd(raw.index);
+        if (end > 0) rawOpening.lastIndex = end;
+        continue;
+      }
+      let end: number;
+      if (raw[0] === "<!--") {
+        const closeAt = source.indexOf("-->", rawOpening.lastIndex);
+        end = closeAt < 0 ? source.length : closeAt + 3;
+      } else {
+        const closing = `</${raw[1]}>`;
+        const closeAt = source.indexOf(closing, rawOpening.lastIndex);
+        end = closeAt < 0 ? source.length : closeAt + closing.length;
+      }
+      rawRanges.push({ start: raw.index, end });
       rawOpening.lastIndex = end;
     }
-    const ticks: RegExpExecArray[] = [];
-    const tickPattern = /`+/g;
-    let tick: RegExpExecArray | null;
-    while ((tick = tickPattern.exec(source))) {
-      ticks.push(tick);
-      if (ticks.length > 1_000) return [];
-    }
-    const nextCloser = new Map<number, number>();
-    const nextEnd = new Map<number, number>();
-    for (let index = ticks.length - 1; index >= 0; index--) {
-      const run = ticks[index]!;
-      nextCloser.set(run.index, nextEnd.get(run[0].length) ?? -1);
-      nextEnd.set(run[0].length, run.index + run[0].length);
-    }
-    let until = -1;
-    for (const run of ticks) {
-      if (
-        run.index < until ||
-        protectedRanges.some((r) => run.index >= r.start && run.index < r.end)
-      )
-        continue;
-      let slashes = 0;
-      for (let i = run.index - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
-      if (slashes % 2) continue;
-      const closing = nextCloser.get(run.index) ?? -1;
-      if (
-        closing > run.index &&
-        !protectedRanges.some((r) => r.start > run.index && r.start < closing)
-      ) {
-        protectedRanges.push({ start: run.index, end: closing });
-        until = closing;
-      }
-    }
+    const protectedRanges = mergeRanges([...literalRanges, ...rawRanges]);
     const charts: Array<{ json: string; start: number; end: number }> = [];
     const marker = /<Chart(?=[\s/>])/g;
     let match: RegExpExecArray | null;
     while ((match = marker.exec(source)) && charts.length < 8) {
       const offset = match.index;
-      if (protectedRanges.some((range) => offset >= range.start && offset < range.end)) continue;
+      if (inRanges(protectedRanges, offset)) continue;
       let slashes = 0;
       for (let i = offset - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
       if (slashes % 2) continue;
@@ -318,13 +387,17 @@ export function normalizeStreamMessage(
         .replace(/<[^>]*>/g, "")
         .trim()
         .slice(-120);
+      const protectedFallback = markdownLiteralRanges(displayText);
       let insertAt = -1;
-      for (let len = before.length; len >= 12; len--) {
+      for (let len = before.length; len >= 12 && insertAt < 0; len--) {
         const anchor = before.slice(-len);
-        const hit = displayText.indexOf(anchor, searchFrom);
-        if (hit >= 0) {
-          insertAt = hit + anchor.length;
-          break;
+        let hit = displayText.indexOf(anchor, searchFrom);
+        while (hit >= 0) {
+          if (!intersectsRanges(protectedFallback, hit, hit + anchor.length)) {
+            insertAt = hit + anchor.length;
+            break;
+          }
+          hit = displayText.indexOf(anchor, hit + 1);
         }
       }
       if (insertAt < 0) insertAt = displayText.length;
