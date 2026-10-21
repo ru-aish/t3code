@@ -46,21 +46,77 @@ export function normalizeStreamMessage(
     let plainStart = 0;
     while (cursor < displayText.length) {
       const nextTag = displayText.indexOf("<", cursor);
-      const nextFence = displayText.indexOf("```", cursor);
-      if (nextTag < 0 && nextFence < 0) break;
-      if (nextFence >= 0 && (nextTag < 0 || nextFence < nextTag)) {
-        const fenceEnd = displayText.indexOf("```", nextFence + 3);
-        if (fenceEnd < 0) {
-          if (plainStart < nextFence)
-            sections.push({ kind: "text", value: displayText.slice(plainStart, nextFence) });
-          sections.push({ kind: "code", value: displayText.slice(nextFence) });
-          plainStart = displayText.length;
-          break;
+      const nextTick = displayText.indexOf("`", cursor);
+      const nextTilde = displayText.indexOf("~", cursor);
+      const nextCode =
+        nextTick < 0 ? nextTilde : nextTilde < 0 ? nextTick : Math.min(nextTick, nextTilde);
+      if (nextTag < 0 && nextCode < 0) break;
+      if (nextCode >= 0 && (nextTag < 0 || nextCode < nextTag)) {
+        const marker = displayText[nextCode]!;
+        let runEnd = nextCode + 1;
+        while (displayText[runEnd] === marker) runEnd++;
+        const runLength = runEnd - nextCode;
+        const lineStart = displayText.lastIndexOf("\n", nextCode - 1) + 1;
+        const prefix = displayText.slice(lineStart, nextCode);
+        const atFenceStart =
+          runLength >= 3 &&
+          prefix.length <= 3 &&
+          /^ *$/.test(prefix) &&
+          (marker === "~" ||
+            !displayText
+              .slice(
+                runEnd,
+                displayText.indexOf("\n", runEnd) < 0
+                  ? displayText.length
+                  : displayText.indexOf("\n", runEnd),
+              )
+              .includes("`"));
+        let codeEnd = -1;
+        if (atFenceStart) {
+          // Fences close only at the start of a line with an equal-or-longer
+          // run. Backticks inside JavaScript strings are not fence closers.
+          let line = displayText.indexOf("\n", runEnd);
+          while (line >= 0) {
+            const start = line + 1;
+            const lineEnd = displayText.indexOf("\n", start);
+            const end = lineEnd < 0 ? displayText.length : lineEnd;
+            const candidate = displayText.slice(start, end);
+            const close = /^ {0,3}([`~]{3,})[ \t]*\r?$/.exec(candidate);
+            if (close && close[1]![0] === marker && close[1]!.length >= runLength) {
+              codeEnd = lineEnd < 0 ? end : lineEnd + 1;
+              break;
+            }
+            line = lineEnd;
+          }
+          if (codeEnd < 0) codeEnd = displayText.length;
+        } else if (marker === "`") {
+          // An escaped opening delimiter is ordinary Markdown text. Once a
+          // code span opens, backslashes are literal (even before its closer).
+          let slashes = 0;
+          for (let i = nextCode - 1; i >= 0 && displayText[i] === "\\"; i--) slashes++;
+          if (slashes % 2 === 0) {
+            let seek = runEnd;
+            while ((seek = displayText.indexOf("`", seek)) >= 0) {
+              let closeEnd = seek + 1;
+              while (displayText[closeEnd] === "`") closeEnd++;
+              if (closeEnd - seek === runLength) {
+                codeEnd = closeEnd;
+                break;
+              }
+              seek = closeEnd;
+            }
+          }
+          // Preserve unfinished multiline code while new tokens stream in.
+          if (codeEnd < 0 && runLength >= 3) codeEnd = displayText.length;
         }
-        if (plainStart < nextFence)
-          sections.push({ kind: "text", value: displayText.slice(plainStart, nextFence) });
-        sections.push({ kind: "code", value: displayText.slice(nextFence, fenceEnd + 3) });
-        cursor = fenceEnd + 3;
+        if (codeEnd < 0) {
+          cursor = runEnd;
+          continue;
+        }
+        if (plainStart < nextCode)
+          sections.push({ kind: "text", value: displayText.slice(plainStart, nextCode) });
+        sections.push({ kind: "code", value: displayText.slice(nextCode, codeEnd) });
+        cursor = codeEnd;
         plainStart = cursor;
         continue;
       }
@@ -108,7 +164,7 @@ export function normalizeStreamMessage(
         if (tagEnd < 0) break;
         if (svgTag) {
           let last = tagEnd - 1;
-          while (last > lt && /\s/.test(displayText[last])) last--;
+          while (last > lt && /\s/.test(displayText[last]!)) last--;
           if (svgTag[1]) {
             depth--;
             if (depth === 0) {

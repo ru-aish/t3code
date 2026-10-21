@@ -141,6 +141,70 @@ describe("ChatGPT protocol", () => {
     expect(output).toBe(fenced);
   });
 
+  it("does not extract SVG inside single- and double-backtick inline code", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>';
+    for (const ticks of ["`", "``"]) {
+      const sample = "The literal is " + ticks + svg + ticks + ".";
+      expect(
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [sample] },
+          },
+        }).text,
+      ).toBe(sample);
+    }
+  });
+
+  it("leaves SVG examples in tilde fences untouched", () => {
+    const sample = '~~~xml\n<svg><circle r="1"/></svg>\n~~~\nAfter.';
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [sample] } },
+      }).text,
+    ).toBe(sample);
+  });
+
+  it("requires real fence-closing lines for four-backtick fences", () => {
+    const sample = [
+      "````js",
+      'const delimiter = "```";',
+      "<svg><circle r='1'/></svg>",
+      "`````",
+      "After.",
+    ].join("\n");
+    expect(
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [sample] } },
+      }).text,
+    ).toBe(sample);
+  });
+
+  it("preserves code then renders following SVG normally", () => {
+    const code = "~~~xml\n<svg><circle r='1'/></svg>\n~~~";
+    const svg = "<svg><circle r='2'/></svg>";
+    const output = normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [code + "\n\n" + svg] },
+      },
+    }).text;
+    expect(output).toContain(code);
+    expect(output).toContain("```svg\n" + svg + "\n```");
+  });
+
+  it("does not treat backslash before closing inline tick as an escape", () => {
+    const tick = String.fromCharCode(96);
+    const sample = [tick, "C:\\Users\\", tick, " <svg><circle r='1'/></svg>"].join("");
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [sample] } },
+    }).text;
+    expect(output).toContain(tick + "C:\\Users\\" + tick);
+    expect(output).toContain("```svg\n<svg><circle r='1'/></svg>\n```");
+  });
+
   it("supports self-closing SVG with whitespace", () => {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" />';
     const output = normalizeStreamMessage({
