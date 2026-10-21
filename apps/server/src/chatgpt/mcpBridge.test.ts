@@ -30,10 +30,7 @@ const session = {
 
 const withInvocation = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
-    Effect.provideService(HostProcess.Arguments, [
-      process.execPath,
-      serverBinPath,
-    ]),
+    Effect.provideService(HostProcess.Arguments, [process.execPath, serverBinPath]),
     Effect.provideService(HostProcess.ExecutablePath, process.execPath),
     Effect.provideService(HostProcess.IsExecutable, false),
   );
@@ -121,9 +118,7 @@ describe("ChatGPT orchestration attachment", () => {
             expect(command).toContain(
               "Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue",
             );
-            expect(command).toContain(
-              "$env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode",
-            );
+            expect(command).toContain("$env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode");
             expect(command).toContain("$global:LASTEXITCODE = $exitCode");
             expect(command).toContain(
               'if ($exitCode -ne 0) { throw "T3 MCP bridge failed with exit code $exitCode." }',
@@ -171,14 +166,28 @@ describe("ChatGPT orchestration attachment", () => {
                         capabilities: {},
                         serverInfo: { name: "test", version: "1" },
                       }
-                    : {
-                        content: [],
-                        structuredContent: {
-                          taskId: "task-one",
-                          childThreadId: "child-thread",
-                          status: "running",
+                    : message.method === "tools/list"
+                      ? {
+                          tools: [
+                            {
+                              name: "preview_open",
+                              description: "Open a collaborative browser tab",
+                              inputSchema: {
+                                type: "object",
+                                properties: { open: { type: "boolean" } },
+                              },
+                            },
+                            { name: "delegate_task", inputSchema: { type: "object" } },
+                          ],
+                        }
+                      : {
+                          content: [],
+                          structuredContent: {
+                            taskId: "task-one",
+                            childThreadId: "child-thread",
+                            status: "running",
+                          },
                         },
-                      },
               }),
             );
           });
@@ -229,6 +238,32 @@ describe("ChatGPT orchestration attachment", () => {
           ).toBe(true);
           expect(headers[2]?.["mcp-session-id"]).toBe("negotiated-session");
           expect(headers[2]?.["mcp-protocol-version"]).toBe("2025-06-18");
+          const listed = yield* Effect.promise(() => exec(`${command} --list-tools '{}'`));
+          expect(JSON.parse(listed.stdout)).toEqual({
+            tools: [{ name: "preview_open" }, { name: "delegate_task" }],
+          });
+          const described = yield* Effect.promise(() =>
+            exec(`${command} --describe-tool '{"name":"preview_open"}'`),
+          );
+          expect(JSON.parse(described.stdout)).toMatchObject({
+            name: "preview_open",
+            description: "Open a collaborative browser tab",
+            inputSchema: { properties: { open: { type: "boolean" } } },
+          });
+          expect(calls.map((call) => call.method)).toEqual([
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+          ]);
+          expect(
+            headers.every((header) => header.authorization === session.authorizationHeader),
+          ).toBe(true);
         }),
       ).pipe(withInvocation, Effect.provide(layer)),
   );
