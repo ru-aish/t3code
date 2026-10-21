@@ -141,6 +141,24 @@ describe("ChatGPT protocol", () => {
     expect(output).toBe(fenced);
   });
 
+  it("preserves DIL download buttons with inline-code labels through normalization", () => {
+    const input = [
+      "<box>",
+      '<button onClick={()=>GenUI.openUrl("https://example.com/app")}>Download `App`</button>',
+      "</box>",
+    ].join("\n");
+    const output = normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [input] },
+      },
+    }).text;
+    expect(output).toContain("[Download `App`](https://example.com/app)");
+    expect(output).not.toContain("GenUI.openUrl");
+    expect(output).not.toContain("</button>");
+  });
+
   it("does not extract SVG inside single- and double-backtick inline code", () => {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>';
     for (const ticks of ["`", "``"]) {

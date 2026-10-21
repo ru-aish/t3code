@@ -125,6 +125,15 @@ export function normalizeStreamMessage(
         cursor = end < 0 ? displayText.length : end + 3;
         continue;
       }
+      if (/^<button(?=[\s/>])/i.test(displayText.slice(nextTag, nextTag + 8))) {
+        // Keep a complete DIL button together so inline-code ticks inside its
+        // label do not split the markup before the Markdown button fallback.
+        const buttonEnd = displayText.indexOf("</button>", nextTag);
+        if (buttonEnd >= 0) {
+          cursor = buttonEnd + "</button>".length;
+          continue;
+        }
+      }
       if (!/^<svg(?=[\s/>])/i.test(displayText.slice(nextTag, nextTag + 5))) {
         cursor = nextTag + 1;
         continue;
