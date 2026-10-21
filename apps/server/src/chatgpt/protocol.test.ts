@@ -84,6 +84,14 @@ describe("ChatGPT protocol", () => {
     expect(normalized.text).not.toContain("<box>");
   });
 
+  it("uses a longer fence when SVG content includes Markdown delimiters", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><text>```</text></svg>';
+    const normalized = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [svg] } },
+    });
+    expect(normalized.text).toContain(`\`\`\`\`svg\n${svg}\n\`\`\`\``);
+  });
+
   it("degrades a final DIL component into readable Markdown when no fallback exists", () => {
     const rich = [
       "## Ready",

@@ -43,30 +43,33 @@ export function normalizeStreamMessage(
       .split(/(```[\s\S]*?```)/g)
       .map((section, index) => {
         if (index % 2 === 1) return section;
-        // Preserve simple inline vector artwork as a fenced preview instead of
-        // exposing live SVG markup to the Markdown renderer.
-        const withSvg = section.replace(/<svg\b[\s\S]*?<\/svg\s*>/gi, (svg) => {
-          const longestTicks = Math.max(
-            2,
-            ...[...svg.matchAll(/`+/g)].map((match) => match[0].length),
-          );
-          const fence = "`".repeat(longestTicks + 1);
-          return `\n\n${fence}svg\n${svg}\n${fence}\n\n`;
-        });
-        const buttons = withSvg.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
-          const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
-          const openEnd =
-            button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
-          const label = button
-            .slice(openEnd, button.lastIndexOf("</button>"))
-            .replace(/<[^>]+>/g, "")
-            .trim();
-          return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
-        });
-        return buttons.replace(
-          /<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g,
-          "",
-        );
+        return section
+          .split(/(<svg\b[\s\S]*?<\/svg\s*>)/gi)
+          .map((part, svgIndex) => {
+            if (svgIndex % 2 === 1) {
+              let longestTicks = 2;
+              for (const match of part.matchAll(/`+/g)) {
+                longestTicks = Math.max(longestTicks, match[0].length);
+              }
+              const fence = "`".repeat(longestTicks + 1);
+              return `\n\n${fence}svg\n${part}\n${fence}\n\n`;
+            }
+            const buttons = part.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
+              const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
+              const openEnd =
+                button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
+              const label = button
+                .slice(openEnd, button.lastIndexOf("</button>"))
+                .replace(/<[^>]+>/g, "")
+                .trim();
+              return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
+            });
+            return buttons.replace(
+              /<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g,
+              "",
+            );
+          })
+          .join("");
       })
       .join("")
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
