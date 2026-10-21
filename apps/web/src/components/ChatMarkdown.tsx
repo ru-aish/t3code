@@ -468,10 +468,11 @@ function isClosedCodeFence(node: ReactMarkdownExtraProps["node"], text: string):
   const end = node?.position?.end.offset;
   if (start === undefined || end === undefined) return false;
   const source = text.slice(start, end);
-  const opening = /^(?:`{3,}|~{3,})/.exec(source)?.[0];
-  // One class for the blockquote prefix: nested quantifiers here backtrack
-  // exponentially on code lines that start with many `> ` markers.
-  const closing = /(?:^|\n)[ \t>]*(`{3,}|~{3,})[ \t\r]*$/.exec(source)?.[1];
+  // Only a real last-line closer counts. Four-space indentation must not
+  // unlock an incomplete code fence while the surrounding reply streams.
+  const opening = /^(?: {0,3}>[ \t]?)* {0,3}(`{3,}|~{3,})/.exec(source)?.[1];
+  const lastLine = source.slice(source.lastIndexOf("\n") + 1);
+  const closing = /^(?: {0,3}>[ \t]?)* {0,3}(`{3,}|~{3,})[ \t\r]*$/.exec(lastLine)?.[1];
   return (
     opening !== undefined &&
     closing !== undefined &&
@@ -985,6 +986,7 @@ function MarkdownDiagramCodeBlock({
   fenceTitle,
   theme,
   isStreaming,
+  isFenceClosed,
   sourceLabel,
   diagram,
   children,
@@ -994,6 +996,7 @@ function MarkdownDiagramCodeBlock({
   fenceTitle: string | null;
   theme: "light" | "dark";
   isStreaming: boolean;
+  isFenceClosed: boolean;
   sourceLabel: string;
   diagram: ReactNode;
   children: ReactNode;
@@ -1002,7 +1005,7 @@ function MarkdownDiagramCodeBlock({
   const searching = use(MarkdownFindContext);
   const revealSource = useCallback(() => setShowCode(true), []);
   const sourceRevealRef = useFindRevealRef(revealSource);
-  const showDiagram = !showCode && !isStreaming && code.trim().length > 0;
+  const showDiagram = !showCode && isFenceClosed && code.trim().length > 0;
   const toggleLabel = showCode ? sourceLabel : "Show code";
   return (
     <MarkdownCodeBlock
@@ -1014,7 +1017,7 @@ function MarkdownDiagramCodeBlock({
       canWrap={!showDiagram}
       diagram={showDiagram}
       viewToggle={
-        isStreaming ? null : (
+        isFenceClosed ? (
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1031,7 +1034,7 @@ function MarkdownDiagramCodeBlock({
             </TooltipTrigger>
             <TooltipPopup side="top">{toggleLabel}</TooltipPopup>
           </Tooltip>
-        )
+        ) : null
       }
     >
       {showDiagram ? (
@@ -1055,12 +1058,14 @@ function MarkdownSvgCodeBlock({
   fenceTitle,
   theme,
   isStreaming,
+  isFenceClosed,
   children,
 }: {
   code: string;
   fenceTitle: string | null;
   theme: "light" | "dark";
   isStreaming: boolean;
+  isFenceClosed: boolean;
   children: ReactNode;
 }) {
   return (
@@ -1070,6 +1075,7 @@ function MarkdownSvgCodeBlock({
       fenceTitle={fenceTitle}
       theme={theme}
       isStreaming={isStreaming}
+      isFenceClosed={isFenceClosed}
       sourceLabel="Show image"
       diagram={<SafeSvgDiagram source={code} />}
     >
@@ -1083,6 +1089,7 @@ function MarkdownMermaidCodeBlock({
   fenceTitle,
   theme,
   isStreaming,
+  isFenceClosed,
   onExpand,
   children,
 }: {
@@ -1090,6 +1097,7 @@ function MarkdownMermaidCodeBlock({
   fenceTitle: string | null;
   theme: "light" | "dark";
   isStreaming: boolean;
+  isFenceClosed: boolean;
   onExpand: (imageUrl: string) => void;
   children: ReactNode;
 }) {
@@ -1100,6 +1108,7 @@ function MarkdownMermaidCodeBlock({
       fenceTitle={fenceTitle}
       theme={theme}
       isStreaming={isStreaming}
+      isFenceClosed={isFenceClosed}
       sourceLabel="Show diagram"
       diagram={
         <RenderErrorBoundary resetKeys={[code, theme]} fallback={children}>
@@ -3328,6 +3337,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
+    const isFenceClosed = isClosedCodeFence(node, text);
     const highlightedCode = (
       <RenderErrorBoundary
         resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}
@@ -3356,6 +3366,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           fenceTitle={fenceTitle}
           theme={resolvedTheme}
           isStreaming={isStreaming}
+          isFenceClosed={isFenceClosed}
         >
           {highlightedCode}
         </MarkdownSvgCodeBlock>
@@ -3369,6 +3380,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           fenceTitle={fenceTitle}
           theme={resolvedTheme}
           isStreaming={isStreaming}
+          isFenceClosed={isFenceClosed}
           sourceLabel="Show chart"
           diagram={<SafeAgentChart source={codeBlock.code} />}
         >
@@ -3384,6 +3396,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           fenceTitle={fenceTitle}
           theme={resolvedTheme}
           isStreaming={isStreaming}
+          isFenceClosed={isFenceClosed}
           sourceLabel="Show card"
           diagram={<SafeAgentCard source={codeBlock.code} />}
         >
@@ -3398,6 +3411,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           fenceTitle={fenceTitle}
           theme={resolvedTheme}
           isStreaming={isStreaming}
+          isFenceClosed={isFenceClosed}
           onExpand={(src) => expandMedia({ images: [{ src, name: "Mermaid diagram" }], index: 0 })}
         >
           {highlightedCode}
@@ -3411,9 +3425,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
         fenceTitle={fenceTitle}
         theme={resolvedTheme}
         onRunShellCommand={
-          onRunShellCommand && !isStreaming && isClosedCodeFence(node, text)
-            ? onRunShellCommand
-            : undefined
+          onRunShellCommand && !isStreaming && isFenceClosed ? onRunShellCommand : undefined
         }
         isStreaming={isStreaming}
       >

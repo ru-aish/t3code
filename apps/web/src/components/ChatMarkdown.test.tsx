@@ -191,12 +191,146 @@ describe("ChatGPT static card Markdown preview", () => {
     expect(document.body.textContent).toContain("After.");
   });
 
-  it("does not preview cards while still streaming", () => {
+  it("previews closed cards while surrounding text is still streaming", () => {
     const document = new DOMParser().parseFromString(
       renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming />),
       "text/html",
     );
-    expect(document.querySelector("section[aria-labelledby]")).toBeNull();
+    expect(document.querySelector("section[aria-labelledby]")).not.toBeNull();
+    expect(document.body.textContent).toContain("After.");
+  });
+});
+
+describe("Closed-fence streaming visual previews", () => {
+  const backticks = String.fromCharCode(96).repeat(3);
+  const examples = [
+    {
+      language: "svg",
+      code: '<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>',
+      previewTag: "div",
+      previewAttribute: "aria-label",
+      previewValue: "SVG illustration",
+      sourceLabel: "Show image",
+    },
+    {
+      language: "t3-chart",
+      code: JSON.stringify({
+        chartType: "bar",
+        xKey: "month",
+        series: [{ dataKey: "sales", label: "Sales" }],
+        data: [{ month: "Jan", sales: 12 }],
+      }),
+      previewTag: "figure",
+      previewAttribute: "className",
+      previewValue: "",
+      sourceLabel: "Show chart",
+    },
+    {
+      language: "t3-card",
+      code: JSON.stringify({ items: [{ kind: "title", value: "Deploy complete" }] }),
+      previewTag: "section",
+      previewAttribute: "aria-labelledby",
+      previewValue: "",
+      sourceLabel: "Show card",
+    },
+    {
+      language: "mermaid",
+      code: "graph TD; Alpha-->Beta",
+      previewTag: "svg",
+      previewAttribute: "aria-label",
+      previewValue: "Diagram",
+      sourceLabel: "Show diagram",
+    },
+  ] as const;
+
+  it.each(examples)(
+    "renders a complete $language fence before the reply finishes and toggles source",
+    async (example) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      let renderer: ReactTestRenderer | undefined;
+      const fence = [backticks + example.language, example.code, backticks].join("\n");
+      const previewCount = () =>
+        renderer!.root.findAll(
+          (node) =>
+            node.type === example.previewTag &&
+            (example.previewAttribute === "className" ||
+              (example.previewAttribute === "aria-labelledby"
+                ? typeof node.props[example.previewAttribute] === "string"
+                : node.props[example.previewAttribute] === example.previewValue)),
+        ).length;
+      try {
+        await act(async () => {
+          renderer = create(
+            <ChatMarkdown cwd="/tmp/project" text={fence.slice(0, -3)} isStreaming />,
+          );
+        });
+        expect(previewCount()).toBe(0);
+        expect(
+          renderer!.root.findAllByType(Button).some((b) => b.props["aria-label"] === "Show code"),
+        ).toBe(false);
+
+        await act(async () => {
+          renderer!.update(
+            <ChatMarkdown
+              cwd="/tmp/project"
+              text={"Before.\n\n" + fence + "\n\nReply still streaming"}
+              isStreaming
+            />,
+          );
+        });
+        expect(previewCount()).toBe(1);
+        expect(codeButton(renderer!, "Show code")).toBeDefined();
+
+        await act(async () => codeButton(renderer!, "Show code").onClick?.({} as never));
+        expect(previewCount()).toBe(0);
+        expect(codeButton(renderer!, example.sourceLabel)).toBeDefined();
+        await act(async () => codeButton(renderer!, example.sourceLabel).onClick?.({} as never));
+        expect(previewCount()).toBe(1);
+
+        await act(async () => {
+          renderer!.update(
+            <ChatMarkdown
+              cwd="/tmp/project"
+              text={"Before.\n\n" + fence + "\n\nReply still streaming more"}
+              isStreaming
+            />,
+          );
+        });
+        expect(previewCount()).toBe(1);
+      } finally {
+        await act(async () => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it.each([
+    { suffix: "", description: "no closer" },
+    { suffix: "\n~~~", description: "mismatched marker" },
+    { suffix: "\n    " + backticks, description: "indented fake closer" },
+    { suffix: "\n" + backticks, description: "shorter than four-marker opener", four: true },
+  ])("keeps SVG source-only for $description while streaming or finished", ({ suffix, four }) => {
+    const opening = (four ? backticks + String.fromCharCode(96) : backticks) + "svg";
+    const source = opening + '\n<svg xmlns="http://www.w3.org/2000/svg"/>' + suffix;
+    for (const isStreaming of [true, false]) {
+      const document = new DOMParser().parseFromString(
+        renderToStaticMarkup(
+          <ChatMarkdown cwd="/tmp/project" text={source} isStreaming={isStreaming} />,
+        ),
+        "text/html",
+      );
+      expect(document.querySelector('[aria-label="SVG illustration"]')).toBeNull();
+      expect(document.querySelector('[aria-label="Show code"]')).toBeNull();
+    }
+  });
+
+  it("accepts a closed tilde fence while streaming", () => {
+    const source = '~~~svg\n<svg xmlns="http://www.w3.org/2000/svg"/>\n~~~\n\nMore text';
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={source} isStreaming />),
+      "text/html",
+    );
+    expect(document.querySelector('[aria-label="SVG illustration"]')).not.toBeNull();
   });
 });
 
