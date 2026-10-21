@@ -391,9 +391,20 @@ export function normalizeStreamMessage(
       const anchor = preceding.slice(preceding.lastIndexOf("\n") + 1);
       const literals = markdownLiteralRanges(displayText);
       const comments: Span[] = [];
-      for (const comment of displayText.matchAll(/<!--[\s\S]*?(?:-->|$)/g)) {
-        if (!inRanges(literals, comment.index))
-          comments.push({ start: comment.index, end: comment.index + comment[0].length });
+      // Search each opener independently. A literal <!-- inside fenced code
+      // must not swallow the closing marker of a later real HTML comment.
+      let commentCursor = 0;
+      while (commentCursor < displayText.length) {
+        const opening = displayText.indexOf("<!--", commentCursor);
+        if (opening < 0) break;
+        if (inRanges(literals, opening)) {
+          commentCursor = opening + 4;
+          continue;
+        }
+        const closing = displayText.indexOf("-->", opening + 4);
+        const end = closing < 0 ? displayText.length : closing + 3;
+        comments.push({ start: opening, end });
+        commentCursor = end;
       }
       const protectedFallback = mergeRanges([...literals, ...comments]);
       let insertAt = -1;
@@ -403,14 +414,20 @@ export function normalizeStreamMessage(
           const newline = displayText.indexOf("\n", cursor);
           const lineEnd = newline < 0 ? displayText.length : newline;
           const line = displayText.slice(cursor, lineEnd).trim();
+          const precedingBreak = cursor > 1 ? displayText.lastIndexOf("\n", cursor - 2) : -1;
+          const previousLine = displayText.slice(precedingBreak + 1, Math.max(0, cursor - 1));
+          const startsParagraph = cursor === 0 || previousLine.trim() === "";
           const following = displayText.slice(Math.min(displayText.length, lineEnd + 1));
           const nextBreak = following.indexOf("\n");
           const nextLine = nextBreak < 0 ? following : following.slice(0, nextBreak);
           if (
             line === anchor &&
+            // Restrict matches to paragraph starts: a line inside a multiline
+            // link or image label can otherwise look like standalone prose.
+            startsParagraph &&
             !intersectsRanges(protectedFallback, cursor, lineEnd) &&
-            // A setext underline belongs to the preceding line as one heading.
-            !/^(?:=+|-+)[ \t]*$/.test(nextLine)
+            // A setext underline (up to three spaces) is part of the heading.
+            !/^ {0,3}(?:=+|-+)[ \t]*$/.test(nextLine)
           ) {
             insertAt = lineEnd;
             break;

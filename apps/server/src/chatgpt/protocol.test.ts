@@ -736,6 +736,52 @@ describe("ChatGPT rich chart preservation", () => {
     );
   });
 
+  it("keeps multiline Markdown links and images intact while anchoring later prose", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    for (const rich of [
+      "[\nMonthly sales rose steadily.\n](https://example.com)",
+      "![\nMonthly sales rose steadily.\n](https://example.com/chart.png)",
+      "[\nMonthly sales rose steadily.\n][monthly]",
+      "![\nMonthly sales rose steadily.\n][monthly]",
+    ]) {
+      const fallback = `${rich}\n\nMonthly sales rose steadily.\nOutlook.`;
+      const result = normalize(content, fallback) ?? "";
+      expect(result).toContain(rich);
+      expect(result.indexOf("```t3-chart")).toBeGreaterThan(
+        result.lastIndexOf("Monthly sales rose steadily."),
+      );
+      expect(result.indexOf("```t3-chart")).toBeLessThan(result.indexOf("Outlook."));
+    }
+  });
+
+  it("recognizes real HTML comments after a fenced literal comment opener", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    const fallback =
+      "```html\n<!--\n```\n\n<!--\nMonthly sales rose steadily.\n-->\n\nMonthly sales rose steadily.\nOutlook.";
+    const result = normalize(content, fallback) ?? "";
+    expect(result).toContain("<!--\nMonthly sales rose steadily.\n-->");
+    expect(result.indexOf("```t3-chart")).toBeGreaterThan(
+      result.lastIndexOf("Monthly sales rose steadily."),
+    );
+    expect(result.indexOf("```t3-chart")).toBeLessThan(result.indexOf("Outlook."));
+  });
+
+  it("preserves setext headings with one to three spaces of underline indentation", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    for (const indentation of [" ", "  ", "   "]) {
+      for (const underline of ["===", "---"]) {
+        const heading = `Monthly sales rose steadily.\n${indentation}${underline}`;
+        const fallback = `${heading}\n\nMonthly sales rose steadily.\nOutlook.`;
+        const result = normalize(content, fallback) ?? "";
+        expect(result).toContain(heading);
+        expect(result.indexOf("```t3-chart")).toBeGreaterThan(
+          result.lastIndexOf("Monthly sales rose steadily."),
+        );
+        expect(result.indexOf("```t3-chart")).toBeLessThan(result.indexOf("Outlook."));
+      }
+    }
+  });
+
   it("does not treat comment-shaped strings inside chart data as real comments", () => {
     const data = {
       ...chart,
