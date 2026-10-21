@@ -126,6 +126,18 @@ describe("ChatGPT static table Markdown preview", () => {
     expect(document.querySelector("tbody a")).toBeNull();
   });
 
+  it("decodes named and numeric cell entities exactly once", () => {
+    const text =
+      "| Entities |\n| --- |\n| &copy; &reg; &mdash; &euro; &amp;copy; &#124; &#xA9; &amp; |";
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
+      "text/html",
+    );
+    const value = document.querySelector("tbody td")?.textContent;
+    expect(value).toBe("© ® — € &copy; | © &");
+    expect(document.querySelectorAll("tbody td")).toHaveLength(1);
+  });
+
   it("renders bounded DIL table fallback output as an accessible data table", () => {
     const text =
       "Before.\n\n| Month | Sales |\n| --- | --- |\n| January | 120 |\n| February | 250 |\n\nAfter.";

@@ -384,13 +384,46 @@ export function normalizeStreamMessage(
       rawOpening.lastIndex = end;
     }
     const protectedRanges = mergeRanges([...literalRanges, ...rawRanges]);
+    // Tables nested in unsupported outer markup must not be promoted on their
+    // own. Track root ownership before parsing any rows, including malformed
+    // or unclosed roots. Scanning tags once also bounds this on long answers.
+    const nested = new Set<number>();
+    const rootsWithNested = new Set<number>();
+    const unclosed = new Set<number>();
+    const stack: number[] = [];
+    const tableTags = /<\/?table(?=[\s>])[^<>]*>/g;
+    let tag: RegExpExecArray | null;
+    let tagCount = 0;
+    while ((tag = tableTags.exec(source))) {
+      if (++tagCount > 1_000) return [];
+      if (inRanges(protectedRanges, tag.index)) continue;
+      let backslashes = 0;
+      for (let i = tag.index - 1; i >= 0 && source[i] === "\\"; i--) backslashes++;
+      if (backslashes % 2) continue;
+      if (tag[0].startsWith("</")) {
+        stack.pop();
+      } else {
+        if (stack.length > 0) {
+          nested.add(tag.index);
+          rootsWithNested.add(stack[0]!);
+        }
+        stack.push(tag.index);
+      }
+    }
+    for (const start of stack) unclosed.add(start);
     const snapshots: Array<{ markdown: string; start: number; end: number }> = [];
     const marker = /<table(?=[\s>])/g;
     let match: RegExpExecArray | null;
     let attempts = 0;
     while ((match = marker.exec(source)) && snapshots.length < 4 && ++attempts <= 32) {
       const start = match.index;
-      if (inRanges(protectedRanges, start)) continue;
+      if (
+        inRanges(protectedRanges, start) ||
+        nested.has(start) ||
+        rootsWithNested.has(start) ||
+        unclosed.has(start)
+      )
+        continue;
       let slashes = 0;
       for (let i = start - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
       if (slashes % 2) continue;
@@ -445,36 +478,20 @@ export function normalizeStreamMessage(
             valid = false;
             break;
           }
-          // Decode a small, known entity subset once before escaping as text.
-          // This preserves &amp; and &lt; without creating active HTML or links.
-          const decoded = text.replace(
-            /&(?:amp|lt|gt|quot|apos|nbsp|#[0-9]+|#[xX][0-9a-fA-F]+);/g,
-            (entity) => {
-              const named: Record<string, string> = {
-                "&amp;": "&",
-                "&lt;": "<",
-                "&gt;": ">",
-                "&quot;": '"',
-                "&apos;": "'",
-                "&nbsp;": " ",
-              };
-              if (named[entity] !== undefined) return named[entity];
-              const hex = entity[2]?.toLowerCase() === "x";
-              const codepoint = Number.parseInt(entity.slice(hex ? 3 : 2, -1), hex ? 16 : 10);
-              return codepoint > 0 &&
-                codepoint <= 0x10ffff &&
-                !(codepoint >= 0xd800 && codepoint <= 0xdfff)
-                ? String.fromCodePoint(codepoint)
-                : "\ufffd";
-            },
-          );
-          const cell = decoded
+          // Keep complete character references verbatim for the Markdown
+          // parser to decode exactly once. This covers the full HTML5 named
+          // entity set, including &copy;, and avoids turning &amp;copy; into ©.
+          // Escape only bare ampersands that are not character references.
+          const cell = text
             .replace(/\s+/g, " ")
             .trim()
-            .replace(/&/g, "&amp;")
+            .replace(/&(?!(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);)/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;")
             .replace(/([\\`*_{}()#+.!|~-])/g, "\\$1")
+            // Numeric references are text, not Markdown headings. Keep them
+            // unescaped so the Markdown renderer decodes them exactly once.
+            .replace(/&\\#((?:[0-9]+|[xX][0-9a-fA-F]+));/g, "&#$1;")
             .replace(/\[/g, "\\[")
             .replace(/\]/g, "\\]");
           cells.push(cell);

@@ -884,11 +884,47 @@ describe("ChatGPT static DIL table preservation", () => {
     const result = normalize(table);
     expect(result).toContain("Research &amp; Development");
     expect(result).toContain("&lt;script&gt;");
-    expect(result).toContain('"Hi"');
-    expect(result).toContain("\\|");
+    expect(result).toContain("&quot;Hi&quot;");
+    expect(result).toContain("&#124;");
     expect(result).not.toContain("&amp;amp;");
     expect(result).not.toContain("<script>");
     expect(result).not.toContain("&amp;lt;");
+  });
+
+  it("never promotes a nested table inside unsupported outer table markup", () => {
+    const inner = source.replaceAll("Month", "Inner");
+    const outer = `<table><table-row header><table-cell>Outer</table-cell></table-row><table-row><table-cell>${inner}</table-cell></table-row></table>`;
+    const output = normalize(outer);
+    expect(output).not.toContain("| Inner | Sales |");
+    expect(output).not.toContain("| Outer |");
+    expect(output).toContain("<table");
+    // A complete later sibling must still be independently converted.
+    const sibling = normalize(`${outer}\n${source}`);
+    expect(sibling).not.toContain("| Inner | Sales |");
+    expect(sibling).toContain("| Month | Sales |");
+    // Even an unclosed outer wrapper cannot independently promote descendants.
+    const unclosed = normalize(`<table><table-row><table-cell>${inner}</table-cell>`);
+    expect(unclosed).not.toContain("| Inner | Sales |");
+  });
+
+  it("preserves the complete named entity range without decoding entity text twice", () => {
+    const entityText =
+      "Copyright &copy; Registered &reg; Dash &mdash; Euro &euro; NotEqual &ne;" +
+      " Double-escaped &amp;copy; Unknown &unknown; Numeric &#124; Hex &#xA9; Raw A & B";
+    const content = `<table><table-row header><table-cell>Entities</table-cell></table-row><table-row><table-cell>${entityText}</table-cell></table-row></table>`;
+    const result = normalize(content);
+    expect(result).toContain("&copy;");
+    expect(result).toContain("&reg;");
+    expect(result).toContain("&mdash;");
+    expect(result).toContain("&euro;");
+    expect(result).toContain("&ne;");
+    expect(result).toContain("&amp;copy;");
+    expect(result).toContain("&unknown;");
+    expect(result).toContain("&#124;");
+    expect(result).toContain("&#xA9;");
+    expect(result).toContain("A &amp; B");
+    expect(result).not.toContain("&amp;copy; Registered");
+    expect(result).not.toContain("&amp;amp;copy;");
   });
 
   it("skips tables embedded in fenced, inline, or raw code and HTML comments", () => {
