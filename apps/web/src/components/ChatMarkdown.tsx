@@ -160,6 +160,7 @@ import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { MermaidDiagram } from "./chat/MermaidDiagram";
 import { SafeSvgDiagram } from "./chat/SafeSvgDiagram";
 import { SafeAgentChart } from "./chat/SafeAgentChart";
+import { SafeAgentCard } from "./chat/SafeAgentCard";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
@@ -989,7 +990,7 @@ function MarkdownDiagramCodeBlock({
   children,
 }: {
   code: string;
-  language: "svg" | "mermaid" | "t3-chart";
+  language: "svg" | "mermaid" | "t3-chart" | "t3-card";
   fenceTitle: string | null;
   theme: "light" | "dark";
   isStreaming: boolean;
@@ -3370,6 +3371,21 @@ const CHAT_MARKDOWN_COMPONENTS = {
           isStreaming={isStreaming}
           sourceLabel="Show chart"
           diagram={<SafeAgentChart source={codeBlock.code} />}
+        >
+          {highlightedCode}
+        </MarkdownDiagramCodeBlock>
+      );
+    }
+    if (language === "t3-card") {
+      return (
+        <MarkdownDiagramCodeBlock
+          code={codeBlock.code}
+          language="t3-card"
+          fenceTitle={fenceTitle}
+          theme={resolvedTheme}
+          isStreaming={isStreaming}
+          sourceLabel="Show card"
+          diagram={<SafeAgentCard source={codeBlock.code} />}
         >
           {highlightedCode}
         </MarkdownDiagramCodeBlock>

@@ -930,9 +930,7 @@ describe("ChatGPT static DIL table preservation", () => {
     expect(normalize("<CodeBlock data-test='x > y'>" + source + "</CodeBlock>")).not.toContain(
       "| Month | Sales |",
     );
-    expect(normalize("<CodeBlock>literal</CodeBlock>\n" + source)).toContain(
-      "| Month | Sales |",
-    );
+    expect(normalize("<CodeBlock>literal</CodeBlock>\n" + source)).toContain("| Month | Sales |");
   });
 
   it("never promotes a nested table inside unsupported outer table markup", () => {
@@ -1016,5 +1014,92 @@ describe("ChatGPT static DIL table preservation", () => {
     expect(result.indexOf("```t3-chart")).toBeGreaterThan(result.indexOf("Middle"));
     expect(result.lastIndexOf("| Month | Sales |")).toBeGreaterThan(result.indexOf("```t3-chart"));
     expect(result.indexOf("After")).toBeGreaterThan(result.lastIndexOf("| Month | Sales |"));
+  });
+});
+
+describe("ChatGPT bounded static DIL card preservation", () => {
+  const card =
+    "<card><title>Build status</title><badge>Passed</badge><text>All checks passed</text><caption>Verified today</caption></card>";
+  const normalize = (content: string, fallback?: string) =>
+    normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [content] },
+        ...(fallback === undefined
+          ? {}
+          : { metadata: { model_dil_v2: { fallbackMarkdown: fallback } } }),
+      },
+    }).text ?? "";
+
+  it("preserves a complete static card in original prose order", () => {
+    const output = normalize(`Before\n${card}\nAfter`);
+    expect(output).toContain("```t3-card\n");
+    expect(output).toContain('"kind":"title","value":"Build status"');
+    expect(output).not.toContain("<card>");
+    expect(output.indexOf("Before")).toBeLessThan(output.indexOf("t3-card"));
+    expect(output.indexOf("After")).toBeGreaterThan(output.indexOf('"Verified today"'));
+  });
+
+  it("does not duplicate cards from the official fallback", () => {
+    const output = normalize(card, "Build status: all checks passed.");
+    expect(output).toBe("Build status: all checks passed.");
+  });
+
+  it("preserves fenced and inline code, comments and raw application blocks", () => {
+    for (const content of [
+      "```xml\n" + card + "\n```",
+      "`" + card + "`",
+      "<!--\n" + card + "\n-->",
+      '<AppBlock language="html">\n' + card + "\n</AppBlock>",
+      '<CodeBlock language="xml">\n' + card + "\n</CodeBlock>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("rejects unsupported props, nesting, dynamic and malformed cards", () => {
+    for (const content of [
+      "<card padding={3}><title>Hello</title></card>",
+      "<card><title>{danger()}</title></card>",
+      "<card><title>A</title><card><title>B</title></card></card>",
+      "<card><title>Unclosed",
+      "<card><text>Hello</text><button onClick={()=>evil()}>Act</button></card>",
+      "> <card><title>Quoted</title></card>",
+      "- <card><title>Nested list</title></card>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("chooses a safe fence when a card contains backtick runs", () => {
+    const output = normalize("<card><title>Command ``` copy</title></card>");
+    expect(output).toContain("````t3-card\n");
+  });
+
+  it("does not promote a complete card inside an unclosed outer card", () => {
+    const output = normalize("<card>missing closing\n" + card);
+    expect(output).not.toContain("t3-card");
+  });
+
+  it("does not promote nested cards inside unsupported outer card markup", () => {
+    for (const outer of [
+      "<card padding={3}>\n" + card + "\n</card>",
+      '<card label="quoted > and < markup">\n' + card + "\n</card>",
+      "<card>\n" + card + "\n</card>",
+    ]) {
+      expect(normalize(outer)).not.toContain("t3-card");
+    }
+  });
+
+  it("still renders independent cards after a completed invalid card", () => {
+    const output = normalize("<card padding={2}><title>Unsupported</title></card>\n" + card);
+    expect(output.match(/t3-card/g)).toHaveLength(1);
+    expect(output).toContain('"value":"Build status"');
+  });
+
+  it("rejects excessive static card content", () => {
+    const longCard = "<card><text>" + "x".repeat(700) + "</text></card>";
+    expect(normalize(longCard)).not.toContain("t3-card");
   });
 });

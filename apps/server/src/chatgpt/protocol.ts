@@ -558,6 +558,116 @@ export function normalizeStreamMessage(
     }
     return snapshots;
   }
+  // Preserve a narrow, declarative subset of cards as data. No DIL callbacks,
+  // JavaScript expressions, attributes or nested components are interpreted.
+  function staticCardSnapshots(
+    source: string,
+  ): Array<{ json: string; start: number; end: number }> {
+    if (!source.includes("<card>") || source.length > 500_000) return [];
+    const literals = markdownLiteralRanges(source);
+    const protectedRaw: Span[] = [];
+    const rawOpen = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b/g;
+    let raw: RegExpExecArray | null;
+    while ((raw = rawOpen.exec(source))) {
+      if (inRanges(literals, raw.index)) continue;
+      if (raw[0] !== "<!--") {
+        let quote: string | null = null;
+        let openingEnd = -1;
+        for (let i = rawOpen.lastIndex; i < source.length; i++) {
+          const ch = source[i];
+          if (quote) {
+            if (ch === quote) quote = null;
+          } else if (ch === '"' || ch === "'") quote = ch;
+          else if (ch === ">") {
+            openingEnd = i + 1;
+            break;
+          } else if (ch === "<") break;
+        }
+        if (openingEnd < 0) {
+          protectedRaw.push({ start: raw.index, end: source.length });
+          break;
+        }
+        rawOpen.lastIndex = openingEnd;
+      }
+      const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
+      const closeAt = source.indexOf(closing, rawOpen.lastIndex);
+      const end = closeAt < 0 ? source.length : closeAt + closing.length;
+      protectedRaw.push({ start: raw.index, end });
+      rawOpen.lastIndex = end;
+    }
+    const protectedRanges = mergeRanges([...literals, ...protectedRaw]);
+    // A complete inner card must not be promoted out of an unsupported or
+    // incomplete outer card. Scan tag ownership once, including attribute-
+    // bearing opening tags, before converting the narrow literal subset.
+    const nested = new Set<number>();
+    const invalidRoots = new Set<number>();
+    const stack: number[] = [];
+    const tags = /<\/?card(?=[\s/>])/g;
+    let tag: RegExpExecArray | null;
+    let tagCount = 0;
+    while ((tag = tags.exec(source))) {
+      if (++tagCount > 1_000) return [];
+      if (inRanges(protectedRanges, tag.index)) continue;
+      let quote: string | null = null;
+      let tagEnd = -1;
+      for (let i = tags.lastIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (quote) {
+          if (quote === ch) quote = null;
+        } else if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") {
+          tagEnd = i + 1;
+          break;
+        } else if (ch === "<") break;
+      }
+      if (tagEnd < 0) return [];
+      tags.lastIndex = tagEnd;
+      if (tag[0].startsWith("</")) {
+        stack.pop();
+      } else if (!/\/\s*>$/.test(source.slice(tag.index, tagEnd))) {
+        if (stack.length > 0) {
+          nested.add(tag.index);
+          invalidRoots.add(stack[0]!);
+        }
+        stack.push(tag.index);
+      }
+    }
+    for (const open of stack) invalidRoots.add(open);
+    const cards: Array<{ json: string; start: number; end: number }> = [];
+    const opening = /<card>/g;
+    let match: RegExpExecArray | null;
+    let attempts = 0;
+    while ((match = opening.exec(source)) && cards.length < 6 && ++attempts <= 40) {
+      const start = match.index;
+      if (inRanges(protectedRanges, start) || nested.has(start) || invalidRoots.has(start))
+        continue;
+      // Avoid promoting Markdown list or blockquote content to a root card.
+      if (source.lastIndexOf("\n", start - 1) + 1 !== start) continue;
+      const closing = source.indexOf("</card>", opening.lastIndex);
+      if (closing < 0 || closing - opening.lastIndex > 4_000) continue;
+      const end = closing + "</card>".length;
+      if (intersectsRanges(protectedRanges, start, end)) continue;
+      const inside = source.slice(opening.lastIndex, closing);
+      if (/<\/?card\b/.test(inside) || /[{}]/.test(inside)) continue;
+      const items: Array<{ kind: string; value: string }> = [];
+      const item = /\s*<(title|text|caption|badge)>([^<>]{1,600})<\/\1>/gy;
+      let cursor = 0;
+      while (cursor < inside.length && items.length <= 12) {
+        item.lastIndex = cursor;
+        const found = item.exec(inside);
+        if (!found) break;
+        const value = found[2]!.trim();
+        if (value) items.push({ kind: found[1]!, value });
+        cursor = item.lastIndex;
+      }
+      if (items.length === 0 || items.length > 12 || inside.slice(cursor).trim()) continue;
+      const json = JSON.stringify({ items });
+      if (json.length > 4_000) continue;
+      cards.push({ json, start, end });
+      opening.lastIndex = end;
+    }
+    return cards;
+  }
   const charts = isFinal ? chartSnapshots(originalText) : [];
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
@@ -644,6 +754,15 @@ export function normalizeStreamMessage(
         table.markdown +
         "\n\n" +
         displayText.slice(table.end);
+    }
+    for (const card of staticCardSnapshots(displayText).toReversed()) {
+      let ticks = 2;
+      for (const match of card.json.matchAll(/`+/g)) ticks = Math.max(ticks, match[0].length);
+      const fence = "`".repeat(ticks + 1);
+      displayText =
+        displayText.slice(0, card.start) +
+        `\n\n${fence}t3-card\n${card.json}\n${fence}\n\n` +
+        displayText.slice(card.end);
     }
   }
   if (
