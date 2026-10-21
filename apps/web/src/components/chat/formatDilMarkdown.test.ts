@@ -265,6 +265,20 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("> > " + marker);
     expect(output).toContain("[outside](<https://example.com/>)");
   });
+  it("preserves lazy blockquote paragraph continuations rather than hiding links as code", () => {
+    const marker = "urlLiteralhttps://example.com";
+    for (const input of [
+      "> text\n    " + marker,
+      "> text\n    " + marker + "\n    " + marker,
+      "> deeper\n> text\n    " + marker,
+    ]) {
+      expect(formatDilMarkdown(input)).toContain("[Literal](<https://example.com/>)");
+    }
+    const separated = "> text\n\n    " + marker + "\n\n" + marker;
+    expect(formatDilMarkdown(separated)).toContain("    " + marker);
+    expect(formatDilMarkdown(separated)).toContain("[Literal](<https://example.com/>)");
+  });
+
   it("starts indented code after entering a blockquote, not the outer paragraph", () => {
     const marker = "urlLiteralhttps://example.com";
     const outside = "urlOutsidehttps://example.com";

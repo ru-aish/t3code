@@ -224,15 +224,17 @@ function markdownCodeRanges(text: string): Array<{ start: number; end: number }>
       continue;
     }
     const { count, rest } = quotesFrom(line);
-    // Entering or leaving a blockquote starts a fresh Markdown container.
-    // A paragraph outside the quote cannot prevent an indented code block
-    // from starting inside it.
+    const blank = rest.trim() === "";
+    // Omitted '>' markers can lazily continue an existing quoted paragraph.
+    // Four-space continuation text is not an indented code block unless the
+    // previous quoted paragraph was already terminated (e.g. by a blank).
+    const lazyQuotedParagraph =
+      count < previousQuoteDepth && paragraph && !blank && columns(rest) >= 4;
     if (count !== previousQuoteDepth) {
-      paragraph = false;
+      if (!lazyQuotedParagraph) paragraph = false;
       listIndent = 0;
       previousQuoteDepth = count;
     }
-    const blank = rest.trim() === "";
     const indent = columns(rest);
     // CommonMark resolves thematic breaks before list starts. Otherwise
     // "- - -" and "* * *" become list items and leak list indentation.
