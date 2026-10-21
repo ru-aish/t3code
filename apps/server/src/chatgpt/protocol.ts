@@ -21,6 +21,7 @@ export function normalizeStreamMessage(
     let start = -1;
     let indented = false;
     let paragraph = false;
+    let previousQuoteDepth = 0;
     let listIndent = 0;
     let cursor = 0;
     function columns(value: string): number {
@@ -80,9 +81,22 @@ export function normalizeStreamMessage(
         continue;
       }
       const { count, rest } = quotesFrom(line);
+      // Entering or leaving a blockquote starts a fresh Markdown container.
+      // A paragraph outside the quote cannot prevent an indented code block
+      // from starting inside it.
+      if (count !== previousQuoteDepth) {
+        paragraph = false;
+        listIndent = 0;
+        previousQuoteDepth = count;
+      }
       const blank = rest.trim() === "";
       const indent = columns(rest);
-      const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
+      // CommonMark resolves thematic breaks before list starts. Otherwise
+      // "- - -" and "* * *" become list items and leak list indentation.
+      const thematicBreak =
+        indent <= 3 &&
+        /^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(rest.trimStart());
+      const list = thematicBreak ? null : /^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
       if (indented) {
         if (blank || indent >= listIndent + 4) {
           cursor = end;
@@ -133,11 +147,6 @@ export function normalizeStreamMessage(
       // can begin a code block. Only ordinary prose continues a paragraph.
       const atxHeading =
         !list && relative >= 0 && relative <= 3 && /^#{1,6}(?:[ \t]|$)/.test(content);
-      const thematicBreak =
-        !list &&
-        relative >= 0 &&
-        relative <= 3 &&
-        /^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(content);
       const setextHeading: boolean =
         !list && paragraph && relative >= 0 && relative <= 3 && /^(?:=+|-+)[ \t]*$/.test(content);
       paragraph = !blank && !atxHeading && !thematicBreak && !setextHeading;

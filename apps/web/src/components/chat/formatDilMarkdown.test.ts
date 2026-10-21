@@ -265,6 +265,25 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("> > " + marker);
     expect(output).toContain("[outside](<https://example.com/>)");
   });
+  it("starts indented code after entering a blockquote, not the outer paragraph", () => {
+    const marker = "urlLiteralhttps://example.com";
+    const outside = "urlOutsidehttps://example.com";
+    const input = "Paragraph\n>     " + marker + "\n\n" + outside;
+    const output = formatDilMarkdown(input);
+    expect(output).toContain(">     " + marker);
+    expect(output).toContain("[Outside](<https://example.com/>)");
+  });
+
+  it("prioritizes spaced thematic breaks over list markers before indented code", () => {
+    const marker = "urlLiteralhttps://example.com";
+    const outside = "urlOutsidehttps://example.com";
+    for (const rule of ["- - -", "* * *", "-  -  -", "_ _ _"]) {
+      const output = formatDilMarkdown(rule + "\n    " + marker + "\n\n" + outside);
+      expect(output).toContain("    " + marker);
+      expect(output).toContain("[Outside](<https://example.com/>)");
+    }
+  });
+
   it("protects indented code after headings and thematic breaks without hiding prose continuations", () => {
     const literal = "urlliteralhttps://example.com";
     for (const prefix of ["# Heading", "---", "Heading\n===", "## More heading"]) {

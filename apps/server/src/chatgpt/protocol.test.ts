@@ -456,6 +456,34 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(input);
   });
+  it("does not promote SVG in indented code after entering a blockquote", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const source = "Paragraph\n>     " + svg + "\n\n" + svg;
+    const output =
+      normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [source] } },
+      }).text ?? "";
+    expect(output).toContain(">     " + svg);
+    expect(output.split("```svg")).toHaveLength(2);
+  });
+
+  it("protects SVG after spaced thematic breaks before generating a standalone preview", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    for (const rule of ["- - -", "* * *", "-  -  -", "_ _ _"]) {
+      const source = rule + "\n    " + svg + "\n\n" + svg;
+      const output =
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [source] },
+          },
+        }).text ?? "";
+      expect(output).toContain("    " + svg);
+      expect(output.split("```svg")).toHaveLength(2);
+    }
+  });
+
   it("keeps SVG inside code blocks after headings and rules while preserving later previews", () => {
     const svg = '<svg><circle r="1"/></svg>';
     for (const prefix of ["# Heading", "---", "Heading\n===", "## More heading"]) {
