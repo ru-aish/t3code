@@ -265,4 +265,16 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("> > " + marker);
     expect(output).toContain("[outside](<https://example.com/>)");
   });
+  it("protects indented code after headings and thematic breaks without hiding prose continuations", () => {
+    const literal = "urlliteralhttps://example.com";
+    for (const prefix of ["# Heading", "---", "Heading\n===", "## More heading"]) {
+      const source = prefix + "\n    " + literal + "\n\n" + literal;
+      const output = formatDilMarkdown(source);
+      expect(output).toContain("    " + literal);
+      expect(output).toContain("[literal](<https://example.com/>)");
+    }
+    expect(formatDilMarkdown("Intro paragraph\n    " + literal)).toContain(
+      "[literal](<https://example.com/>)",
+    );
+  });
 });

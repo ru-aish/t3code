@@ -129,7 +129,18 @@ export function normalizeStreamMessage(
         cursor = end;
         continue;
       }
-      paragraph = !blank;
+      // Headings and thematic breaks close a block; the next indented line
+      // can begin a code block. Only ordinary prose continues a paragraph.
+      const atxHeading =
+        !list && relative >= 0 && relative <= 3 && /^#{1,6}(?:[ \t]|$)/.test(content);
+      const thematicBreak =
+        !list &&
+        relative >= 0 &&
+        relative <= 3 &&
+        /^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(content);
+      const setextHeading: boolean =
+        !list && paragraph && relative >= 0 && relative <= 3 && /^(?:=+|-+)[ \t]*$/.test(content);
+      paragraph = !blank && !atxHeading && !thematicBreak && !setextHeading;
       cursor = end;
     }
     if (start >= 0) ranges.push({ start, end: text.length });

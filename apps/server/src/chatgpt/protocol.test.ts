@@ -456,4 +456,20 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(input);
   });
+  it("keeps SVG inside code blocks after headings and rules while preserving later previews", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    for (const prefix of ["# Heading", "---", "Heading\n===", "## More heading"]) {
+      const source = prefix + "\n    " + svg + "\n\n" + svg;
+      const output =
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [source] },
+          },
+        }).text ?? "";
+      expect(output).toContain("    " + svg);
+      expect(output.split("```svg")).toHaveLength(2);
+    }
+  });
 });
