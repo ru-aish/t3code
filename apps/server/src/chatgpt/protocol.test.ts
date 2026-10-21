@@ -1204,6 +1204,24 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("keeps cards inside XML CDATA literal and preserves following root cards", () => {
+    for (const text of [
+      "<![CDATA[\n" + card + "\n]]>",
+      "<![CDATA[" + card + "]]>",
+      "<![CDATA[\n" + card,
+    ]) {
+      expect(normalize(text)).not.toContain("t3-card");
+    }
+    const independent = "<![CDATA[\n" + card + "\n]]>\n" + card;
+    expect(normalize(independent).match(/t3-card/g)).toHaveLength(1);
+  });
+
+  it("does not treat escaped or quoted CDATA markers as a real section", () => {
+    for (const before of ['<box label="<![CDATA[">ignored</box>', "\\<![CDATA[ literal string"]) {
+      expect(normalize(before + "\n" + card)).toContain("t3-card");
+    }
+  });
+
   it("still renders independent cards after a completed invalid card", () => {
     const output = normalize("<card padding={2}><title>Unsupported</title></card>\n" + card);
     expect(output.match(/t3-card/g)).toHaveLength(1);

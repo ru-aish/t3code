@@ -565,6 +565,7 @@ export function normalizeStreamMessage(
   ): Array<{ json: string; start: number; end: number }> {
     if (!source.includes("<card>") || source.length > 500_000) return [];
     const literals = markdownLiteralRanges(source);
+    const cdataRanges: Span[] = [];
     // Tokenize markup before detecting raw blocks or card ownership. This
     // rejects escaped delimiters and ignores tag-like strings in attributes.
     const markupStarts = new Set<number>();
@@ -578,6 +579,14 @@ export function normalizeStreamMessage(
       let slashes = 0;
       for (let i = at - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
       if (slashes % 2 === 1) continue;
+      if (source.startsWith("<![CDATA[", at)) {
+        if (++markupCount > 4_000) return [];
+        const close = source.indexOf("]]>", at + 9);
+        const end = close < 0 ? source.length : close + 3;
+        cdataRanges.push({ start: at, end });
+        markupAt = end;
+        continue;
+      }
       if (source.startsWith("<!--", at)) {
         if (++markupCount > 4_000) return [];
         markupStarts.add(at);
@@ -646,7 +655,7 @@ export function normalizeStreamMessage(
       protectedRaw.push({ start: raw.index, end });
       rawOpen.lastIndex = end;
     }
-    const protectedRanges = mergeRanges([...literals, ...protectedRaw]);
+    const protectedRanges = mergeRanges([...literals, ...cdataRanges, ...protectedRaw]);
     // Scan all markup once. Card-like tokens inside other tags' quoted
     // attributes are data, not actual opening or closing tags.
     const nested = new Set<number>();

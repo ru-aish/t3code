@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useId, useMemo, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
 
 type Item = { kind: "title" | "text" | "caption" | "badge"; value: string; key: string };
 
@@ -36,9 +37,30 @@ function parseCard(source: string): Item[] | null {
   }
 }
 
+function InlineParagraph({ children }: { children?: ReactNode }) {
+  return <>{children}</>;
+}
+
+const CARD_INLINE_COMPONENTS = { p: InlineParagraph };
+
+// Render only inert inline Markdown. The parser decodes HTML entities exactly
+// once; disallowed links, images and raw HTML cannot produce active elements.
+function CardInlineText({ value }: { value: string }) {
+  return (
+    <ReactMarkdown
+      allowedElements={["p", "strong", "em", "code", "br"]}
+      unwrapDisallowed
+      components={CARD_INLINE_COMPONENTS}
+    >
+      {value}
+    </ReactMarkdown>
+  );
+}
+
 /** An inert preview: model-supplied card text never becomes JSX, HTML or code. */
 export function SafeAgentCard({ source }: { source: string }) {
   const items = useMemo(() => parseCard(source), [source]);
+  const titleId = useId();
   if (!items) {
     return (
       <p className="text-xs text-muted-foreground">
@@ -48,21 +70,26 @@ export function SafeAgentCard({ source }: { source: string }) {
   }
   return (
     <section
-      aria-label={items.find((item) => item.kind === "title")?.value ?? "ChatGPT card"}
+      aria-labelledby={items.some((item) => item.kind === "title") ? titleId : undefined}
+      aria-label={items.some((item) => item.kind === "title") ? undefined : "ChatGPT card"}
       className="my-2 w-full min-w-0 space-y-2 rounded-xl border border-border/60 bg-card p-4 text-card-foreground shadow-sm"
     >
       {items.map((item) => {
         switch (item.kind) {
           case "title":
             return (
-              <h3 key={item.key} className="text-base font-semibold leading-snug">
-                {item.value}
+              <h3
+                key={item.key}
+                id={items.find((entry) => entry.kind === "title") === item ? titleId : undefined}
+                className="text-base font-semibold leading-snug"
+              >
+                <CardInlineText value={item.value} />
               </h3>
             );
           case "caption":
             return (
               <p key={item.key} className="text-xs text-muted-foreground">
-                {item.value}
+                <CardInlineText value={item.value} />
               </p>
             );
           case "badge":
@@ -71,13 +98,13 @@ export function SafeAgentCard({ source }: { source: string }) {
                 key={item.key}
                 className="inline-flex rounded-full bg-muted px-2 py-0.5 text-xs font-medium"
               >
-                {item.value}
+                <CardInlineText value={item.value} />
               </span>
             );
           default:
             return (
               <p key={item.key} className="text-sm leading-relaxed whitespace-pre-wrap">
-                {item.value}
+                <CardInlineText value={item.value} />
               </p>
             );
         }

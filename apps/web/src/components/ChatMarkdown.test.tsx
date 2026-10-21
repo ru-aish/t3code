@@ -183,7 +183,7 @@ describe("ChatGPT static card Markdown preview", () => {
       renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
       "text/html",
     );
-    const card = document.querySelector('section[aria-label="Deploy complete"]');
+    const card = document.querySelector("section[aria-labelledby]");
     expect(card).not.toBeNull();
     expect(card?.querySelector("h3")?.textContent).toBe("Deploy complete");
     expect(card?.textContent).toContain("All 8 checks passed");
@@ -196,7 +196,7 @@ describe("ChatGPT static card Markdown preview", () => {
       renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming />),
       "text/html",
     );
-    expect(document.querySelector('section[aria-label="Deploy complete"]')).toBeNull();
+    expect(document.querySelector("section[aria-labelledby]")).toBeNull();
   });
 });
 
