@@ -134,7 +134,7 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [
@@ -149,7 +149,9 @@ export default defineConfig(() => {
         ],
       }),
       tanstackRouter({ autoCodeSplitting: true }),
-      react({ compiler: true }),
+      react({
+        compiler: command !== "serve" || process.env.T3CODE_DEV_REACT_COMPILER !== "0",
+      }),
       tailwindPlugins(bundledDev),
     ],
     optimizeDeps: {

@@ -36,11 +36,17 @@ export type TerminalEvent = {
   thread_id: string;
   kind: string;
   epoch: number;
+  created?: number | undefined;
   payload: {
     state?: string | undefined;
     paused?: boolean | undefined;
     prompt?: string | undefined;
     url?: string;
+    operationId?: string | undefined;
+    toolName?: string | undefined;
+    input?: unknown;
+    output?: unknown;
+    status?: "completed" | "failed" | "cancelled" | undefined;
   };
 };
 export type ChatGPTModel = {
@@ -277,7 +283,8 @@ export class ChatGPTConnection {
       let detail = raw.trim();
       try {
         const decoded = JSON.parse(raw) as { error?: unknown };
-        if (typeof decoded.error === "string" && decoded.error.trim()) detail = decoded.error.trim();
+        if (typeof decoded.error === "string" && decoded.error.trim())
+          detail = decoded.error.trim();
       } catch {}
       throw new Error(
         `Terminal MCP control request failed (${response.status})${detail ? `: ${detail}` : ""}`,

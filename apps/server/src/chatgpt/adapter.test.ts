@@ -292,6 +292,20 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
   payload: state ? { state } : {},
 });
 
+const terminalTool = (
+  kind: "tool_started" | "tool_completed",
+  payload: TerminalEvent["payload"],
+  epoch = 1,
+): TerminalEvent => ({
+  seq: 1,
+  event_id: `${kind}-${String(payload.operationId)}-${epoch}`,
+  thread_id: "test-thread",
+  epoch,
+  kind,
+  created: 1,
+  payload,
+});
+
 describe("ChatGPT task authority", () => {
   it.live("attaches the orchestration command and refreshes credentials before a turn", () =>
     Effect.scoped(
@@ -303,6 +317,191 @@ describe("ChatGPT task authority", () => {
       }),
     ),
   );
+  it.live("projects Terminal MCP commands into the native Codex command item", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        yield* Queue.take(events);
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "tool-one",
+            toolName: "fedora_t3code.run_command",
+            input: { command: "pwd" },
+          }),
+        );
+        const startedEvents = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const started = startedEvents[0];
+        if (started?.type !== "turn_item.updated" || started.turnItem.type !== "command_execution")
+          throw new Error("Missing started tool item");
+        expect(started.turnItem.status).toBe("running");
+        expect(started.turnItem.input).toBe("pwd");
+
+        fake.publish(
+          terminalTool("tool_completed", {
+            operationId: "tool-one",
+            toolName: "fedora_t3code.run_command",
+            status: "completed",
+            output: [[{ type: "text", text: "ok" }], { type: "text", text: "ok" }],
+          }),
+        );
+        const completedEvents = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const completed = completedEvents[0];
+        if (
+          completed?.type !== "turn_item.updated" ||
+          completed.turnItem.type !== "command_execution"
+        )
+          throw new Error("Missing completed tool item");
+        expect(completed.turnItem.id).toBe(started.turnItem.id);
+        expect(completed.turnItem.ordinal).toBe(started.turnItem.ordinal);
+        expect(completed.turnItem.status).toBe("completed");
+        expect(completed.turnItem.input).toBe("pwd");
+        expect(completed.turnItem.output).toBe("ok");
+      }),
+    ),
+  );
+
+  it.live("projects file reads and edits through the same native Codex item types", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        yield* Queue.take(events);
+
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "read-one",
+            toolName: "fedora_t3code.read_file",
+            input: { path: "src/example.ts" },
+          }),
+        );
+        const readEvents = yield* Stream.fromQueue(events).pipe(
+          Stream.filter((event) => event.type === "turn_item.updated"),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const read = readEvents[0];
+        if (read?.type !== "turn_item.updated" || read.turnItem.type !== "dynamic_tool")
+          throw new Error("Missing read tool item");
+        expect(read.turnItem.toolName).toBe("Read");
+        expect(read.turnItem.input).toEqual({ path: "src/example.ts" });
+
+        fake.publish(
+          terminalTool("tool_completed", {
+            operationId: "read-one",
+            toolName: "fedora_t3code.read_file",
+            status: "completed",
+            output: { result: "const value = 1;" },
+          }),
+        );
+        yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.id === read.turnItem.id,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "edit-one",
+            toolName: "fedora_t3code.write_file",
+            input: { path: "src/example.ts", content: "const value = 2;" },
+          }),
+        );
+        const editEvents = yield* Stream.fromQueue(events).pipe(
+          Stream.filter((event) => event.type === "turn_item.updated"),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const edit = editEvents[0];
+        if (edit?.type !== "turn_item.updated" || edit.turnItem.type !== "file_change")
+          throw new Error("Missing edit tool item");
+        expect(edit.turnItem.status).toBe("running");
+        expect(edit.turnItem.fileName).toBe("src/example.ts");
+        expect(edit.turnItem.changes).toEqual([{ operation: "update", path: "src/example.ts" }]);
+      }),
+    ),
+  );
+
+  it.live.each([false, true])(
+    "completes a tool item when task done precedes stream completion: %s",
+    (doneFirst) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId } = yield* fixture;
+          yield* Queue.take(events);
+          fake.publish(
+            terminalTool("tool_started", {
+              operationId: "complete-tool",
+              toolName: "fedora_t3code.thread_task",
+              input: { action: "complete" },
+            }),
+          );
+          const startedEvents = yield* Stream.fromQueue(events).pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool",
+            ),
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          const started = startedEvents[0];
+          if (started?.type !== "turn_item.updated" || started.turnItem.type !== "dynamic_tool")
+            throw new Error("Missing started completion tool item");
+
+          const acknowledged = Promise.withResolvers<void>();
+          fake.onDoneAcknowledged = () => acknowledged.resolve();
+          if (doneFirst) {
+            fake.publish(terminal("state", "done"));
+            yield* Effect.promise(() => acknowledged.promise);
+          }
+          fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          if (!doneFirst) {
+            fake.publish(terminal("state", "done"));
+            yield* Effect.promise(() => acknowledged.promise);
+          }
+
+          fake.publish(
+            terminalTool("tool_completed", {
+              operationId: "complete-tool",
+              toolName: "fedora_t3code.thread_task",
+              status: "completed",
+              output: { state: "done" },
+            }),
+          );
+          const completedSequence = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          const completed = completedSequence.find(
+            (event) => event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool",
+          );
+          if (completed?.type !== "turn_item.updated" || completed.turnItem.type !== "dynamic_tool")
+            throw new Error("Missing completed completion tool item");
+          expect(completed.turnItem.id).toBe(started.turnItem.id);
+          expect(completed.turnItem.status).toBe("completed");
+          expect(completed.turnItem.output).toEqual({ state: "done" });
+          expect(completedSequence.at(-1)?.type).toBe("turn.terminal");
+        }),
+      ),
+  );
+
   it.live("finishes a reply-only stream with no Terminal MCP done event", () =>
     Effect.scoped(
       Effect.gen(function* () {

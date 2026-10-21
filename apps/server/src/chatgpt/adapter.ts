@@ -136,6 +136,102 @@ type ActiveTurn = {
   requestId: string;
 };
 
+type TerminalToolItem = Extract<
+  OrchestrationV2TurnItem,
+  { type: "dynamic_tool" | "command_execution" | "file_change" }
+>;
+
+function terminalToolName(toolName: string): string {
+  return toolName.replace(/^fedora_t3code\./u, "");
+}
+
+function terminalToolInputRecord(input: unknown): Record<string, unknown> | null {
+  return input !== null && typeof input === "object" && !Array.isArray(input)
+    ? (input as Record<string, unknown>)
+    : null;
+}
+
+function terminalToolText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim().length > 0 ? value : undefined;
+  if (Array.isArray(value)) {
+    const rendered = value.flatMap((entry) => {
+      const text = terminalToolText(entry);
+      return text === undefined ? [] : [text];
+    });
+    const unique = [...new Set(rendered)];
+    return unique.length > 0 ? unique.join("\n") : undefined;
+  }
+  const record = terminalToolInputRecord(value);
+  if (!record) return undefined;
+  if (record.type === "text" && typeof record.text === "string") return record.text;
+  if (typeof record.preview === "string") return record.preview;
+  if (typeof record.result === "string") return record.result;
+  return Array.isArray(record.content) ? terminalToolText(record.content) : undefined;
+}
+
+function terminalPatchPaths(input: unknown): string[] {
+  const patch = terminalToolInputRecord(input)?.patch;
+  if (typeof patch !== "string") return [];
+  const paths: string[] = [];
+  for (const match of patch.matchAll(/^\+\+\+\s+(?<path>\S+)\s*$/gmu)) {
+    const raw = match.groups?.path;
+    if (!raw || raw === "/dev/null") continue;
+    const path = raw.startsWith("b/") ? raw.slice(2) : raw;
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+function terminalFileChangePath(toolName: string, input: unknown): string | undefined {
+  const record = terminalToolInputRecord(input);
+  const direct = toolName === "copy_path" || toolName === "move_path" ? record?.dst : record?.path;
+  if (typeof direct === "string" && direct.trim().length > 0) return direct.trim();
+  return toolName === "apply_patch" ? terminalPatchPaths(input)[0] : undefined;
+}
+
+function terminalFileChangeOperation(toolName: string): string {
+  switch (toolName) {
+    case "copy_path":
+      return "copy";
+    case "make_dir":
+      return "create";
+    case "move_path":
+      return "move";
+    default:
+      return "update";
+  }
+}
+
+function terminalToolProjection(
+  toolName: string,
+): "command" | "edit" | "read" | "javascript" | "tool" {
+  switch (toolName) {
+    case "run_command":
+    case "start_process":
+    case "run_codex_yolo":
+    case "start_codex_yolo":
+    case "run_agy_yolo":
+    case "start_agy_yolo":
+      return "command";
+    case "apply_patch":
+    case "copy_path":
+    case "make_dir":
+    case "move_path":
+    case "replace_in_file":
+    case "write_file":
+      return "edit";
+    case "list_dir":
+    case "read_file":
+    case "stat_path":
+    case "watch_image":
+      return "read";
+    case "node_repl_js":
+      return "javascript";
+    default:
+      return "tool";
+  }
+}
+
 type Update =
   | { kind: "chat"; update: ChatGPTUpdate }
   | { kind: "terminal"; event: TerminalEvent }
@@ -261,6 +357,8 @@ export const makeChatGPTAdapter = (
         const itemOrdinals = new Map<string, number>();
         const itemIds = new Map<string, TurnItemId>();
         const restoredItems = new Map<string, OrchestrationV2TurnItem>();
+        const terminalToolItems = new Map<string, TerminalToolItem>();
+        const terminalToolInputs = new Map<string, unknown>();
         const nativeMessageIds = new Map<string, string>();
         connection.onUpdate((update) => {
           Queue.offerUnsafe(incoming, { kind: "chat", update });
@@ -301,6 +399,193 @@ export const makeChatGPTAdapter = (
               },
             });
           }
+        });
+        const hasRunningTerminalTools = (turn: ActiveTurn | null) =>
+          turn !== null &&
+          [...terminalToolItems.values()].some(
+            (item) => item.providerTurnId === turn.turn.id && item.status === "running",
+          );
+        const acceptTerminalToolEvent = Effect.fnUntraced(function* (control: TerminalEvent) {
+          if (control.kind !== "tool_started" && control.kind !== "tool_completed") return;
+          const operationId = control.payload.operationId;
+          const fullToolName = control.payload.toolName;
+          if (!operationId || !fullToolName) return;
+          usedTerminalTools = true;
+          const toolName = terminalToolName(fullToolName);
+          const existing = terminalToolItems.get(operationId);
+          if (!existing && (!active || !thread)) return;
+          const timestamp = yield* DateTime.now;
+          const eventTime =
+            typeof control.created === "number" && Number.isFinite(control.created)
+              ? DateTime.makeUnsafe(control.created * 1000)
+              : timestamp;
+          const owner = existing
+            ? {
+                runId: existing.runId,
+                nodeId: existing.nodeId,
+                providerThreadId: existing.providerThreadId,
+                providerTurnId: existing.providerTurnId,
+              }
+            : {
+                runId: active!.input.runId,
+                nodeId: active!.input.rootNodeId,
+                providerThreadId: thread!.id,
+                providerTurnId: active!.turn.id,
+              };
+          const status =
+            control.kind === "tool_started"
+              ? ("running" as const)
+              : control.payload.status === "failed"
+                ? ("failed" as const)
+                : control.payload.status === "cancelled"
+                  ? ("cancelled" as const)
+                  : ("completed" as const);
+          if (control.kind === "tool_started")
+            terminalToolInputs.set(operationId, control.payload.input ?? null);
+          const rawInput =
+            terminalToolInputs.get(operationId) ??
+            (existing?.type === "dynamic_tool"
+              ? existing.input
+              : existing?.type === "command_execution"
+                ? { command: existing.input }
+                : existing?.type === "file_change"
+                  ? { path: existing.fileName }
+                  : null);
+          const base = {
+            id:
+              existing?.id ??
+              TurnItemId.make(`chatgpt:${input.threadId}:terminal-tool:${operationId}`),
+            threadId: input.threadId,
+            ...owner,
+            nativeItemRef: ref(operationId),
+            parentItemId: null,
+            ordinal: existing?.ordinal ?? ++nextOrdinal,
+            status,
+            title: null,
+            startedAt: existing?.startedAt ?? eventTime,
+            completedAt: control.kind === "tool_started" ? null : eventTime,
+            updatedAt: eventTime,
+          } as const;
+          const projection = terminalToolProjection(toolName);
+          let item: TerminalToolItem;
+          if (projection === "command") {
+            const record = terminalToolInputRecord(rawInput);
+            const command =
+              typeof record?.command === "string" && record.command.trim().length > 0
+                ? record.command.trim()
+                : existing?.type === "command_execution"
+                  ? existing.input
+                  : toolName.replaceAll("_", " ");
+            const output =
+              control.kind === "tool_completed"
+                ? terminalToolText(control.payload.output)
+                : existing?.type === "command_execution"
+                  ? existing.output
+                  : undefined;
+            const exitCodeMatch = output?.match(/\bExit Code:\s*(-?\d+)/u);
+            const exitCode =
+              exitCodeMatch?.[1] === undefined ? undefined : Number(exitCodeMatch[1]);
+            item = {
+              ...base,
+              type: "command_execution",
+              input: command,
+              ...(output === undefined ? {} : { output }),
+              ...(exitCode === undefined || !Number.isInteger(exitCode) ? {} : { exitCode }),
+              ...(control.kind === "tool_completed" && status === "failed"
+                ? { outputIndicatesFailure: true }
+                : {}),
+            };
+          } else if (projection === "edit") {
+            const retained = existing?.type === "file_change" ? existing : null;
+            const record = terminalToolInputRecord(rawInput);
+            const patchPaths = toolName === "apply_patch" ? terminalPatchPaths(rawInput) : [];
+            const fileName =
+              terminalFileChangePath(toolName, rawInput) ??
+              retained?.fileName ??
+              toolName.replaceAll("_", " ");
+            const oldPath =
+              (toolName === "copy_path" || toolName === "move_path") &&
+              typeof record?.src === "string" &&
+              record.src.trim().length > 0
+                ? record.src.trim()
+                : undefined;
+            const changes =
+              patchPaths.length > 0
+                ? patchPaths.map((path) => ({ operation: "update", path }))
+                : [
+                    {
+                      operation: terminalFileChangeOperation(toolName),
+                      path: fileName,
+                      ...(oldPath === undefined ? {} : { oldPath }),
+                      ...(toolName === "make_dir" ? { fileType: "directory" } : {}),
+                    },
+                  ];
+            const diffStr =
+              toolName === "apply_patch" && typeof record?.patch === "string"
+                ? record.patch
+                : retained?.diffStr;
+            const oldStr =
+              toolName === "replace_in_file" && typeof record?.old === "string"
+                ? record.old
+                : retained?.oldStr;
+            const newStr =
+              toolName === "replace_in_file" && typeof record?.new === "string"
+                ? record.new
+                : toolName === "write_file" && typeof record?.content === "string"
+                  ? record.content
+                  : retained?.newStr;
+            item = {
+              ...retained,
+              ...base,
+              type: "file_change",
+              fileName,
+              changes:
+                retained?.changes && patchPaths.length === 0 && record === null
+                  ? retained.changes
+                  : changes,
+              ...(diffStr === undefined ? {} : { diffStr }),
+              ...(oldStr === undefined ? {} : { oldStr }),
+              ...(newStr === undefined ? {} : { newStr }),
+            };
+          } else {
+            const displayToolName =
+              projection === "read"
+                ? "Read"
+                : projection === "javascript"
+                  ? "node_repl.js"
+                  : toolName;
+            const inputRecord = terminalToolInputRecord(rawInput);
+            const viewedImagePath =
+              toolName === "watch_image" && typeof inputRecord?.path === "string"
+                ? inputRecord.path
+                : undefined;
+            item = {
+              ...base,
+              type: "dynamic_tool",
+              toolName: displayToolName,
+              ...(viewedImagePath === undefined ? {} : { viewedImagePath }),
+              input: rawInput,
+              ...(control.kind === "tool_completed"
+                ? { output: control.payload.output ?? null }
+                : existing?.type === "dynamic_tool" && existing.output !== undefined
+                  ? { output: existing.output }
+                  : {}),
+            };
+          }
+          terminalToolItems.set(operationId, item);
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_DRIVER,
+            turnItem: item,
+          });
+          if (
+            control.kind === "tool_completed" &&
+            binding.state === "done" &&
+            streamComplete &&
+            active &&
+            !hasRunningTerminalTools(active)
+          )
+            yield* finish("completed");
         });
         const finish = Effect.fnUntraced(function* (
           status: "completed" | "interrupted" | "cancelled" | "forced",
@@ -455,7 +740,11 @@ export const makeChatGPTAdapter = (
                   connection.control("pause", { requestId: `reply-only-${update.requestId}` }),
                 ).pipe(Effect.ignore);
               }
-              if (binding.state === "done" || !usedTerminalTools) yield* finish("completed");
+              if (
+                (binding.state === "done" || !usedTerminalTools) &&
+                !hasRunningTerminalTools(active)
+              )
+                yield* finish("completed");
             }
             // Tool-using turns require Terminal MCP confirmation; reply-only turns
             // finish on the normal ChatGPT stream completion.
@@ -594,6 +883,23 @@ export const makeChatGPTAdapter = (
             nextOrdinal = Math.max(nextOrdinal, item.ordinal);
             if (item.nativeItemRef && item.providerTurnId)
               restoredItems.set(`${item.providerTurnId}:${item.nativeItemRef.nativeId}`, item);
+            const nativeItemId = item.nativeItemRef?.nativeId;
+            if (
+              nativeItemId?.startsWith("tool-") &&
+              (item.type === "dynamic_tool" ||
+                item.type === "command_execution" ||
+                item.type === "file_change")
+            ) {
+              terminalToolItems.set(nativeItemId, item);
+              terminalToolInputs.set(
+                nativeItemId,
+                item.type === "dynamic_tool"
+                  ? item.input
+                  : item.type === "command_execution"
+                    ? { command: item.input }
+                    : { path: item.fileName },
+              );
+            }
           }
           let previous: ActiveTurn | undefined;
           for (const requestId of connection.submittedRequestIds) {
@@ -697,7 +1003,13 @@ export const makeChatGPTAdapter = (
                 yield* attempt(() => connection.acknowledge(control));
                 return;
               }
-              if (control.kind === "link_pr" && control.payload.url && transport.linkPullRequest) {
+              if (control.kind === "tool_started" || control.kind === "tool_completed") {
+                yield* acceptTerminalToolEvent(control);
+              } else if (
+                control.kind === "link_pr" &&
+                control.payload.url &&
+                transport.linkPullRequest
+              ) {
                 yield* transport.linkPullRequest(
                   input.threadId,
                   control.payload.url,
@@ -705,8 +1017,8 @@ export const makeChatGPTAdapter = (
                 );
               } else if (control.kind === "state" && control.payload.state === "done") {
                 binding = { ...binding, state: "done" };
-                if (streamComplete) yield* finish("completed");
-                else if (active)
+                if (streamComplete && !hasRunningTerminalTools(active)) yield* finish("completed");
+                else if (active && !streamComplete)
                   yield* recoverMissingCompletion(active.requestId).pipe(Effect.forkScoped);
               } else if (control.kind === "continue" && active && !interrupting) {
                 const activeRequestId = active.requestId;
