@@ -113,6 +113,30 @@ describe("ChatGPT legacy link rendering", () => {
   });
 });
 
+describe("ChatGPT static table Markdown preview", () => {
+  it("renders bounded DIL table fallback output as an accessible data table", () => {
+    const text =
+      "Before.\n\n| Month | Sales |\n| --- | --- |\n| January | 120 |\n| February | 250 |\n\nAfter.";
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
+      "text/html",
+    );
+    const table = document.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(table?.querySelectorAll("tr")).toHaveLength(3);
+    expect([...table!.querySelectorAll("th")].map((cell) => cell.textContent)).toEqual([
+      "Month",
+      "Sales",
+    ]);
+    expect([...table!.querySelectorAll("tbody tr")].map((row) => row.textContent)).toEqual([
+      "January120",
+      "February250",
+    ]);
+    expect(document.body.textContent).toContain("Before.");
+    expect(document.body.textContent).toContain("After.");
+  });
+});
+
 describe("ChatMarkdown bare anchor placeholders", () => {
   it.each(["<A>", "<a>", "<a >", "<a/>", "<A/>", "<a />"])(
     "preserves unmatched %s without linking later blocks",

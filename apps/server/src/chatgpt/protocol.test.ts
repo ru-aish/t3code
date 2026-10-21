@@ -806,3 +806,94 @@ describe("ChatGPT rich chart preservation", () => {
     expect(normalize(source, "Fallback")).toContain("t3-chart");
   });
 });
+
+describe("ChatGPT static DIL table preservation", () => {
+  const source =
+    "<table><table-row header><table-cell>Month</table-cell><table-cell>Sales</table-cell></table-row>" +
+    "<table-row><table-cell>January</table-cell><table-cell>120</table-cell></table-row>" +
+    "<table-row><table-cell>February</table-cell><table-cell>250</table-cell></table-row></table>";
+  const normalize = (content: string, fallback?: string) =>
+    normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [content] },
+        ...(fallback === undefined
+          ? {}
+          : { metadata: { model_dil_v2: { fallbackMarkdown: fallback } } }),
+      },
+    }).text ?? "";
+
+  it("preserves static table columns and rows as GFM Markdown", () => {
+    const result = normalize(`<box>Before.\n${source}\nAfter.</box>`);
+    expect(result).toContain(
+      "| Month | Sales |\n| --- | --- |\n| January | 120 |\n| February | 250 |",
+    );
+    expect(result).not.toContain("<table");
+    expect(result.indexOf("Before.")).toBeLessThan(result.indexOf("| Month"));
+    expect(result.indexOf("After.")).toBeGreaterThan(result.indexOf("| February"));
+  });
+
+  it("uses the official Markdown fallback without duplicating tables", () => {
+    const fallback = "| Month | Sales |\n| --- | --- |\n| January | 120 |";
+    expect(normalize(source, fallback)).toBe(fallback);
+  });
+
+  it("escapes Markdown-special text and HTML-looking entities in cells", () => {
+    const table =
+      "<table><table-row><table-cell>Name</table-cell><table-cell>Value</table-cell></table-row>" +
+      "<table-row><table-cell>x | y</table-cell><table-cell>[link](javascript:bad) &amp; *bold*</table-cell></table-row></table>";
+    const result = normalize(table);
+    expect(result).toContain("x \\| y");
+    expect(result).toContain("\\[link\\]\\(javascript:bad\\)");
+    expect(result).toContain("&amp;amp;");
+    expect(result).toContain("\\*bold\\*");
+  });
+
+  it("skips tables embedded in fenced, inline, or raw code and HTML comments", () => {
+    for (const literal of [
+      `\`\`\`xml\n${source}\n\`\`\``,
+      `\`${source}\``,
+      `<CodeBlock>${source}</CodeBlock>`,
+      `<escape>${source}</escape>`,
+      `<AppBlock>${source}</AppBlock>`,
+      `<!-- ${source} -->`,
+      `\\${source}`,
+    ]) {
+      expect(normalize(literal)).not.toContain("| Month | Sales |");
+    }
+    expect(normalize(`<CodeBlock>example</CodeBlock>\n${source}`)).toContain("| Month | Sales |");
+    expect(normalize(`\`\`\`xml\n<!--\n\`\`\`\n${source}`)).toContain("| Month | Sales |");
+  });
+
+  it("does not convert incomplete, dynamic, or unsupported tables", () => {
+    for (const table of [
+      source.slice(0, -8),
+      source.replace("120", "{value}"),
+      source.replace("<table-row>", "<table-row onClick={alert(1)}>"),
+      source.replace(
+        "<table-row>",
+        "<table-row><table-cell>Unexpected</table-cell></table-row><table-row>",
+      ),
+      source.replace(
+        "<table-cell>120</table-cell>",
+        "<table-cell><button>Execute</button></table-cell>",
+      ),
+      source.replace("<table-row header>", "<table-section><table-row header>"),
+      source.repeat(5_000),
+    ]) {
+      expect(normalize(table)).not.toContain("| Month | Sales |");
+    }
+  });
+
+  it("keeps multiple complete tables and existing charts in their original order", () => {
+    const chart = { chartType: "bar", series: [{ dataKey: "y" }], data: [{ x: "A", y: 1 }] };
+    const result = normalize(
+      `Before\n${source}\nMiddle\n<Chart content={${JSON.stringify(chart)}} />\n${source}\nAfter`,
+    );
+    expect(result.split("| Month | Sales |")).toHaveLength(3);
+    expect(result.indexOf("```t3-chart")).toBeGreaterThan(result.indexOf("Middle"));
+    expect(result.lastIndexOf("| Month | Sales |")).toBeGreaterThan(result.indexOf("```t3-chart"));
+    expect(result.indexOf("After")).toBeGreaterThan(result.lastIndexOf("| Month | Sales |"));
+  });
+});

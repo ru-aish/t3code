@@ -365,6 +365,111 @@ export function normalizeStreamMessage(
     }
     return charts;
   }
+  // A deliberately small, non-executable subset of static DIL tables. A
+  // malformed, dynamic, or ambiguous table stays source text, never HTML.
+  function staticTableSnapshots(
+    source: string,
+  ): Array<{ markdown: string; start: number; end: number }> {
+    if (!source.includes("<table") || source.length > 500_000) return [];
+    const literalRanges = markdownLiteralRanges(source);
+    const rawRanges: Span[] = [];
+    const rawOpening = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b[^>]*>/g;
+    let raw: RegExpExecArray | null;
+    while ((raw = rawOpening.exec(source))) {
+      if (inRanges(literalRanges, raw.index)) continue;
+      const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
+      const closeAt = source.indexOf(closing, rawOpening.lastIndex);
+      const end = closeAt < 0 ? source.length : closeAt + closing.length;
+      rawRanges.push({ start: raw.index, end });
+      rawOpening.lastIndex = end;
+    }
+    const protectedRanges = mergeRanges([...literalRanges, ...rawRanges]);
+    const snapshots: Array<{ markdown: string; start: number; end: number }> = [];
+    const marker = /<table(?=[\s>])/g;
+    let match: RegExpExecArray | null;
+    let attempts = 0;
+    while ((match = marker.exec(source)) && snapshots.length < 4 && ++attempts <= 32) {
+      const start = match.index;
+      if (inRanges(protectedRanges, start)) continue;
+      let slashes = 0;
+      for (let i = start - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+      if (slashes % 2) continue;
+      const opening = /^<table(?:\s[^<>]*)?>/.exec(source.slice(start, start + 256));
+      if (!opening || /[{}]|\bon[A-Z]/.test(opening[0])) continue;
+      const contentStart = start + opening[0].length;
+      const closeAt = source.indexOf("</table>", contentStart);
+      if (closeAt < 0 || closeAt - contentStart > 24_000) continue;
+      const content = source.slice(contentStart, closeAt);
+      const rows: string[][] = [];
+      let cursor = 0;
+      let valid = true;
+      while (cursor < content.length) {
+        while (/\s/.test(content[cursor] ?? "")) cursor++;
+        if (cursor >= content.length) break;
+        const rowOpen = /^<table-row(?:\s[^<>]*)?>/.exec(content.slice(cursor, cursor + 256));
+        if (!rowOpen || /[{}]|\bon[A-Z]/.test(rowOpen[0]) || rows.length >= 60) {
+          valid = false;
+          break;
+        }
+        cursor += rowOpen[0].length;
+        const cells: string[] = [];
+        let rowClosed = false;
+        while (cursor < content.length) {
+          while (/\s/.test(content[cursor] ?? "")) cursor++;
+          if (content.startsWith("</table-row>", cursor)) {
+            cursor += "</table-row>".length;
+            rowClosed = true;
+            break;
+          }
+          const cellOpen = /^<table-cell(?:\s[^<>]*)?>/.exec(content.slice(cursor, cursor + 256));
+          if (!cellOpen || /[{}]|\bon[A-Z]/.test(cellOpen[0]) || cells.length >= 16) {
+            valid = false;
+            break;
+          }
+          cursor += cellOpen[0].length;
+          const cellEnd = content.indexOf("</table-cell>", cursor);
+          if (cellEnd < 0) {
+            valid = false;
+            break;
+          }
+          const text = content.slice(cursor, cellEnd);
+          if (text.length > 240 || /[<>{}]/.test(text)) {
+            valid = false;
+            break;
+          }
+          // Prevent Markdown/HTML injection and avoid interpreting DIL cell text.
+          const cell = text
+            .replace(/\s+/g, " ")
+            .trim()
+            .replace(/&/g, "&amp;")
+            .replace(/([\\`*_{}()#+.!|>~-])/g, "\\$1")
+            .replace(/\[/g, "\\[")
+            .replace(/\]/g, "\\]");
+          cells.push(cell);
+          cursor = cellEnd + "</table-cell>".length;
+        }
+        if (
+          !valid ||
+          !rowClosed ||
+          cells.length === 0 ||
+          (rows.length > 0 && cells.length !== rows[0]!.length)
+        ) {
+          valid = false;
+          break;
+        }
+        rows.push(cells);
+      }
+      if (!valid || rows.length === 0 || cursor < content.length) continue;
+      const header = `| ${rows[0]!.join(" | ")} |`;
+      const divider = `| ${rows[0]!.map(() => "---").join(" | ")} |`;
+      const data = rows.slice(1).map((cells) => `| ${cells.join(" | ")} |`);
+      const markdown = [header, divider, ...data].join("\n");
+      const end = closeAt + "</table>".length;
+      snapshots.push({ markdown, start, end });
+      marker.lastIndex = end;
+    }
+    return snapshots;
+  }
   const charts = isFinal ? chartSnapshots(originalText) : [];
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
@@ -440,6 +545,17 @@ export function normalizeStreamMessage(
       const fence = chartFence(chart.json);
       displayText = displayText.slice(0, insertAt) + fence + displayText.slice(insertAt);
       searchFrom = insertAt + fence.length;
+    }
+  }
+  if (isFinal && !fallback?.trim()) {
+    // Render only complete, literal tables; preserve their original placement.
+    for (const table of staticTableSnapshots(displayText).toReversed()) {
+      displayText =
+        displayText.slice(0, table.start) +
+        "\n\n" +
+        table.markdown +
+        "\n\n" +
+        displayText.slice(table.end);
     }
   }
   if (
