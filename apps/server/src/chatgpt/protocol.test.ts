@@ -71,6 +71,19 @@ describe("ChatGPT protocol", () => {
     ).toBe("[Download](https://example.com/app)");
   });
 
+  it("preserves inline SVG illustrations for the safe Markdown preview", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><circle r="5"/></svg>';
+    const normalized = normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [`<box>${svg}</box>`] },
+      },
+    });
+    expect(normalized.text).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
+    expect(normalized.text).not.toContain("<box>");
+  });
+
   it("degrades a final DIL component into readable Markdown when no fallback exists", () => {
     const rich = [
       "## Ready",

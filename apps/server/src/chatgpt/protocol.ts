@@ -35,7 +35,7 @@ export function normalizeStreamMessage(
   if (
     isFinal &&
     !fallback?.trim() &&
-    /<(?:box|row|col|card|button|badge|icon|text|title)\b/.test(displayText)
+    /<(?:box|row|col|card|button|badge|icon|text|title|svg)\b/.test(displayText)
   ) {
     // Some ChatGPT surfaces omit the fallback. Turn its presentation-only DIL
     // into readable Markdown without altering fenced source-code examples.
@@ -43,7 +43,17 @@ export function normalizeStreamMessage(
       .split(/(```[\s\S]*?```)/g)
       .map((section, index) => {
         if (index % 2 === 1) return section;
-        const buttons = section.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
+        // Preserve simple inline vector artwork as a fenced preview instead of
+        // exposing live SVG markup to the Markdown renderer.
+        const withSvg = section.replace(/<svg\b[\s\S]*?<\/svg\s*>/gi, (svg) => {
+          const longestTicks = Math.max(
+            2,
+            ...[...svg.matchAll(/`+/g)].map((match) => match[0].length),
+          );
+          const fence = "`".repeat(longestTicks + 1);
+          return `\n\n${fence}svg\n${svg}\n${fence}\n\n`;
+        });
+        const buttons = withSvg.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
           const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
           const openEnd =
             button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;

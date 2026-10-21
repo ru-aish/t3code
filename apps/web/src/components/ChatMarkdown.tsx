@@ -158,6 +158,7 @@ import { createIncrementalHighlightedDocument } from "../lib/incrementalHighligh
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { MermaidDiagram } from "./chat/MermaidDiagram";
+import { SafeSvgDiagram } from "./chat/SafeSvgDiagram";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
@@ -973,6 +974,69 @@ function MarkdownCodeBlock({
     >
       {children}
     </MarkdownCodeBlockFrame>
+  );
+}
+
+function MarkdownSvgCodeBlock({
+  code,
+  fenceTitle,
+  theme,
+  isStreaming,
+  children,
+}: {
+  code: string;
+  fenceTitle: string | null;
+  theme: "light" | "dark";
+  isStreaming: boolean;
+  children: ReactNode;
+}) {
+  const [showCode, setShowCode] = useState(false);
+  const searching = use(MarkdownFindContext);
+  const sourceRevealRef = useFindRevealRef(useCallback(() => setShowCode(true), []));
+  const showDiagram = !showCode && !isStreaming && code.trim().length > 0;
+  return (
+    <MarkdownCodeBlock
+      code={code}
+      language="svg"
+      fenceTitle={fenceTitle}
+      theme={theme}
+      isStreaming={isStreaming}
+      canWrap={!showDiagram}
+      diagram={showDiagram}
+      viewToggle={
+        isStreaming ? null : (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost-muted"
+                  size="icon-xs"
+                  onClick={() => setShowCode((value) => !value)}
+                  aria-label={showCode ? "Show image" : "Show code"}
+                />
+              }
+            >
+              {showCode ? <WorkflowIcon className="size-3" /> : <CodeIcon className="size-3" />}
+            </TooltipTrigger>
+            <TooltipPopup side="top">{showCode ? "Show image" : "Show code"}</TooltipPopup>
+          </Tooltip>
+        )
+      }
+    >
+      {showDiagram ? (
+        <>
+          <SafeSvgDiagram source={code} />
+          {searching ? (
+            <pre ref={sourceRevealRef} hidden>
+              {code}
+            </pre>
+          ) : null}
+        </>
+      ) : (
+        children
+      )}
+    </MarkdownCodeBlock>
   );
 }
 
@@ -3280,6 +3344,18 @@ const CHAT_MARKDOWN_COMPONENTS = {
         </Suspense>
       </RenderErrorBoundary>
     );
+    if (language === "svg") {
+      return (
+        <MarkdownSvgCodeBlock
+          code={codeBlock.code}
+          fenceTitle={fenceTitle}
+          theme={resolvedTheme}
+          isStreaming={isStreaming}
+        >
+          {highlightedCode}
+        </MarkdownSvgCodeBlock>
+      );
+    }
     if (language === "mermaid") {
       return (
         <MarkdownMermaidCodeBlock
