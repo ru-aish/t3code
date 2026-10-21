@@ -390,8 +390,7 @@ describe("ChatGPT task authority", () => {
         const original = yield* Stream.fromQueue(events).pipe(
           Stream.filter(
             (event) =>
-              event.type === "turn_item.updated" &&
-              event.turnItem.type === "command_execution",
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
           ),
           Stream.take(1),
           Stream.runCollect,
@@ -458,6 +457,97 @@ describe("ChatGPT task authority", () => {
         expect(result.turnItem.status).toBe("completed");
       }),
     ),
+  );
+
+  it.live("settles running Terminal MCP tool items when a turn is interrupted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, session, turnInput } = yield* fixture;
+        const startedTurn = yield* Queue.take(events);
+        if (startedTurn.type !== "provider_turn.updated")
+          throw new Error("Expected the provider turn to start");
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "interrupt-tool",
+            toolName: "fedora_t3code.run_command",
+            input: { command: "sleep 60" },
+          }),
+        );
+        const initial = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const startedItem = initial[0];
+        if (startedItem?.type !== "turn_item.updated") throw new Error("Missing running tool item");
+
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: startedTurn.providerTurn.id,
+        });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const settled = recorded.find(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.id === startedItem.turnItem.id,
+        );
+        if (settled?.type !== "turn_item.updated") throw new Error("Missing settled tool item");
+        expect(settled.turnItem.status).toBe("cancelled");
+        expect(settled.turnItem.completedAt).not.toBeNull();
+        expect(recorded.at(-1)?.type).toBe("turn.terminal");
+      }),
+    ),
+  );
+
+  it.live("bounds completion recovery when a tool completion event is lost", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "missing-completion",
+            toolName: "fedora_t3code.run_command",
+            input: { command: "pwd" },
+          }),
+        );
+        const initial = yield* Stream.fromQueue(events).pipe(
+          Stream.filter((event) => event.type === "turn_item.updated"),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const startedItem = initial[0];
+        if (startedItem?.type !== "turn_item.updated") throw new Error("Missing running tool item");
+
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        yield* TestClock.adjust("29 seconds");
+        expect(yield* Queue.size(events)).toBe(0);
+        yield* TestClock.adjust("1 second");
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        const settled = recorded.find(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.id === startedItem.turnItem.id,
+        );
+        if (settled?.type !== "turn_item.updated") throw new Error("Missing settled tool item");
+        expect(settled.turnItem.status).toBe("failed");
+        expect(settled.turnItem.completedAt).not.toBeNull();
+        const final = recorded.at(-1);
+        expect(final?.type).toBe("turn.terminal");
+        if (final?.type === "turn.terminal") expect(final.status).toBe("completed");
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.live("projects file reads and edits through the same native Codex item types", () =>

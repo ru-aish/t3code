@@ -578,14 +578,7 @@ export const makeChatGPTAdapter = (
             driver: CHATGPT_DRIVER,
             turnItem: item,
           });
-          if (
-            control.kind === "tool_completed" &&
-            binding.state === "done" &&
-            streamComplete &&
-            active &&
-            !hasRunningTerminalTools(active)
-          )
-            yield* finish("completed");
+          if (control.kind === "tool_completed") yield* completeWithToolRecovery();
         });
         const finish = Effect.fnUntraced(function* (
           status: "completed" | "interrupted" | "cancelled" | "forced",
@@ -598,6 +591,17 @@ export const makeChatGPTAdapter = (
             if (turn.input.runId === completed.input.runId) yield* settleReasoning(turn);
           }
           const timestamp = yield* DateTime.now;
+          for (const [operationId, item] of terminalToolItems) {
+            if (item.providerTurnId !== completed.turn.id || item.status !== "running") continue;
+            const settled: TerminalToolItem = {
+              ...item,
+              status: status === "completed" ? "failed" : "cancelled",
+              completedAt: timestamp,
+              updatedAt: timestamp,
+            };
+            terminalToolItems.set(operationId, settled);
+            yield* emit({ type: "turn_item.updated", driver: CHATGPT_DRIVER, turnItem: settled });
+          }
           const finalKey = `${completed.turn.id}:${completed.requestId}:final`;
           const finalMessage = messages.get(finalKey);
           if (finalMessage?.streaming) {
@@ -645,6 +649,38 @@ export const makeChatGPTAdapter = (
             failure: null,
             threadDisposition: "reusable",
           });
+        });
+        let staleToolRecoveryRequestId: string | null = null;
+        const recoverStaleTerminalTools = Effect.fnUntraced(function* (
+          requestId: string,
+          providerTurnId: string,
+        ) {
+          if (staleToolRecoveryRequestId === requestId) return;
+          staleToolRecoveryRequestId = requestId;
+          yield* Effect.sleep("30 seconds");
+          if (
+            active?.requestId !== requestId ||
+            active.turn.id !== providerTurnId ||
+            !streamComplete ||
+            binding.state !== "done" ||
+            !hasRunningTerminalTools(active)
+          )
+            return;
+          yield* Effect.logWarning("Terminal tool completion was not observed after task done", {
+            threadId: input.threadId,
+            requestId,
+          });
+          yield* finish("completed");
+        });
+        const completeWithToolRecovery = Effect.fnUntraced(function* () {
+          if (!active || !streamComplete || binding.state !== "done") return;
+          if (hasRunningTerminalTools(active)) {
+            yield* recoverStaleTerminalTools(active.requestId, active.turn.id).pipe(
+              Effect.forkScoped,
+            );
+            return;
+          }
+          yield* finish("completed");
         });
         const recoverMissingCompletion = Effect.fnUntraced(function* (
           requestId: string,
@@ -740,10 +776,8 @@ export const makeChatGPTAdapter = (
                   connection.control("pause", { requestId: `reply-only-${update.requestId}` }),
                 ).pipe(Effect.ignore);
               }
-              if (
-                (binding.state === "done" || !usedTerminalTools) &&
-                !hasRunningTerminalTools(active)
-              )
+              if (binding.state === "done") yield* completeWithToolRecovery();
+              else if (!usedTerminalTools && !hasRunningTerminalTools(active))
                 yield* finish("completed");
             }
             // Tool-using turns require Terminal MCP confirmation; reply-only turns
@@ -1019,8 +1053,8 @@ export const makeChatGPTAdapter = (
                 );
               } else if (control.kind === "state" && control.payload.state === "done") {
                 binding = { ...binding, state: "done" };
-                if (streamComplete && !hasRunningTerminalTools(active)) yield* finish("completed");
-                else if (active && !streamComplete)
+                if (streamComplete) yield* completeWithToolRecovery();
+                else if (active)
                   yield* recoverMissingCompletion(active.requestId).pipe(Effect.forkScoped);
               } else if (control.kind === "continue" && active && !interrupting) {
                 const activeRequestId = active.requestId;
