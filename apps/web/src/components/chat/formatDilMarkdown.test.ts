@@ -193,4 +193,38 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("[valid](<https://two.test/>)");
     expect(performance.now() - started).toBeLessThan(750);
   });
+  it("exits unfinished quoted and list fences at their container boundary", () => {
+    const marker = "urloutsidehttps://example.com";
+    for (const opening of ["> ~~~xml\n> literal\n\n", "- ~~~xml\n  literal\n\n"]) {
+      expect(formatDilMarkdown(opening + marker)).toContain("[outside](<https://example.com/>)");
+    }
+  });
+
+  it("never treats a four-space fence as an opening or closing delimiter", () => {
+    const literal = "urlliteralhttps://example.com";
+    const real = "urlrealhttps://example.com";
+    const source = ["~~~xml", "    ~~~", literal, "~~~", real].join("\n");
+    const result = formatDilMarkdown(source);
+    expect(result).toContain(literal);
+    expect(result).toContain("[real](<https://example.com/>)");
+    const indented = ["    ~~~xml", "    " + literal, "    ~~~", real].join("\n");
+    expect(formatDilMarkdown(indented)).toContain(literal);
+    expect(formatDilMarkdown(indented)).toContain("[real](<https://example.com/>)");
+  });
+
+  it("keeps URL markers in ordinary four-space-indented code literal", () => {
+    const literal = "urlliteralhttps://example.com";
+    expect(formatDilMarkdown("    " + literal + "\n\n" + literal)).toBe(
+      "    " + literal + "\n\n[literal](<https://example.com/>)",
+    );
+  });
+
+  it("handles many distinct unmatched backtick runs in near-linear time", () => {
+    const input =
+      Array.from({ length: 800 }, (_, i) => String.fromCharCode(96).repeat(i + 1)).join(" ") +
+      "\nurlrealhttps://example.com";
+    const start = performance.now();
+    expect(formatDilMarkdown(input)).toContain("[real](<https://example.com/>)");
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
 });

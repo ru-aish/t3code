@@ -61,20 +61,19 @@ function isEscapedTick(text: string, position: number): boolean {
   return slashCount % 2 === 1;
 }
 
-function closingInlineCode(text: string, start: number, ticks: number): number {
-  let candidate = start;
-  while ((candidate = text.indexOf("`", candidate)) >= 0) {
-    let end = candidate + 1;
-    while (text[end] === "`") end++;
-    // Backslashes within a code span are literal, not closing-delimiter escapes.
-    if (end - candidate === ticks) return end;
-    candidate = end;
-  }
-  return -1;
-}
-
 function formatOutsideFence(text: string): string {
   const hasDil = DIL_LINE.test(text);
+  // Match each backtick run in linear time, including unmatched delimiters.
+  // A backslash inside an open code span does not escape its closing run.
+  const nextCloser = new Map<number, number>();
+  const nextEndForLength = new Map<number, number>();
+  const runs = Array.from(text.matchAll(/`+/g));
+  for (let index = runs.length - 1; index >= 0; index--) {
+    const run = runs[index]!;
+    const length = run[0].length;
+    nextCloser.set(run.index, nextEndForLength.get(length) ?? -1);
+    nextEndForLength.set(length, run.index + length);
+  }
   let result = "";
   let cursor = 0;
   while (cursor < text.length) {
@@ -110,7 +109,7 @@ function formatOutsideFence(text: string): string {
     if (text[cursor] === "`" && !isEscapedTick(text, cursor)) {
       const start = cursor;
       while (text[cursor] === "`") cursor++;
-      const end = closingInlineCode(text, cursor, cursor - start);
+      const end = nextCloser.get(start) ?? -1;
       if (end >= 0) {
         result += text.slice(start, end);
         cursor = end;
@@ -149,55 +148,97 @@ function formatOutsideFence(text: string): string {
   return hasDil ? result.replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n") : result;
 }
 
-type MarkdownFence = { marker: "`" | "~"; length: number; quoteDepth: number };
+type MarkdownFence = {
+  marker: "`" | "~";
+  length: number;
+  quoteDepth: number;
+  listIndent: number;
+};
 
-function fenceStart(line: string): MarkdownFence | null {
-  // Protect fences nested in Markdown blockquotes, list items, and indented
-  // list continuations, not just column-zero code fences.
-  const match = /^((?: {0,3}>[ \t]?)* *(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)? *)(`{3,}|~{3,})/.exec(line);
-  if (!match) return null;
-  const marker = match[2]![0] as "`" | "~";
-  // Backtick fences cannot have backticks in their info string.
-  if (marker === "`" && line.slice(match[0].length).includes("`")) return null;
-  return { marker, length: match[2]!.length, quoteDepth: match[1]!.split(">").length - 1 };
-}
-
-function closesFence(line: string, fence: MarkdownFence): boolean {
-  const match = /^((?: {0,3}>[ \t]?)* *)(`+|~+)[ \t]*\r?$/.exec(line);
-  return (
-    !!match &&
-    match[1]!.split(">").length - 1 === fence.quoteDepth &&
-    match[2]![0] === fence.marker &&
-    match[2]!.length >= fence.length
-  );
+// Keep both fenced and indented Markdown source literal. A nested fence stops
+// when its list or blockquote container ends, not only on a closing delimiter.
+function markdownCodeRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let fence: MarkdownFence | null = null;
+  let start = -1;
+  let indented = false;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const lineEnd = text.indexOf("\n", cursor);
+    const end = lineEnd < 0 ? text.length : lineEnd + 1;
+    const line = text.slice(cursor, lineEnd < 0 ? end : lineEnd);
+    let rest = line;
+    let quotes = 0;
+    while (true) {
+      const quote = /^ {0,3}>[ \t]?/.exec(rest);
+      if (!quote) break;
+      quotes++;
+      rest = rest.slice(quote[0].length);
+    }
+    const blank = rest.trim().length === 0;
+    if (fence) {
+      const indent = /^ */.exec(rest)![0].length;
+      if (quotes !== fence.quoteDepth || (!blank && indent < fence.listIndent)) {
+        ranges.push({ start, end: cursor });
+        start = -1;
+        fence = null;
+        // Revisit this line outside the previous Markdown container.
+        continue;
+      }
+      const content = rest.slice(fence.listIndent);
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*\r?$/.exec(content);
+      if (close && close[1]![0] === fence.marker && close[1]!.length >= fence.length) {
+        ranges.push({ start, end });
+        start = -1;
+        fence = null;
+      }
+      cursor = end;
+      continue;
+    }
+    const codeIndented = /^(?: {4}|\t)/.test(rest);
+    if (indented) {
+      if (codeIndented || blank) {
+        cursor = end;
+        continue;
+      }
+      ranges.push({ start, end: cursor });
+      start = -1;
+      indented = false;
+      continue;
+    }
+    if (codeIndented) {
+      start = cursor;
+      indented = true;
+      cursor = end;
+      continue;
+    }
+    const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(rest);
+    const listIndent = list?.[0].length ?? 0;
+    const content = list ? rest.slice(listIndent) : rest.replace(/^ {0,3}/, "");
+    const opening = /^(`{3,}|~{3,})(.*)$/.exec(content);
+    if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
+      fence = {
+        marker: opening[1]![0] as "`" | "~",
+        length: opening[1]!.length,
+        quoteDepth: quotes,
+        listIndent,
+      };
+      start = cursor;
+    }
+    cursor = end;
+  }
+  if (start >= 0) ranges.push({ start, end: text.length });
+  return ranges;
 }
 
 export function formatDilMarkdown(text: string): string {
   if (!DIL_LINE.test(text) && !text.includes(URL_START)) return text;
   let result = "";
   let plainStart = 0;
-  let cursor = 0;
-  while (cursor < text.length) {
-    const lineEnd = text.indexOf("\n", cursor);
-    const end = lineEnd < 0 ? text.length : lineEnd + 1;
-    const line = text.slice(cursor, lineEnd < 0 ? end : lineEnd);
-    const opening = fenceStart(line);
-    if (!opening) {
-      cursor = end;
-      continue;
-    }
-    result += formatOutsideFence(text.slice(plainStart, cursor));
-    const fenceStartAt = cursor;
-    cursor = end;
-    while (cursor < text.length) {
-      const closeEnd = text.indexOf("\n", cursor);
-      const nextEnd = closeEnd < 0 ? text.length : closeEnd + 1;
-      const closeLine = text.slice(cursor, closeEnd < 0 ? nextEnd : closeEnd);
-      cursor = nextEnd;
-      if (closesFence(closeLine, opening)) break;
-    }
-    result += text.slice(fenceStartAt, cursor);
-    plainStart = cursor;
+  for (const range of markdownCodeRanges(text)) {
+    result += formatOutsideFence(text.slice(plainStart, range.start));
+    result += text.slice(range.start, range.end);
+    plainStart = range.end;
   }
   return result + formatOutsideFence(text.slice(plainStart));
 }

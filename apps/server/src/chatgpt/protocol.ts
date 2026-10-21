@@ -5,6 +5,89 @@ import type { ChatGPTUpdate } from "./connection.ts";
 export function normalizeStreamMessage(
   raw: unknown,
 ): Omit<ChatGPTUpdate, "kind" | "conversationId"> {
+  type MarkdownFence = {
+    marker: "`" | "~";
+    length: number;
+    quoteDepth: number;
+    listIndent: number;
+  };
+
+  // Keep both fenced and indented Markdown source literal. A nested fence stops
+  // when its list or blockquote container ends, not only on a closing delimiter.
+  function markdownCodeRanges(text: string): Array<{ start: number; end: number }> {
+    const ranges: Array<{ start: number; end: number }> = [];
+    let fence: MarkdownFence | null = null;
+    let start = -1;
+    let indented = false;
+    let cursor = 0;
+    while (cursor < text.length) {
+      const lineEnd = text.indexOf("\n", cursor);
+      const end = lineEnd < 0 ? text.length : lineEnd + 1;
+      const line = text.slice(cursor, lineEnd < 0 ? end : lineEnd);
+      let rest = line;
+      let quotes = 0;
+      while (true) {
+        const quote = /^ {0,3}>[ \t]?/.exec(rest);
+        if (!quote) break;
+        quotes++;
+        rest = rest.slice(quote[0].length);
+      }
+      const blank = rest.trim().length === 0;
+      if (fence) {
+        const indent = /^ */.exec(rest)![0].length;
+        if (quotes !== fence.quoteDepth || (!blank && indent < fence.listIndent)) {
+          ranges.push({ start, end: cursor });
+          start = -1;
+          fence = null;
+          // Revisit this line outside the previous Markdown container.
+          continue;
+        }
+        const content = rest.slice(fence.listIndent);
+        const close = /^ {0,3}(`{3,}|~{3,})[ \t]*\r?$/.exec(content);
+        if (close && close[1]![0] === fence.marker && close[1]!.length >= fence.length) {
+          ranges.push({ start, end });
+          start = -1;
+          fence = null;
+        }
+        cursor = end;
+        continue;
+      }
+      const codeIndented = /^(?: {4}|\t)/.test(rest);
+      if (indented) {
+        if (codeIndented || blank) {
+          cursor = end;
+          continue;
+        }
+        ranges.push({ start, end: cursor });
+        start = -1;
+        indented = false;
+        continue;
+      }
+      if (codeIndented) {
+        start = cursor;
+        indented = true;
+        cursor = end;
+        continue;
+      }
+      const list = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(rest);
+      const listIndent = list?.[0].length ?? 0;
+      const content = list ? rest.slice(listIndent) : rest.replace(/^ {0,3}/, "");
+      const opening = /^(`{3,}|~{3,})(.*)$/.exec(content);
+      if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
+        fence = {
+          marker: opening[1]![0] as "`" | "~",
+          length: opening[1]!.length,
+          quoteDepth: quotes,
+          listIndent,
+        };
+        start = cursor;
+      }
+      cursor = end;
+    }
+    if (start >= 0) ranges.push({ start, end: text.length });
+    return ranges;
+  }
+
   type Message = {
     message?: Message;
     data?: Message;
@@ -42,78 +125,49 @@ export function normalizeStreamMessage(
     // Walk source once so backticks inside SVG and SVG inside Markdown code fences
     // do not change how each other's boundaries are interpreted.
     const sections: Array<{ kind: "text" | "code" | "svg"; value: string }> = [];
+    const protectedRanges = markdownCodeRanges(displayText);
+    let protectedIndex = 0;
+    // Index equal-length backtick closers once; otherwise unmatched spans can
+    // repeatedly scan the entire remainder during incremental streaming.
+    const nextCloser = new Map<number, number>();
+    const nextEndForLength = new Map<number, number>();
+    const ticks = Array.from(displayText.matchAll(/`+/g));
+    for (let index = ticks.length - 1; index >= 0; index--) {
+      const tick = ticks[index]!;
+      const length = tick[0].length;
+      nextCloser.set(tick.index, nextEndForLength.get(length) ?? -1);
+      nextEndForLength.set(length, tick.index + length);
+    }
     let cursor = 0;
     let plainStart = 0;
     while (cursor < displayText.length) {
       const nextTag = displayText.indexOf("<", cursor);
-      const nextTick = displayText.indexOf("`", cursor);
-      const nextTilde = displayText.indexOf("~", cursor);
-      const nextCode =
-        nextTick < 0 ? nextTilde : nextTilde < 0 ? nextTick : Math.min(nextTick, nextTilde);
+      const nextCode = displayText.indexOf("`", cursor);
+      const codeRange = protectedRanges[protectedIndex];
+      const nextEvent = Math.min(
+        nextTag < 0 ? Infinity : nextTag,
+        nextCode < 0 ? Infinity : nextCode,
+      );
+      if (codeRange && codeRange.start <= nextEvent) {
+        if (plainStart < codeRange.start)
+          sections.push({ kind: "text", value: displayText.slice(plainStart, codeRange.start) });
+        sections.push({ kind: "code", value: displayText.slice(codeRange.start, codeRange.end) });
+        cursor = codeRange.end;
+        plainStart = cursor;
+        protectedIndex++;
+        continue;
+      }
       if (nextTag < 0 && nextCode < 0) break;
       if (nextCode >= 0 && (nextTag < 0 || nextCode < nextTag)) {
-        const marker = displayText[nextCode]!;
         let runEnd = nextCode + 1;
-        while (displayText[runEnd] === marker) runEnd++;
-        const runLength = runEnd - nextCode;
-        const lineStart = displayText.lastIndexOf("\n", nextCode - 1) + 1;
-        const prefix = displayText.slice(lineStart, nextCode);
-        const atFenceStart =
-          runLength >= 3 &&
-          // Protect Markdown fences nested inside blockquotes and list items.
-          /^(?: {0,3}>[ \t]?)* *(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)? *$/.test(prefix) &&
-          (marker === "~" ||
-            !displayText
-              .slice(
-                runEnd,
-                displayText.indexOf("\n", runEnd) < 0
-                  ? displayText.length
-                  : displayText.indexOf("\n", runEnd),
-              )
-              .includes("`"));
+        while (displayText[runEnd] === "`") runEnd++;
         let codeEnd = -1;
-        if (atFenceStart) {
-          // Fences close only at the start of a line with an equal-or-longer
-          // run. Backticks inside JavaScript strings are not fence closers.
-          const quoteDepth = prefix.split(">").length - 1;
-          let line = displayText.indexOf("\n", runEnd);
-          while (line >= 0) {
-            const start = line + 1;
-            const lineEnd = displayText.indexOf("\n", start);
-            const end = lineEnd < 0 ? displayText.length : lineEnd;
-            const candidate = displayText.slice(start, end);
-            const close = /^((?: {0,3}>[ \t]?)* *)([`~]{3,})[ \t]*\r?$/.exec(candidate);
-            if (
-              close &&
-              close[1]!.split(">").length - 1 === quoteDepth &&
-              close[2]![0] === marker &&
-              close[2]!.length >= runLength
-            ) {
-              codeEnd = lineEnd < 0 ? end : lineEnd + 1;
-              break;
-            }
-            line = lineEnd;
-          }
-          if (codeEnd < 0) codeEnd = displayText.length;
-        } else if (marker === "`") {
-          // An escaped opening delimiter is ordinary Markdown text. Once a
-          // code span opens, backslashes are literal (even before its closer).
-          let slashes = 0;
-          for (let i = nextCode - 1; i >= 0 && displayText[i] === "\\"; i--) slashes++;
-          if (slashes % 2 === 0) {
-            let seek = runEnd;
-            while ((seek = displayText.indexOf("`", seek)) >= 0) {
-              let closeEnd = seek + 1;
-              while (displayText[closeEnd] === "`") closeEnd++;
-              if (closeEnd - seek === runLength) {
-                codeEnd = closeEnd;
-                break;
-              }
-              seek = closeEnd;
-            }
-          }
-          // Preserve unfinished multiline code while new tokens stream in.
-          if (codeEnd < 0 && runLength >= 3) codeEnd = displayText.length;
+        // A backslash can escape an opening run, but is literal once open.
+        let slashes = 0;
+        for (let i = nextCode - 1; i >= 0 && displayText[i] === "\\"; i--) slashes++;
+        if (slashes % 2 === 0) {
+          const candidate = nextCloser.get(nextCode) ?? -1;
+          if (candidate <= (codeRange?.start ?? Infinity)) codeEnd = candidate;
         }
         if (codeEnd < 0) {
           cursor = runEnd;

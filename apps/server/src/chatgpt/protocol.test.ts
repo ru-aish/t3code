@@ -371,4 +371,40 @@ describe("ChatGPT protocol", () => {
     expect(embedded.url.href).toBe(azure.url.href);
     expect(() => imageUploadDestination("http://localhost/file", "image/png")).toThrow("HTTPS");
   });
+  it("extracts SVG after a nested fence container ends", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    for (const prefix of ["> ~~~xml\n> literal\n\n", "- ~~~xml\n  literal\n\n"]) {
+      const input = prefix + svg;
+      const output = normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+      }).text;
+      expect(output).toContain("```svg\n" + svg + "\n```".replaceAll("`", String.fromCharCode(96)));
+    }
+  });
+
+  it("respects fence indentation when extracting SVG", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const input = ["~~~xml", "    ~~~", svg, "~~~", svg].join("\n");
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [input] } },
+    }).text;
+    expect(output).toContain("    ~~~\n" + svg + "\n~~~");
+    expect((output ?? "").split("```svg".replaceAll("`", String.fromCharCode(96)))).toHaveLength(2);
+    const indented = "    ~~~xml\n    " + svg + "\n    ~~~\n" + svg;
+    const result = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [indented] } },
+    }).text;
+    expect(result).toContain("    " + svg);
+    expect((result ?? "").split("```svg".replaceAll("`", String.fromCharCode(96)))).toHaveLength(2);
+  });
+
+  it("does not promote four-space-indented SVG code to a diagram", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const source = "    " + svg + "\n\n" + svg;
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [source] } },
+    }).text;
+    expect(output).toContain("    " + svg);
+    expect((output ?? "").split("```svg".replaceAll("`", String.fromCharCode(96)))).toHaveLength(2);
+  });
 });
