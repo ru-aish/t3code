@@ -1,78 +1,196 @@
 /**
- * T3 stores historical assistant text as Markdown. Older ChatGPT sessions can
- * contain raw DIL markup or ChatGPT link references instead; degrade these to
- * readable Markdown without changing code spans or ordinary HTML.
+ * T3 stores assistant messages as Markdown. Some ChatGPT messages contain rich
+ * link markers or presentation-only DIL markup. Convert those outside Markdown
+ * code while keeping raw examples unchanged, including during streaming.
  */
 const DIL_LINE = /(?:^|\n)[ \t]*<(?:box|row|col|card|button|badge|icon|title|caption)\b/;
-const DIL_TAG = /<\/?(?:box|row|col|card|button|badge|icon|text|title|caption|grid|grid-item|divider|spacer|pressable)\b[^>]*\/?>/g;
-const CHATGPT_URL = /url([^\n]*)([^\n]*)(\*\*\\\]\(https?:\/\/[^)\n]*%EE%88%81[^)\n]*\))?/g;
+const DIL_TAG =
+  /^<\/?(?:box|row|col|card|button|badge|icon|text|title|caption|grid|grid-item|divider|spacer|pressable)\b[^>]*\/?>/;
+const URL_START = "url";
+const URL_SEPARATOR = "";
+const URL_END = "";
+const DAMAGED_LINK_SUFFIX = /^\*\*\\\]\(https?:\/\/[^\n)]*%EE%88%81[^\n)]*\)/;
 
-function formatChatGPTUrls(text: string): string {
-  if (!text.includes("url")) return text;
-  return text.replace(CHATGPT_URL, (_match, rawLabel: string, rawDestination: string, damagedSuffix?: string) => {
-    const label = rawLabel.trim().replace(/\\([\\`*_{}[\]()#+\-.!|])/g, "$1");
-    const escapedLabel = label.replace(/([\\`*_{}[\]()#+\-.!|])/g, "\\$1") || "Open link";
-    // Historical fallbacks sometimes accidentally include the opening '[' of a
-    // Markdown destination in a ChatGPT reference.
-    const destination = rawDestination.trim().replace(/^\[/, "").replace(/\]$/, "");
-    try {
-      const url = new URL(destination);
-      if (url.protocol !== "https:" && url.protocol !== "http:") return escapedLabel;
-      if (!url.hostname || url.username || url.password) return escapedLabel;
-      // Angle-delimited destinations preserve parentheses and other URL punctuation.
-      const link = `[${escapedLabel}](<${url.href}>)`;
-      // An older malformed conversion duplicated the URL after a literal
-      // "**\\](...%EE%88%81...)". Preserve the closing bold delimiter only.
-      return damagedSuffix ? link + "**" : link;
-    } catch {
-      return escapedLabel;
+function markdownLabel(raw: string): string {
+  // Preserve inline code within a link's label; escape Markdown punctuation
+  // outside it so a model-provided label cannot create a second destination.
+  const unescaped = raw.trim().replace(/\\([\\`*_{}[\]()#+\-.!|])/g, "$1");
+  let output = "";
+  let cursor = 0;
+  while (cursor < unescaped.length) {
+    if (unescaped[cursor] === "`") {
+      let end = cursor;
+      while (unescaped[end] === "`") end++;
+      const marker = unescaped.slice(cursor, end);
+      const closing = unescaped.indexOf(marker, end);
+      if (closing >= 0 && unescaped[closing + marker.length] !== "`") {
+        output += unescaped.slice(cursor, closing + marker.length);
+        cursor = closing + marker.length;
+        continue;
+      }
     }
-  });
+    output += unescaped[cursor]!.replace(/([\\`*_{}[\]()#+\-.!|])/g, "\\$1");
+    cursor++;
+  }
+  return output || "Open link";
 }
 
-function formatOutsideCode(text: string): string {
-  const withLinks = formatChatGPTUrls(text);
-  if (!DIL_LINE.test(withLinks)) return withLinks;
-  return withLinks
-    .replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
-      const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
-      const openEnd = button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
-      const label = button.slice(openEnd, button.lastIndexOf("</button>"))
-        .replace(/<[^>]+>/g, "").trim();
-      return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
-    })
-    .replace(DIL_TAG, "")
-    .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
+function safeLink(label: string, destination: string): string {
+  // A leading '[' appears in some older malformed ChatGPT transport text.
+  // Otherwise preserve every URL character, including a trailing ']'.
+  const raw = destination.trim().replace(/^\[(?=https?:\/\/)/i, "");
+  try {
+    const url = new URL(raw);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) {
+      return label;
+    }
+    return "[" + label + "](<" + url.href + ">)";
+  } catch {
+    return label;
+  }
+}
+
+function isEscapedTick(text: string, position: number): boolean {
+  let slashCount = 0;
+  while (position > 0 && text[--position] === "\\") slashCount++;
+  return slashCount % 2 === 1;
+}
+
+function closingInlineCode(text: string, start: number, ticks: number): number {
+  let candidate = start;
+  while ((candidate = text.indexOf("`", candidate)) >= 0) {
+    let end = candidate + 1;
+    while (text[end] === "`") end++;
+    if (end - candidate === ticks && !isEscapedTick(text, candidate)) return end;
+    candidate = end;
+  }
+  return -1;
+}
+
+function formatOutsideFence(text: string): string {
+  const hasDil = DIL_LINE.test(text);
+  let result = "";
+  let cursor = 0;
+  while (cursor < text.length) {
+    if (text.startsWith(URL_START, cursor)) {
+      // Bound each attempt by the next marker. An incomplete token cannot
+      // consume a later complete link or rescan every remaining prefix.
+      const next = text.indexOf(URL_START, cursor + URL_START.length);
+      const limit = next < 0 ? text.length : next;
+      const split = text.indexOf(URL_SEPARATOR, cursor + URL_START.length);
+      const end =
+        split < 0 || split >= limit ? -1 : text.indexOf(URL_END, split + URL_SEPARATOR.length);
+      const extra =
+        split < 0 || split >= limit
+          ? -1
+          : text.indexOf(URL_SEPARATOR, split + URL_SEPARATOR.length);
+      if (end < 0 || end >= limit || (extra >= 0 && extra < end)) {
+        result += text.slice(cursor, limit);
+        cursor = limit;
+        continue;
+      }
+      const label = markdownLabel(text.slice(cursor + URL_START.length, split));
+      const destination = text.slice(split + URL_SEPARATOR.length, end);
+      result += safeLink(label, destination);
+      cursor = end + URL_END.length;
+      // Historical malformed fallbacks duplicated the reference into a
+      // broken Markdown destination. Retain only the bold closing delimiter.
+      const suffix = DAMAGED_LINK_SUFFIX.exec(text.slice(cursor, cursor + 4096));
+      if (suffix) {
+        result += "**";
+        cursor += suffix[0].length;
+      }
+      continue;
+    }
+    if (text[cursor] === "`" && !isEscapedTick(text, cursor)) {
+      const start = cursor;
+      while (text[cursor] === "`") cursor++;
+      const end = closingInlineCode(text, cursor, cursor - start);
+      if (end >= 0) {
+        result += text.slice(start, end);
+        cursor = end;
+      } else if (cursor - start >= 3) {
+        // A partial multiline code span is common during streaming.
+        // Do not reinterpret its unfinished body as rendered content.
+        return result + text.slice(start);
+      } else {
+        result += text.slice(start, cursor);
+      }
+      continue;
+    }
+    if (hasDil && text[cursor] === "<") {
+      if (/^<button(?=[\s/>])/.test(text.slice(cursor, cursor + 8))) {
+        const close = text.indexOf("</button>", cursor);
+        if (close >= 0) {
+          const button = text.slice(cursor, close + "</button>".length);
+          const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
+          const openEnd =
+            button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
+          const label = button
+            .slice(openEnd, button.length - "</button>".length)
+            .replace(/<[^>]+>/g, "")
+            .trim();
+          result += url ? "[" + (label || "Open link") + "](" + url + ")" : label;
+          cursor = close + "</button>".length;
+          continue;
+        }
+      }
+      const dil = DIL_TAG.exec(text.slice(cursor, cursor + 4096));
+      if (dil) {
+        cursor += dil[0].length;
+        continue;
+      }
+    }
+    result += text[cursor++];
+  }
+  return hasDil ? result.replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n") : result;
+}
+
+function fenceStart(line: string): { marker: "`" | "~"; length: number } | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (!match) return null;
+  const marker = match[1]![0] as "`" | "~";
+  // Backtick fences cannot have backticks in their info string.
+  if (marker === "`" && line.slice(match[0].length).includes("`")) return null;
+  return { marker, length: match[1]!.length };
+}
+
+function closesFence(line: string, fence: { marker: "`" | "~"; length: number }): boolean {
+  const match = /^ {0,3}(`+|~+)[ \t]*\r?$/.exec(line);
+  return !!match && match[1]![0] === fence.marker && match[1]!.length >= fence.length;
 }
 
 export function formatDilMarkdown(text: string): string {
-  if (!DIL_LINE.test(text) && !text.includes("url")) return text;
-  // Leave code and examples unchanged, including inline code and unclosed fences
-  // received mid-stream. Only transform text outside matching backtick runs.
+  if (!DIL_LINE.test(text) && !text.includes(URL_START)) return text;
   let result = "";
   let plainStart = 0;
   let cursor = 0;
   while (cursor < text.length) {
-    if (text[cursor] !== "`") {
-      cursor++;
+    const lineEnd = text.indexOf("\n", cursor);
+    const end = lineEnd < 0 ? text.length : lineEnd + 1;
+    const line = text.slice(cursor, lineEnd < 0 ? end : lineEnd);
+    const opening = fenceStart(line);
+    if (!opening) {
+      cursor = end;
       continue;
     }
-    const openStart = cursor;
-    while (text[cursor] === "`") cursor++;
-    const ticks = cursor - openStart;
-    let closing = cursor;
-    while ((closing = text.indexOf("`", closing)) >= 0) {
-      let closeEnd = closing;
-      while (text[closeEnd] === "`") closeEnd++;
-      if (closeEnd - closing === ticks) break;
-      closing = closeEnd;
+    result += formatOutsideFence(text.slice(plainStart, cursor));
+    const fenceStartAt = cursor;
+    cursor = end;
+    while (cursor < text.length) {
+      const closeEnd = text.indexOf("\n", cursor);
+      const nextEnd = closeEnd < 0 ? text.length : closeEnd + 1;
+      const closeLine = text.slice(cursor, closeEnd < 0 ? nextEnd : closeEnd);
+      cursor = nextEnd;
+      if (closesFence(closeLine, opening)) break;
     }
-    if (closing < 0 && ticks < 3) continue;
-    result += formatOutsideCode(text.slice(plainStart, openStart));
-    if (closing < 0) return result + text.slice(openStart);
-    cursor = closing + ticks;
-    result += text.slice(openStart, cursor);
+    result += text.slice(fenceStartAt, cursor);
     plainStart = cursor;
   }
-  return result + formatOutsideCode(text.slice(plainStart));
+  return result + formatOutsideFence(text.slice(plainStart));
 }
