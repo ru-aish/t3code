@@ -1970,17 +1970,19 @@ export const layerWithOptions = (
                           )
                         : Effect.void,
                     ),
-                    // An ambiguous failed send can still have a real native terminal.
-                    // Settle the send on every exit so that terminal can release the
-                    // admission, but never grant steering after a failed send.
+                    // An interrupted Effect may leave the underlying JavaScript
+                    // submission promise running. Do not let a terminal event
+                    // release admission before that native operation has settled.
                     Effect.onExit((exit) =>
-                      settleNativeSend(
-                        providerSessionId,
-                        input.providerThread.id,
-                        input.attemptId,
-                        runtime,
-                        Exit.isSuccess(exit),
-                      ),
+                      Exit.hasInterrupts(exit)
+                        ? Effect.void
+                        : settleNativeSend(
+                            providerSessionId,
+                            input.providerThread.id,
+                            input.attemptId,
+                            runtime,
+                            Exit.isSuccess(exit),
+                          ),
                     ),
                   )
                 : Effect.void,

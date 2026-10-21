@@ -5297,11 +5297,13 @@ it.effect("ProviderSessionManagerV2 serializes native generations until the prio
   }),
 );
 
-it.effect.each(["pending", "rejected"] as const)(
-  "ProviderSessionManagerV2 fails closed when a prior generation has no terminal (%s)",
+it.effect.each(["pending", "rejected", "interrupted"] as const)(
+  "ProviderSessionManagerV2 fails closed on an unverified native generation (%s)",
   (failureMode) => Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     const nativeStarts = yield* Ref.make(0);
+    const nativeEntered = yield* Deferred.make<void>();
+    const nativePromise = Promise.withResolvers<void>();
     yield* Effect.gen(function* () {
       const sink = yield* EventSink.EventSinkV2;
       const ids = yield* IdAllocator.IdAllocatorV2;
@@ -5356,14 +5358,35 @@ it.effect.each(["pending", "rejected"] as const)(
       if (failureMode === "rejected") {
         assert.isTrue(Exit.isFailure(yield* Fiber.join(first)));
       }
+      if (failureMode === "interrupted") {
+        yield* Deferred.await(nativeEntered);
+        // Effect.tryPromise can be interrupted while its underlying promise
+        // and native submission remain in flight.
+        yield* Fiber.interrupt(first);
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.offer(queue!, {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId: providerThread.id,
+          providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "first" }),
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+        yield* Effect.yieldNow;
+      }
       const second = yield* start(2).pipe(Effect.exit, Effect.forkChild);
       yield* Effect.yieldNow;
       yield* TestClock.adjust("31 seconds");
       const outcome = yield* Fiber.join(second);
       assert.isTrue(Exit.isFailure(outcome));
       assert.equal(yield* Ref.get(nativeStarts), 1);
-      // A timeout does not give the second run permission to submit.
+      // Even a matching terminal must not override an interrupted,
+      // still-running native send. Only a verified replacement can reuse it.
       yield* Fiber.interrupt(first);
+      nativePromise.resolve();
     }).pipe(
       Effect.provide(
         layerTest({
@@ -5375,7 +5398,20 @@ it.effect.each(["pending", "rejected"] as const)(
                 ? Effect.void
                 : failureMode === "pending"
                   ? Effect.never
-                  : Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                  : failureMode === "interrupted"
+                    ? Deferred.succeed(nativeEntered, undefined).pipe(
+                        Effect.andThen(Effect.tryPromise({
+                          try: () => nativePromise.promise,
+                          catch: (cause) => new ProviderAdapter.ProviderAdapterTurnStartError({
+                            driver: CODEX_DRIVER,
+                            threadId: ThreadId.make("thread-provider-generation-no-terminal"),
+                            providerThreadId: "uncertain" as never,
+                            runId: "uncertain" as never,
+                            cause,
+                          }),
+                        })),
+                      )
+                    : Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
                       driver: CODEX_DRIVER,
                       threadId: ThreadId.make("thread-provider-generation-no-terminal"),
                       providerThreadId: "uncertain" as never,
