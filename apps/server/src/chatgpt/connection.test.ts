@@ -337,6 +337,27 @@ describe("ChatGPT submission identity", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
   });
+  it("makes configured local MCPs visible even on a first-turn greeting", () => {
+    const inventory = {
+      servers: [
+        { name: "browser-tools", transport: "stdio", status: "configured" },
+        { name: "remote-docs", transport: "streamable-http", status: "configured" },
+      ],
+    };
+    for (const message of ["hi", "hello", "continue"]) {
+      const prompt = executionPrompt("registered-id", "/work/project", message, undefined, inventory);
+      expect(prompt).toContain('"name":"browser-tools"');
+      expect(prompt).toContain('"name":"remote-docs"');
+      expect(prompt).toContain('local_mcp(action="tools"');
+      expect(prompt).toContain('local_mcp(action="call"');
+      expect(prompt).toContain('session_id="registered-id"');
+      expect(prompt.endsWith(`\n\n${message}`)).toBe(true);
+    }
+    expect(executionPrompt("registered-id", "/work/project", "hi")).toContain(
+      "Local MCP catalog unavailable",
+    );
+  });
+
   it("injects the stored destination identity into every prompt including continuations", () => {
     for (const text of ["initial request", "follow-up request", "continue"]) {
       const compiled = executionPrompt("registered-id", "/work/project", text);
@@ -521,6 +542,9 @@ describe("ChatGPT image and project submissions", () => {
       cacheDir: directory,
     };
     const connection = new ChatGPTConnection(options);
+    const inventory = vi.spyOn(connection, "control").mockResolvedValue({
+      servers: [{ name: "browser-tools", transport: "stdio", status: "configured" }],
+    });
     Object.assign(connection, { renderer: async () => renderer });
     const upload = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
       expect(Buffer.from(options!.body as Uint8Array)).toEqual(bytes);
@@ -576,6 +600,10 @@ describe("ChatGPT image and project submissions", () => {
       );
       expect(JSON.stringify(requests[0])).toContain("test-orchestration-command");
       expect(JSON.stringify(requests[1])).toContain("test-orchestration-command");
+      expect(JSON.stringify(requests[0])).toContain('\\"name\\":\\"browser-tools\\"');
+      expect(JSON.stringify(requests[1])).toContain('\\"name\\":\\"browser-tools\\"');
+      expect(inventory).toHaveBeenCalledTimes(2);
+      expect(inventory).toHaveBeenCalledWith("mcp-inventory", {}, expect.any(AbortSignal));
       expect(requests[1]?.parent_message_id).toBe("canonical-parent");
       expect(requests[1]?.gizmo_id).toBe("g-p-selected");
       expect(upload).toHaveBeenCalledTimes(1);
