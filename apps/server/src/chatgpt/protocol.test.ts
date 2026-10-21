@@ -115,6 +115,40 @@ describe("ChatGPT protocol", () => {
     expect(normalized.text).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
   });
 
+  it("ignores closing SVG tokens in comments and CDATA", () => {
+    for (const embedded of ["<!-- </svg> -->", "<![CDATA[</svg>]]>"]) {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg">${embedded}<circle r="1"/></svg>`;
+      const output = normalizeStreamMessage({
+        message: { author: { role: "assistant" }, channel: "final", content: { parts: [svg] } },
+      }).text;
+      expect(output).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
+    }
+  });
+
+  it("does not split SVG into Markdown sections at inline code fences", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><text>```hello```</text></svg>';
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [svg] } },
+    }).text;
+    expect(output).toContain(`\`\`\`\`svg\n${svg}\n\`\`\`\``);
+  });
+
+  it("retains literal SVG code fenced by the assistant", () => {
+    const fenced = '```svg\n<svg><circle r="1"/></svg>\n```';
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [fenced] } },
+    }).text;
+    expect(output).toBe(fenced);
+  });
+
+  it("supports self-closing SVG with whitespace", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" />';
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [svg] } },
+    }).text;
+    expect(output).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
+  });
+
   it("degrades a final DIL component into readable Markdown when no fallback exists", () => {
     const rich = [
       "## Ready",

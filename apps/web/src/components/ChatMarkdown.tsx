@@ -977,82 +977,23 @@ function MarkdownCodeBlock({
   );
 }
 
-function MarkdownSvgCodeBlock({
+function MarkdownDiagramCodeBlock({
   code,
+  language,
   fenceTitle,
   theme,
   isStreaming,
+  sourceLabel,
+  diagram,
   children,
 }: {
   code: string;
+  language: "svg" | "mermaid";
   fenceTitle: string | null;
   theme: "light" | "dark";
   isStreaming: boolean;
-  children: ReactNode;
-}) {
-  const [showCode, setShowCode] = useState(false);
-  const searching = use(MarkdownFindContext);
-  const sourceRevealRef = useFindRevealRef(useCallback(() => setShowCode(true), []));
-  const showDiagram = !showCode && !isStreaming && code.trim().length > 0;
-  return (
-    <MarkdownCodeBlock
-      code={code}
-      language="svg"
-      fenceTitle={fenceTitle}
-      theme={theme}
-      isStreaming={isStreaming}
-      canWrap={!showDiagram}
-      diagram={showDiagram}
-      viewToggle={
-        isStreaming ? null : (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  variant="ghost-muted"
-                  size="icon-xs"
-                  onClick={() => setShowCode((value) => !value)}
-                  aria-label={showCode ? "Show image" : "Show code"}
-                />
-              }
-            >
-              {showCode ? <WorkflowIcon className="size-3" /> : <CodeIcon className="size-3" />}
-            </TooltipTrigger>
-            <TooltipPopup side="top">{showCode ? "Show image" : "Show code"}</TooltipPopup>
-          </Tooltip>
-        )
-      }
-    >
-      {showDiagram ? (
-        <>
-          <SafeSvgDiagram source={code} />
-          {searching ? (
-            <pre ref={sourceRevealRef} hidden>
-              {code}
-            </pre>
-          ) : null}
-        </>
-      ) : (
-        children
-      )}
-    </MarkdownCodeBlock>
-  );
-}
-
-function MarkdownMermaidCodeBlock({
-  code,
-  fenceTitle,
-  theme,
-  isStreaming,
-  onExpand,
-  children,
-}: {
-  code: string;
-  fenceTitle: string | null;
-  theme: "light" | "dark";
-  isStreaming: boolean;
-  onExpand: (imageUrl: string) => void;
+  sourceLabel: string;
+  diagram: ReactNode;
   children: ReactNode;
 }) {
   const [showCode, setShowCode] = useState(false);
@@ -1060,11 +1001,11 @@ function MarkdownMermaidCodeBlock({
   const revealSource = useCallback(() => setShowCode(true), []);
   const sourceRevealRef = useFindRevealRef(revealSource);
   const showDiagram = !showCode && !isStreaming && code.trim().length > 0;
-  const toggleLabel = showCode ? "Show diagram" : "Show code";
+  const toggleLabel = showCode ? sourceLabel : "Show code";
   return (
     <MarkdownCodeBlock
       code={code}
-      language="mermaid"
+      language={language}
       fenceTitle={fenceTitle}
       theme={theme}
       isStreaming={isStreaming}
@@ -1092,6 +1033,73 @@ function MarkdownMermaidCodeBlock({
       }
     >
       {showDiagram ? (
+        <>
+          {diagram}
+          {searching ? (
+            <pre ref={sourceRevealRef} hidden>
+              {code}
+            </pre>
+          ) : null}
+        </>
+      ) : (
+        children
+      )}
+    </MarkdownCodeBlock>
+  );
+}
+
+function MarkdownSvgCodeBlock({
+  code,
+  fenceTitle,
+  theme,
+  isStreaming,
+  children,
+}: {
+  code: string;
+  fenceTitle: string | null;
+  theme: "light" | "dark";
+  isStreaming: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <MarkdownDiagramCodeBlock
+      code={code}
+      language="svg"
+      fenceTitle={fenceTitle}
+      theme={theme}
+      isStreaming={isStreaming}
+      sourceLabel="Show image"
+      diagram={<SafeSvgDiagram source={code} />}
+    >
+      {children}
+    </MarkdownDiagramCodeBlock>
+  );
+}
+
+function MarkdownMermaidCodeBlock({
+  code,
+  fenceTitle,
+  theme,
+  isStreaming,
+  onExpand,
+  children,
+}: {
+  code: string;
+  fenceTitle: string | null;
+  theme: "light" | "dark";
+  isStreaming: boolean;
+  onExpand: (imageUrl: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <MarkdownDiagramCodeBlock
+      code={code}
+      language="mermaid"
+      fenceTitle={fenceTitle}
+      theme={theme}
+      isStreaming={isStreaming}
+      sourceLabel="Show diagram"
+      diagram={
         <RenderErrorBoundary resetKeys={[code, theme]} fallback={children}>
           <Suspense
             fallback={
@@ -1102,16 +1110,11 @@ function MarkdownMermaidCodeBlock({
           >
             <MermaidDiagram source={code} theme={theme} onExpand={onExpand} />
           </Suspense>
-          {searching ? (
-            <pre ref={sourceRevealRef} hidden>
-              {code}
-            </pre>
-          ) : null}
         </RenderErrorBoundary>
-      ) : (
-        children
-      )}
-    </MarkdownCodeBlock>
+      }
+    >
+      {children}
+    </MarkdownDiagramCodeBlock>
   );
 }
 

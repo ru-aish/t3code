@@ -39,77 +39,129 @@ export function normalizeStreamMessage(
   ) {
     // Some ChatGPT surfaces omit the fallback. Turn its presentation-only DIL
     // into readable Markdown without altering fenced source-code examples.
-    displayText = displayText
-      .split(/(```[\s\S]*?```)/g)
-      .map((section, index) => {
-        if (index % 2 === 1) return section;
-        const chunks: { value: string; svg: boolean }[] = [];
-        let cursor = 0;
-        let svgStart = -1;
-        let depth = 0;
-        const svgTag = /<\/?svg\b/gi;
-        let match: RegExpExecArray | null;
-        while ((match = svgTag.exec(section)) !== null) {
-          const opening = !match[0].startsWith("</");
-          if (depth === 0 && !opening) continue;
-          // Scan the tag boundary without mistaking '>' inside quoted attributes
-          // for the end of a nested SVG opening tag.
-          let quote: string | null = null;
-          let tagEnd = -1;
-          for (let i = match.index + match[0].length; i < section.length; i++) {
-            const char = section[i];
-            if (quote) {
-              if (char === quote) quote = null;
-            } else if (char === '"' || char === "'") {
-              quote = char;
-            } else if (char === ">") {
-              tagEnd = i;
-              break;
-            }
-          }
-          if (tagEnd < 0) break;
-          svgTag.lastIndex = tagEnd + 1;
-          if (opening) {
-            if (depth === 0) svgStart = match.index;
-            if (section[tagEnd - 1] !== "/") depth++;
-          } else {
-            depth--;
-          }
-          if (depth === 0 && svgStart >= 0) {
-            if (svgStart > cursor)
-              chunks.push({ value: section.slice(cursor, svgStart), svg: false });
-            chunks.push({ value: section.slice(svgStart, tagEnd + 1), svg: true });
-            cursor = tagEnd + 1;
-            svgStart = -1;
+    // Walk source once so backticks inside SVG and SVG inside Markdown code fences
+    // do not change how each other's boundaries are interpreted.
+    const sections: Array<{ kind: "text" | "code" | "svg"; value: string }> = [];
+    let cursor = 0;
+    let plainStart = 0;
+    while (cursor < displayText.length) {
+      const nextTag = displayText.indexOf("<", cursor);
+      const nextFence = displayText.indexOf("```", cursor);
+      if (nextTag < 0 && nextFence < 0) break;
+      if (nextFence >= 0 && (nextTag < 0 || nextFence < nextTag)) {
+        const fenceEnd = displayText.indexOf("```", nextFence + 3);
+        if (fenceEnd < 0) {
+          if (plainStart < nextFence)
+            sections.push({ kind: "text", value: displayText.slice(plainStart, nextFence) });
+          sections.push({ kind: "code", value: displayText.slice(nextFence) });
+          plainStart = displayText.length;
+          break;
+        }
+        if (plainStart < nextFence)
+          sections.push({ kind: "text", value: displayText.slice(plainStart, nextFence) });
+        sections.push({ kind: "code", value: displayText.slice(nextFence, fenceEnd + 3) });
+        cursor = fenceEnd + 3;
+        plainStart = cursor;
+        continue;
+      }
+      if (displayText.startsWith("<!--", nextTag)) {
+        const end = displayText.indexOf("-->", nextTag + 4);
+        cursor = end < 0 ? displayText.length : end + 3;
+        continue;
+      }
+      if (!/^<svg(?=[\s/>])/i.test(displayText.slice(nextTag, nextTag + 5))) {
+        cursor = nextTag + 1;
+        continue;
+      }
+      let depth = 0;
+      let svgEnd = -1;
+      let position = nextTag;
+      while (position < displayText.length) {
+        const lt = displayText.indexOf("<", position);
+        if (lt < 0) break;
+        if (displayText.startsWith("<!--", lt)) {
+          const end = displayText.indexOf("-->", lt + 4);
+          if (end < 0) break;
+          position = end + 3;
+          continue;
+        }
+        if (displayText.startsWith("<![CDATA[", lt)) {
+          const end = displayText.indexOf("]]>", lt + 9);
+          if (end < 0) break;
+          position = end + 3;
+          continue;
+        }
+        const svgTag = /^<(\/?)svg(?=[\s/>])/i.exec(displayText.slice(lt, lt + 6));
+        let quote: string | null = null;
+        let tagEnd = -1;
+        for (let i = lt + 1; i < displayText.length; i++) {
+          const char = displayText[i];
+          if (quote) {
+            if (char === quote) quote = null;
+          } else if (char === '"' || char === "'") {
+            quote = char;
+          } else if (char === ">") {
+            tagEnd = i;
+            break;
           }
         }
-        chunks.push({ value: section.slice(cursor), svg: false });
-        return chunks
-          .map(({ value: part, svg }) => {
-            if (svg) {
-              let longestTicks = 2;
-              for (const match of part.matchAll(/`+/g)) {
-                longestTicks = Math.max(longestTicks, match[0].length);
-              }
-              const fence = "`".repeat(longestTicks + 1);
-              return `\n\n${fence}svg\n${part}\n${fence}\n\n`;
+        if (tagEnd < 0) break;
+        if (svgTag) {
+          let last = tagEnd - 1;
+          while (last > lt && /\s/.test(displayText[last])) last--;
+          if (svgTag[1]) {
+            depth--;
+            if (depth === 0) {
+              svgEnd = tagEnd + 1;
+              break;
             }
-            const buttons = part.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
-              const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
-              const openEnd =
-                button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
-              const label = button
-                .slice(openEnd, button.lastIndexOf("</button>"))
-                .replace(/<[^>]+>/g, "")
-                .trim();
-              return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
-            });
-            return buttons.replace(
-              /<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g,
-              "",
-            );
-          })
-          .join("");
+          } else if (displayText[last] !== "/") {
+            depth++;
+          } else if (depth === 0) {
+            svgEnd = tagEnd + 1;
+            break;
+          }
+        }
+        position = tagEnd + 1;
+      }
+      if (svgEnd < 0) {
+        cursor = nextTag + 4;
+        continue;
+      }
+      if (plainStart < nextTag)
+        sections.push({ kind: "text", value: displayText.slice(plainStart, nextTag) });
+      sections.push({ kind: "svg", value: displayText.slice(nextTag, svgEnd) });
+      cursor = svgEnd;
+      plainStart = cursor;
+    }
+    if (plainStart < displayText.length) {
+      sections.push({ kind: "text", value: displayText.slice(plainStart) });
+    }
+    displayText = sections
+      .map(({ kind, value }) => {
+        if (kind === "code") return value;
+        if (kind === "svg") {
+          let longestTicks = 2;
+          for (const match of value.matchAll(/`+/g)) {
+            longestTicks = Math.max(longestTicks, match[0].length);
+          }
+          const fence = "`".repeat(longestTicks + 1);
+          return `\n\n${fence}svg\n${value}\n${fence}\n\n`;
+        }
+        const buttons = value.replace(/<button\b[\s\S]*?<\/button>/g, (button) => {
+          const url = button.match(/GenUI\.openUrl\(\s*["'](https?:\/\/[^"']+)["']\s*\)/)?.[1];
+          const openEnd =
+            button.indexOf("}>") >= 0 ? button.indexOf("}>") + 2 : button.indexOf(">") + 1;
+          const label = button
+            .slice(openEnd, button.lastIndexOf("</button>"))
+            .replace(/<[^>]+>/g, "")
+            .trim();
+          return url ? "[" + (label || "Open link") + "](" + url + ")" : label;
+        });
+        return buttons.replace(
+          /<\/?(?:box|row|col|card|badge|icon|text|title|caption|grid|grid-item|divider|spacer|button)\b[^>]*\/?>/g,
+          "",
+        );
       })
       .join("")
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
