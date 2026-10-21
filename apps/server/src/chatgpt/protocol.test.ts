@@ -149,6 +149,26 @@ describe("ChatGPT protocol", () => {
     expect(output).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
   });
 
+  it("scans unclosed nested SVG in bounded time during streaming", () => {
+    const unclosed = "<svg><svg>".repeat(2_000);
+    const started = performance.now();
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [unclosed] } },
+    }).text;
+    expect(output).toBe(unclosed);
+    expect(performance.now() - started).toBeLessThan(750);
+  });
+
+  it("preserves text following a completed SVG", () => {
+    const svg = '<svg><circle r="1"/></svg>';
+    const source = `<box>${svg}\nAfter image</box>`;
+    const output = normalizeStreamMessage({
+      message: { author: { role: "assistant" }, channel: "final", content: { parts: [source] } },
+    }).text;
+    expect(output).toContain("After image");
+    expect(output).toContain(`\`\`\`svg\n${svg}\n\`\`\``);
+  });
+
   it("degrades a final DIL component into readable Markdown when no fallback exists", () => {
     const rich = [
       "## Ready",

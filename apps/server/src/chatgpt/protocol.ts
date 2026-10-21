@@ -125,8 +125,10 @@ export function normalizeStreamMessage(
         position = tagEnd + 1;
       }
       if (svgEnd < 0) {
-        cursor = nextTag + 4;
-        continue;
+        // An incomplete SVG has no independently renderable nested viewport.
+        // Leave the unfinished fragment as text until the next stream update;
+        // retrying every nested <svg> would scan the same suffix quadratically.
+        break;
       }
       if (plainStart < nextTag)
         sections.push({ kind: "text", value: displayText.slice(plainStart, nextTag) });
