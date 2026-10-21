@@ -191,9 +191,106 @@ export function normalizeStreamMessage(
     : message.content?.text || "";
   const fallback = metadata.model_dil_v2?.fallbackMarkdown;
   const isFinal = message.author?.role === "assistant" && message.channel === "final";
+  // DIL chart payloads are omitted from ChatGPT's Markdown fallback. Preserve
+  // validated JSON snapshots without interpreting any executable DIL syntax.
+  function chartSnapshots(source: string): Array<{ json: string; start: number; end: number }> {
+    if (!source.includes("<Chart") || source.length > 500_000) return [];
+    const protectedRanges = markdownCodeRanges(source);
+    const ticks: RegExpExecArray[] = [];
+    const tickPattern = /`+/g;
+    let tick: RegExpExecArray | null;
+    while ((tick = tickPattern.exec(source))) {
+      ticks.push(tick);
+      if (ticks.length > 1_000) return [];
+    }
+    const nextCloser = new Map<number, number>();
+    const nextEnd = new Map<number, number>();
+    for (let index = ticks.length - 1; index >= 0; index--) {
+      const run = ticks[index]!;
+      nextCloser.set(run.index, nextEnd.get(run[0].length) ?? -1);
+      nextEnd.set(run[0].length, run.index + run[0].length);
+    }
+    let until = -1;
+    for (const run of ticks) {
+      if (
+        run.index < until ||
+        protectedRanges.some((r) => run.index >= r.start && run.index < r.end)
+      )
+        continue;
+      let slashes = 0;
+      for (let i = run.index - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+      if (slashes % 2) continue;
+      const closing = nextCloser.get(run.index) ?? -1;
+      if (
+        closing > run.index &&
+        !protectedRanges.some((r) => r.start > run.index && r.start < closing)
+      ) {
+        protectedRanges.push({ start: run.index, end: closing });
+        until = closing;
+      }
+    }
+    const charts: Array<{ json: string; start: number; end: number }> = [];
+    const marker = /<Chart(?=[\s/>])/g;
+    let match: RegExpExecArray | null;
+    while ((match = marker.exec(source)) && charts.length < 8) {
+      const offset = match.index;
+      if (protectedRanges.some((range) => offset >= range.start && offset < range.end)) continue;
+      let slashes = 0;
+      for (let i = offset - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+      if (slashes % 2) continue;
+      const attribute = /^<Chart\s+content=\{/.exec(source.slice(offset, offset + 64));
+      if (!attribute) continue;
+      const start = offset + attribute[0].length;
+      let depth = 1;
+      let quote: string | null = null;
+      let escaped = false;
+      let end = start;
+      for (; end < source.length && end - start <= 30_000; end++) {
+        const ch = source[end]!;
+        if (quote) {
+          if (escaped) escaped = false;
+          else if (ch === "\\") escaped = true;
+          else if (ch === quote) quote = null;
+          continue;
+        }
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === "{") depth++;
+        else if (ch === "}" && --depth === 0) break;
+      }
+      if (depth !== 0 || !/^\s*\/>/.test(source.slice(end + 1, end + 16))) continue;
+      try {
+        const value: unknown = JSON.parse(source.slice(start, end));
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const chart = value as Record<string, unknown>;
+        if (
+          !["bar", "line", "scatter", "pie"].includes(String(chart.chartType)) ||
+          !Array.isArray(chart.data) ||
+          chart.data.length > 200 ||
+          !Array.isArray(chart.series) ||
+          chart.series.length > 6
+        )
+          continue;
+        const json = JSON.stringify(chart);
+        if (json.length > 30_000) continue;
+        const closingEnd = end + 1 + /^\s*\/>/.exec(source.slice(end + 1, end + 16))![0].length;
+        charts.push({ json, start: offset, end: closingEnd });
+        marker.lastIndex = closingEnd;
+      } catch {
+        // Dynamic expressions and partially streamed charts are not executable.
+      }
+    }
+    return charts;
+  }
+  const charts = isFinal ? chartSnapshots(originalText) : [];
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
   let displayText = (isFinal && fallback?.trim()) || originalText || fallback || "";
+  if (charts.length > 0 && !(isFinal && fallback?.trim())) {
+    // Omit the original JSX props: only the validated chart JSON is rendered.
+    for (const chart of charts.toReversed()) {
+      displayText = displayText.slice(0, chart.start) + displayText.slice(chart.end);
+    }
+  }
   if (
     isFinal &&
     !fallback?.trim() &&
@@ -378,6 +475,9 @@ export function normalizeStreamMessage(
       })
       .join("")
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
+  }
+  if (charts.length > 0) {
+    displayText += charts.map((chart) => "\n\n```t3-chart\n" + chart.json + "\n```").join("");
   }
   return {
     messageId: message.id,

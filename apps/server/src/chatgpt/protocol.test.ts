@@ -578,3 +578,54 @@ describe("ChatGPT protocol", () => {
     }
   });
 });
+
+describe("ChatGPT rich chart preservation", () => {
+  const chart = {
+    chartType: "bar",
+    xKey: "month",
+    series: [{ dataKey: "sales", label: "Sales" }],
+    data: [
+      { month: "Jan", sales: 10 },
+      { month: "Feb", sales: 20 },
+    ],
+  };
+  const source = `<box><Chart content={${JSON.stringify(chart)}} /></box>`;
+  const normalize = (content: string, fallback?: string) =>
+    normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [content] },
+        ...(fallback === undefined
+          ? {}
+          : { metadata: { model_dil_v2: { fallbackMarkdown: fallback } } }),
+      },
+    }).text;
+
+  it("keeps chart data with a Markdown fallback and never leaks DIL source", () => {
+    const result = normalize(source, "Monthly sales");
+    expect(result).toContain("Monthly sales");
+    expect(result).toContain(`\`\`\`t3-chart\n${JSON.stringify(chart)}\n\`\`\``);
+    expect(result).not.toContain("<Chart");
+  });
+
+  it("renders a chart without Markdown fallback using inert fenced JSON", () => {
+    const result = normalize(source);
+    expect(result).not.toContain("<Chart");
+    expect(result).toContain("t3-chart");
+    expect(result).toContain('"chartType":"bar"');
+  });
+
+  it("ignores chart-like text inside code, escaped markup, and malformed data", () => {
+    expect(normalize(`\`\`\`jsx\n${source}\n\`\`\``, "Plain")).toBe("Plain");
+    expect(normalize(`\`${source}\``, "Plain")).toBe("Plain");
+    expect(normalize(`\\<Chart content={${JSON.stringify(chart)}} />`, "Plain")).toBe("Plain");
+    expect(normalize("<Chart content={dangerousExpression()} />", "Plain")).toBe("Plain");
+    expect(normalize('<Chart content={{"chartType":"bar","data":[]}}', "Plain")).toBe("Plain");
+  });
+
+  it("retains complete snapshots during partial final streaming", () => {
+    expect(normalize(source.slice(0, source.indexOf("/>")), "Fallback")).toBe("Fallback");
+    expect(normalize(source, "Fallback")).toContain("t3-chart");
+  });
+});
