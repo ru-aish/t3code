@@ -5051,8 +5051,9 @@ it.effect("ProviderSessionManagerV2 releases a proved pre-submit rejection witho
                     threadId: ThreadId.make("thread-provider-generation-pre-submit"),
                     providerThreadId: "rejected-provider-thread" as never,
                     runId: "rejected-run" as never,
-                    cause: Object.assign(new Error("not submitted"), {
-                      _tag: "ChatGPTTurnNotSubmittedError",
+                    cause: new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                      driver: CODEX_DRIVER,
+                      cause: new Error("Codex preflight rejected the turn before turn/start"),
                     }),
                   }))
                 : Effect.void,

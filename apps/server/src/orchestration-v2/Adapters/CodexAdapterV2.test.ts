@@ -2078,6 +2078,50 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
+  it.effect("marks input validation failures as definitely not submitted", () =>
+    Effect.gen(function* () {
+      const transcript = makeCodexReplayTranscript({
+        scenario: "pre-submit-rejection",
+        entries: codexReplayPreamble({
+          nativeThreadId: "pre-submit-native",
+          nativeTurnId: "unused",
+          prompt: "unused",
+        }).slice(0, 5),
+      });
+      const requests: string[] = [];
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        () => Effect.void,
+        (method) =>
+          Effect.sync(() => {
+            requests.push(method);
+          }),
+      );
+      const result = yield* harness.runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("pre-submit-attempt"),
+            text: "",
+          }),
+        )
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "ProviderAdapterTurnStartError");
+        assert.propertyVal(result.failure.cause, "_tag", "ProviderAdapterTurnNotSubmittedError");
+      }
+      assert.notInclude(requests, "turn/start");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each(["supported", "unsupported", "invalid"] as const)(
     "delivers native history with %s app-server protocol",
     (response) =>

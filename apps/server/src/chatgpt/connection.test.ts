@@ -1392,6 +1392,65 @@ describe("ChatGPT handoff submission boundary", () => {
     }
   });
 
+  it("does not close a replacement renderer when the previous binding registration fails", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "chatgpt-reset-renderer-race-"),
+    );
+    const connection = new ChatGPTConnection({
+      cdpEndpoint: "http://127.0.0.1:9234",
+      controlEndpoint: "http://127.0.0.1:8022",
+      token: "test",
+      environmentId: "test",
+      providerId: "chatgpt",
+      threadId: "reset-renderer-race",
+      cacheDir: directory,
+    });
+    try {
+      await connection.adoptConversation("poisoned");
+      let rejectOld!: (cause: Error) => void;
+      let oldCalled!: () => void;
+      const oldStarted = new Promise<void>((resolve) => {
+        oldCalled = resolve;
+      });
+      const oldCall = new Promise<void>((_resolve, reject) => {
+        rejectOld = reject;
+      });
+      let oldClosed = false;
+      let replacementClosed = false;
+      const oldRenderer = {
+        call: async () => {
+          oldCalled();
+          await oldCall;
+        },
+        close: () => {
+          oldClosed = true;
+        },
+      };
+      const replacement = {
+        call: async () => {},
+        close: () => {
+          replacementClosed = true;
+        },
+      };
+      Object.assign(connection, {
+        control: async () => ({ conversation_id: null }),
+        cdp: oldRenderer,
+      });
+      const reset = connection.resetNativeConversation();
+      await oldStarted;
+      Object.assign(connection, { cdp: replacement });
+      rejectOld(new Error("old registration failed"));
+      await reset;
+      expect(Reflect.get(connection, "cdp")).toBe(replacement);
+      expect(oldClosed).toBe(false);
+      expect(replacementClosed).toBe(false);
+      expect(connection.conversationId).toBeNull();
+    } finally {
+      connection.close();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a fresh native reset without terminal detachment, and fences retired streams", async () => {
     const directory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "chatgpt-handoff-reset-"),

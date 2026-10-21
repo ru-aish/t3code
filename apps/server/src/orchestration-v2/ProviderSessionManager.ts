@@ -1546,6 +1546,7 @@ export const layerWithOptions = (
       // failures (including interruption and transport timeouts) may have submitted.
       const definitelyNotSubmitted = (error: unknown): boolean => {
         if (typeof error !== "object" || error === null) return false;
+        if (Schema.is(ProviderAdapter.ProviderAdapterTurnNotSubmittedError)(error)) return true;
         if ("_tag" in error && error._tag === "ChatGPTTurnNotSubmittedError") return true;
         return "cause" in error && definitelyNotSubmitted(error.cause);
       };
@@ -1568,9 +1569,15 @@ export const layerWithOptions = (
             activeTurnByThread.delete(providerThreadId);
             const busyTurns = new Set(entry.busyTurns);
             busyTurns.delete(busyTurnKey(providerThreadId, active.runOrdinal));
-            return [active, new Map(current).set(key, {
-              ...entry, activeTurnByThread, busyTurns, lastActivityAtMs: now,
-            })] as const;
+            return [
+              active,
+              new Map(current).set(key, {
+                ...entry,
+                activeTurnByThread,
+                busyTurns,
+                lastActivityAtMs: now,
+              }),
+            ] as const;
           });
           if (released === undefined) return;
           yield* Effect.all([
@@ -2024,12 +2031,14 @@ export const layerWithOptions = (
               // physical conversation, not to the durable T3 provider-thread
               // row. Retire it without granting a second send to the old native.
               Effect.tap(() =>
-                input.existingProviderThread?.nativeThreadRef === null && runtime.driver === "chatgpt"
+                input.existingProviderThread?.nativeThreadRef === null &&
+                runtime.driver === "chatgpt"
                   ? Effect.gen(function* () {
                       const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
-                      const old = entry?.runtime === runtime
-                        ? entry.activeTurnByThread.get(input.existingProviderThread!.id)
-                        : undefined;
+                      const old =
+                        entry?.runtime === runtime
+                          ? entry.activeTurnByThread.get(input.existingProviderThread!.id)
+                          : undefined;
                       if (old !== undefined)
                         yield* releaseNotSubmitted(
                           providerSessionId,

@@ -543,15 +543,16 @@ export class ChatGPTConnection {
     this.snapshotRead = undefined;
     await this.persist();
     if (this.cdp) {
+      const cdp = this.cdp;
       try {
-        await this.cdp.call("Runtime.addBinding", { name: this.binding });
+        await cdp.call("Runtime.addBinding", { name: this.binding }, 10_000);
       } catch {
-        // Reset has already succeeded. The next renderer handshake installs
-        // the rotated binding rather than reattaching a poisoned conversation.
-        const stale = this.cdp;
-        this.cdp = undefined;
-        ++this.rendererGeneration;
-        stale.close();
+        // A replacement renderer may have connected while the old call failed.
+        if (this.cdp === cdp) {
+          this.cdp = undefined;
+          ++this.rendererGeneration;
+          cdp.close();
+        }
       }
     }
     return binding;
