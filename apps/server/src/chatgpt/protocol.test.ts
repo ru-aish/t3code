@@ -175,6 +175,58 @@ describe("ChatGPT protocol", () => {
     }
   });
 
+  it("preserves SVG examples inside blockquoted and list-nested fences", () => {
+    const tick = String.fromCharCode(96).repeat(3);
+    const samples = [
+      ["> ~~~xml", '> <svg><circle r="1"/></svg>', "> ~~~"].join("\n"),
+      ["- " + tick + "xml", '  <svg><circle r="1"/></svg>', "  " + tick].join("\n"),
+      ["    ~~~xml", '    <svg><circle r="1"/></svg>', "    ~~~"].join("\n"),
+      ["> > " + tick + "svg", '> > <svg><circle r="1"/></svg>', "> > " + tick].join("\n"),
+    ];
+    for (const sample of samples) {
+      expect(
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [sample] },
+          },
+        }).text,
+      ).toBe(sample);
+    }
+  });
+
+  it("retains Markdown-escaped SVG examples instead of promoting diagrams", () => {
+    for (const sample of [
+      'Literal: \\<svg><circle r="1"/></svg>.',
+      'Nested: \\<svg><svg><circle r="1"/></svg></svg>.',
+    ]) {
+      expect(
+        normalizeStreamMessage({
+          message: {
+            author: { role: "assistant" },
+            channel: "final",
+            content: { parts: [sample] },
+          },
+        }).text,
+      ).toBe(sample);
+    }
+    const evenSlash = '\\\\<svg><circle r="1"/></svg>';
+    expect(
+      normalizeStreamMessage({
+        message: {
+          author: { role: "assistant" },
+          channel: "final",
+          content: { parts: [evenSlash] },
+        },
+      }).text,
+    ).toContain(
+      String.fromCharCode(96).repeat(3) +
+        'svg\n<svg><circle r="1"/></svg>\n' +
+        String.fromCharCode(96).repeat(3),
+    );
+  });
+
   it("leaves SVG examples in tilde fences untouched", () => {
     const sample = '~~~xml\n<svg><circle r="1"/></svg>\n~~~\nAfter.';
     expect(

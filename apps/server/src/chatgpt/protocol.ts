@@ -60,8 +60,8 @@ export function normalizeStreamMessage(
         const prefix = displayText.slice(lineStart, nextCode);
         const atFenceStart =
           runLength >= 3 &&
-          prefix.length <= 3 &&
-          /^ *$/.test(prefix) &&
+          // Protect Markdown fences nested inside blockquotes and list items.
+          /^(?: {0,3}>[ \t]?)* *(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)? *$/.test(prefix) &&
           (marker === "~" ||
             !displayText
               .slice(
@@ -75,14 +75,20 @@ export function normalizeStreamMessage(
         if (atFenceStart) {
           // Fences close only at the start of a line with an equal-or-longer
           // run. Backticks inside JavaScript strings are not fence closers.
+          const quoteDepth = prefix.split(">").length - 1;
           let line = displayText.indexOf("\n", runEnd);
           while (line >= 0) {
             const start = line + 1;
             const lineEnd = displayText.indexOf("\n", start);
             const end = lineEnd < 0 ? displayText.length : lineEnd;
             const candidate = displayText.slice(start, end);
-            const close = /^ {0,3}([`~]{3,})[ \t]*\r?$/.exec(candidate);
-            if (close && close[1]![0] === marker && close[1]!.length >= runLength) {
+            const close = /^((?: {0,3}>[ \t]?)* *)([`~]{3,})[ \t]*\r?$/.exec(candidate);
+            if (
+              close &&
+              close[1]!.split(">").length - 1 === quoteDepth &&
+              close[2]![0] === marker &&
+              close[2]!.length >= runLength
+            ) {
               codeEnd = lineEnd < 0 ? end : lineEnd + 1;
               break;
             }
@@ -194,6 +200,13 @@ export function normalizeStreamMessage(
         // Leave the unfinished fragment as text until the next stream update;
         // retrying every nested <svg> would scan the same suffix quadratically.
         break;
+      }
+      // Markdown-escaped <svg> is literal, including any nested SVG children.
+      let slashes = 0;
+      for (let i = nextTag - 1; i >= 0 && displayText[i] === "\\"; i--) slashes++;
+      if (slashes % 2 === 1) {
+        cursor = svgEnd;
+        continue;
       }
       if (plainStart < nextTag)
         sections.push({ kind: "text", value: displayText.slice(plainStart, nextTag) });

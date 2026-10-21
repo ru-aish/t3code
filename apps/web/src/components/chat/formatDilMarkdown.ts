@@ -114,11 +114,9 @@ function formatOutsideFence(text: string): string {
       if (end >= 0) {
         result += text.slice(start, end);
         cursor = end;
-      } else if (cursor - start >= 3) {
-        // A partial multiline code span is common during streaming.
-        // Do not reinterpret its unfinished body as rendered content.
-        return result + text.slice(start);
       } else {
+        // An unmatched delimiter outside a real fence is literal Markdown;
+        // it must not swallow subsequent valid URL references.
         result += text.slice(start, cursor);
       }
       continue;
@@ -151,18 +149,27 @@ function formatOutsideFence(text: string): string {
   return hasDil ? result.replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n") : result;
 }
 
-function fenceStart(line: string): { marker: "`" | "~"; length: number } | null {
-  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+type MarkdownFence = { marker: "`" | "~"; length: number; quoteDepth: number };
+
+function fenceStart(line: string): MarkdownFence | null {
+  // Protect fences nested in Markdown blockquotes, list items, and indented
+  // list continuations, not just column-zero code fences.
+  const match = /^((?: {0,3}>[ \t]?)* *(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)? *)(`{3,}|~{3,})/.exec(line);
   if (!match) return null;
-  const marker = match[1]![0] as "`" | "~";
+  const marker = match[2]![0] as "`" | "~";
   // Backtick fences cannot have backticks in their info string.
   if (marker === "`" && line.slice(match[0].length).includes("`")) return null;
-  return { marker, length: match[1]!.length };
+  return { marker, length: match[2]!.length, quoteDepth: match[1]!.split(">").length - 1 };
 }
 
-function closesFence(line: string, fence: { marker: "`" | "~"; length: number }): boolean {
-  const match = /^ {0,3}(`+|~+)[ \t]*\r?$/.exec(line);
-  return !!match && match[1]![0] === fence.marker && match[1]!.length >= fence.length;
+function closesFence(line: string, fence: MarkdownFence): boolean {
+  const match = /^((?: {0,3}>[ \t]?)* *)(`+|~+)[ \t]*\r?$/.exec(line);
+  return (
+    !!match &&
+    match[1]!.split(">").length - 1 === fence.quoteDepth &&
+    match[2]![0] === fence.marker &&
+    match[2]!.length >= fence.length
+  );
 }
 
 export function formatDilMarkdown(text: string): string {

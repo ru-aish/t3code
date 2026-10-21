@@ -56,7 +56,7 @@ describe("ChatGPT DIL Markdown compatibility", () => {
       "Example\n\n```jsx\n<box gap={2}>Keep literal code</box>\nurlliteralhttps://example.com\n```\n\n`urlinlinehttps://example.com`\n\n**Regular**";
     expect(formatDilMarkdown(sample)).toBe(sample);
     expect(formatDilMarkdown("Text ```jsx\nurltesthttps://example.com")).toBe(
-      "Text ```jsx\nurltesthttps://example.com",
+      "Text ```jsx\n[test](<https://example.com/>)",
     );
     expect(
       formatDilMarkdown("A urlrealhttps://example.com and `urlfakehttps://example.com`"),
@@ -114,6 +114,30 @@ describe("ChatGPT DIL Markdown compatibility", () => {
     expect(output).toContain("[real](<https://example.com/>)");
   });
 
+  it("preserves URL markers inside blockquoted and list-nested code fences", () => {
+    const tick = String.fromCharCode(96).repeat(3);
+    const literal = "urlliteralhttps://example.com";
+    const real = "urloutsidehttps://example.com";
+    for (const source of [
+      ["> ~~~xml", "> " + literal, "> ~~~", real].join("\n"),
+      ["- " + tick + "xml", "  " + literal, "  " + tick, real].join("\n"),
+      ["    ~~~xml", "    " + literal, "    ~~~", real].join("\n"),
+      ["> > " + tick + "xml", "> > " + literal, "> > " + tick, real].join("\n"),
+    ]) {
+      const formatted = formatDilMarkdown(source);
+      expect(formatted).toContain(literal);
+      expect(formatted).toContain("[outside](<https://example.com/>)");
+    }
+  });
+
+  it("converts later links after an unmatched triple tick in prose", () => {
+    const ticks = String.fromCharCode(96).repeat(3);
+    const source = "Prose " + ticks + "not-a-fence\nurlworkinghttps://example.com";
+    expect(formatDilMarkdown(source)).toContain("[working](<https://example.com/>)");
+    const actualFence = ticks + "ts\nurlliteralhttps://example.com";
+    expect(formatDilMarkdown(actualFence)).toBe(actualFence);
+  });
+
   it("converts reference labels containing inline code", () => {
     expect(formatDilMarkdown("urlOpen `README.md`https://github.com/example/repo")).toBe(
       "[Open `README.md`](<https://github.com/example/repo>)",
@@ -141,7 +165,15 @@ describe("ChatGPT DIL Markdown compatibility", () => {
 
   it("recognizes closing backticks preceded by literal backslashes within code", () => {
     const tick = String.fromCharCode(96);
-    const source = [tick, "abc \\", tick, " urlOutsidehttps://good.test ", tick, "tail", tick].join("");
+    const source = [
+      tick,
+      "abc \\",
+      tick,
+      " urlOutsidehttps://good.test ",
+      tick,
+      "tail",
+      tick,
+    ].join("");
     expect(formatDilMarkdown(source)).toContain("[Outside](<https://good.test/>)");
   });
 
