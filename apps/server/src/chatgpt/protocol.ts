@@ -382,22 +382,41 @@ export function normalizeStreamMessage(
     // when the fallback has substantially rewritten its prose.
     let searchFrom = 0;
     for (const chart of charts) {
-      const before = originalText
+      const preceding = originalText
         .slice(Math.max(0, chart.start - 256), chart.start)
         .replace(/<[^>]*>/g, "")
-        .trim()
-        .slice(-120);
-      const protectedFallback = markdownLiteralRanges(displayText);
+        .trim();
+      // Only match a complete plain-text line. Substring matches can split
+      // link labels, image alt text, emphasis, or other Markdown constructs.
+      const anchor = preceding.slice(preceding.lastIndexOf("\n") + 1);
+      const literals = markdownLiteralRanges(displayText);
+      const comments: Span[] = [];
+      for (const comment of displayText.matchAll(/<!--[\s\S]*?(?:-->|$)/g)) {
+        if (!inRanges(literals, comment.index))
+          comments.push({ start: comment.index, end: comment.index + comment[0].length });
+      }
+      const protectedFallback = mergeRanges([...literals, ...comments]);
       let insertAt = -1;
-      for (let len = before.length; len >= 12 && insertAt < 0; len--) {
-        const anchor = before.slice(-len);
-        let hit = displayText.indexOf(anchor, searchFrom);
-        while (hit >= 0) {
-          if (!intersectsRanges(protectedFallback, hit, hit + anchor.length)) {
-            insertAt = hit + anchor.length;
+      if (anchor.length >= 12 && anchor.length <= 120) {
+        let cursor = searchFrom;
+        while (cursor < displayText.length) {
+          const newline = displayText.indexOf("\n", cursor);
+          const lineEnd = newline < 0 ? displayText.length : newline;
+          const line = displayText.slice(cursor, lineEnd).trim();
+          const following = displayText.slice(Math.min(displayText.length, lineEnd + 1));
+          const nextBreak = following.indexOf("\n");
+          const nextLine = nextBreak < 0 ? following : following.slice(0, nextBreak);
+          if (
+            line === anchor &&
+            !intersectsRanges(protectedFallback, cursor, lineEnd) &&
+            // A setext underline belongs to the preceding line as one heading.
+            !/^(?:=+|-+)[ \t]*$/.test(nextLine)
+          ) {
+            insertAt = lineEnd;
             break;
           }
-          hit = displayText.indexOf(anchor, hit + 1);
+          if (newline < 0) break;
+          cursor = newline + 1;
         }
       }
       if (insertAt < 0) insertAt = displayText.length;

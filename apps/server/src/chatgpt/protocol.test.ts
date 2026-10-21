@@ -686,6 +686,56 @@ describe("ChatGPT rich chart preservation", () => {
     }
   });
 
+  it("does not insert a chart within a Markdown link label or image alt text", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    for (const rich of [
+      "[Monthly sales rose steadily.](https://example.com)",
+      "![Monthly sales rose steadily.](https://example.com/chart.png)",
+      "[Monthly sales rose steadily.][monthly]",
+      "![Monthly sales rose steadily.][monthly]",
+    ]) {
+      const fallback = `${rich}\n\nMonthly sales rose steadily.\nOur outlook remains positive.`;
+      const result = normalize(content, fallback) ?? "";
+      expect(result).toContain(rich);
+      expect(result.indexOf(rich)).toBeLessThan(result.indexOf("```t3-chart"));
+      expect(result.indexOf("```t3-chart")).toBeGreaterThan(
+        result.lastIndexOf("Monthly sales rose steadily."),
+      );
+      expect(result.indexOf("```t3-chart")).toBeLessThan(
+        result.indexOf("Our outlook remains positive."),
+      );
+    }
+  });
+
+  it("appends after intact Markdown nodes when no standalone anchor exists", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    for (const fallback of [
+      "[Monthly sales rose steadily.](https://example.com)",
+      "![Monthly sales rose steadily.](https://example.com/chart.png)",
+      "**Monthly sales rose steadily.**",
+      "[Monthly sales rose steadily.][monthly]",
+    ]) {
+      const result = normalize(content, fallback) ?? "";
+      expect(result.startsWith(fallback)).toBe(true);
+      expect(result.indexOf("```t3-chart")).toBeGreaterThan(fallback.length);
+      expect(result.split("```t3-chart")).toHaveLength(2);
+    }
+  });
+
+  it("preserves a setext heading and ignores matching prose inside HTML comments", () => {
+    const content = `Monthly sales rose steadily.\n<Chart content={${JSON.stringify(chart)}} />`;
+    const fallback =
+      "<!--\nMonthly sales rose steadily.\n-->\n\nMonthly sales rose steadily.\n====\n\nMonthly sales rose steadily.\nOur outlook remains positive.";
+    const result = normalize(content, fallback) ?? "";
+    expect(result).toContain("Monthly sales rose steadily.\n====");
+    expect(result.indexOf("```t3-chart")).toBeGreaterThan(
+      result.lastIndexOf("Monthly sales rose steadily."),
+    );
+    expect(result.indexOf("```t3-chart")).toBeLessThan(
+      result.indexOf("Our outlook remains positive."),
+    );
+  });
+
   it("does not treat comment-shaped strings inside chart data as real comments", () => {
     const data = {
       ...chart,
