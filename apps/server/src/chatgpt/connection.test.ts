@@ -399,6 +399,9 @@ describe("ChatGPT orchestration instructions", () => {
     expect(prompt).toContain("Spawn is async by default");
     expect(prompt).toContain("Do not poll, wait, or start watcher processes");
     expect(prompt).toContain("taskId is the delegated task handle");
+    expect(prompt).toContain("--list-tools");
+    expect(prompt).toContain("--describe-tool");
+    expect(prompt).toContain("preview_open");
     expect(prompt).not.toContain("Bearer");
     expect(executionPrompt("parent-thread", "/work/project", "Hello")).not.toContain(
       "T3 orchestration tools",
