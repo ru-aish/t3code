@@ -1102,6 +1102,30 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("does not extract multiline Markdown link labels, image descriptions or emphasis", () => {
+    for (const content of [
+      "[See the deployment\n" + card + "\nlog](https://example.org/log)",
+      "![Screenshot\n" + card + "\nalt text](https://example.org/image.png)",
+      "Read **important details\n" + card + "\nbefore deploying**.",
+      "Read *important details\n" + card + "\nbefore deploying*.",
+      "Read ~~obsolete details\n" + card + "\nbefore deploying~~.",
+      "[Nested [link](https://example.org)\n" + card + "\ntext](https://example.org)",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("still extracts a separate card after completed inline formatting", () => {
+    for (const content of [
+      "**Completed**\n" + card,
+      "[Completed](https://example.org)\n" + card,
+      "## Completed *heading\n" + card,
+      "<!-- [Unclosed comment -->\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
   it("does not promote cards in lazy Markdown blockquote/list continuations", () => {
     for (const text of [
       "> A code-review quotation\n" + card,

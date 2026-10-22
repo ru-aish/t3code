@@ -726,6 +726,77 @@ export function normalizeStreamMessage(
       if (open.name === "card") invalidRoots.add(open.start);
     }
 
+    // A physical line boundary is not necessarily a Markdown block boundary:
+    // link labels and emphasis can continue on the next line. Only promote a
+    // card when no inline delimiter from the containing paragraph owns it.
+    function insideMultilineInline(start: number): boolean {
+      const lookBehind = Math.max(0, start - 8_192);
+      const paragraph = source.slice(lookBehind, start);
+      const lines = paragraph.split("\n");
+      let from = lookBehind;
+      let offset = lookBehind;
+      for (const line of lines.slice(0, -1)) {
+        const next = offset + line.length + 1;
+        if (
+          !line.trim() ||
+          /^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) ||
+          /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(line)
+        ) {
+          from = next;
+        }
+        offset = next;
+      }
+      // If the containing paragraph exceeds the bounded look-behind, leave
+      // the card as source rather than guess at unmatched opener ownership.
+      if (from === lookBehind && lookBehind > 0 && source[lookBehind - 1] !== "\n") {
+        return true;
+      }
+      let bracketDepth = 0;
+      const emphasis = new Map<string, boolean>();
+      for (let i = from; i < start; i++) {
+        if (inRanges(protectedRanges, i)) continue;
+        const char = source[i]!;
+        if (char === "\\") {
+          i++;
+          continue;
+        }
+        if (char === "[") bracketDepth++;
+        else if (char === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+        if (char !== "*" && char !== "_" && char !== "~") continue;
+        let end = i + 1;
+        while (end < start && source[end] === char) end++;
+        const run = source.slice(i, end);
+        if (run.length > 3 || (char === "~" && run !== "~~")) {
+          i = end - 1;
+          continue;
+        }
+        const before = source[i - 1] ?? " ";
+        const after = source[end] ?? " ";
+        const canOpen = !/\s/.test(after);
+        const canClose = !/\s/.test(before);
+        if (emphasis.get(run) && canClose) emphasis.delete(run);
+        else if (canOpen) emphasis.set(run, true);
+        i = end - 1;
+      }
+      // Only a delimiter with a closing continuation after the candidate
+      // establishes inline ownership. A literal '[' or '*' in ordinary text,
+      // an escaped CDATA sample or a quoted attribute must not hide a root card.
+      const candidateEnd = source.indexOf("</card>", start + 6);
+      if (candidateEnd < 0) return false;
+      const continuation = source.slice(
+        candidateEnd + "</card>".length,
+        Math.min(source.length, candidateEnd + 4_096),
+      );
+      const blank = /\n[ \t]*\n/.exec(continuation);
+      const tail = blank ? continuation.slice(0, blank.index) : continuation;
+      if (bracketDepth > 0 && /\]\s*(?:\(|\[)/.test(tail)) return true;
+      for (const marker of emphasis.keys()) {
+        const closing = tail.indexOf(marker);
+        if (closing > 0 && !/\s/.test(tail[closing - 1]!)) return true;
+      }
+      return false;
+    }
+
     // CommonMark lazy continuation lines can belong to a quoted/listed
     // paragraph even without a marker or indentation.
     const containerCardStarts = new Set<number>();
@@ -774,7 +845,8 @@ export function normalizeStreamMessage(
         !actualCardOpenings.has(start) ||
         nested.has(start) ||
         invalidRoots.has(start) ||
-        containerCardStarts.has(start)
+        containerCardStarts.has(start) ||
+        insideMultilineInline(start)
       )
         continue;
       // Avoid promoting Markdown list or blockquote content to a root card.
