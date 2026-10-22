@@ -5,7 +5,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { AcpMcpBridgeError, callAcpMcpTool, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
+import {
+  AcpMcpBridgeError,
+  callAcpMcpTool,
+  listAcpMcpTools,
+  runAcpMcpStdioBridge,
+} from "./AcpMcpStdioBridge.ts";
 
 function makeHarness(responder: (request: Request) => Promise<Response> | Response) {
   const input = new NodeStream.PassThrough();
@@ -87,6 +92,82 @@ describe("AcpMcpStdioBridge", () => {
         method: "tools/call",
         params: { name: "orchestrator_capabilities", arguments: {} },
       });
+    }),
+  );
+
+  it.effect("discovers browser schemas across pages in one authenticated MCP session", () =>
+    Effect.gen(function* () {
+      const requests: Array<{ method: string; params?: { cursor?: string }; headers: Headers }> =
+        [];
+      const tools = yield* listAcpMcpTools({
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorization: "Bearer bridge-test",
+        fetchImplementation: async (_url, init) => {
+          const body = JSON.parse(String(init?.body)) as {
+            id?: string;
+            method: string;
+            params?: { cursor?: string };
+          };
+          requests.push({
+            method: body.method,
+            ...(body.params === undefined ? {} : { params: body.params }),
+            headers: new Headers(init?.headers),
+          });
+          if (body.method === "notifications/initialized")
+            return new Response(null, { status: 202 });
+          const result =
+            body.method === "initialize"
+              ? { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: {} }
+              : body.params?.cursor === "page-two"
+                ? { tools: [{ name: "delegate_task", inputSchema: { type: "object" } }] }
+                : {
+                    tools: [
+                      {
+                        name: "preview_open",
+                        description: "Open a tab",
+                        inputSchema: { type: "object", properties: { open: { type: "boolean" } } },
+                      },
+                    ],
+                    nextCursor: "page-two",
+                  };
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), {
+            headers: { "content-type": "application/json", "mcp-session-id": "session-42" },
+          });
+        },
+      });
+      expect(tools.map((tool) => tool.name)).toEqual(["preview_open", "delegate_task"]);
+      expect(tools[0]?.inputSchema).toMatchObject({ properties: { open: { type: "boolean" } } });
+      expect(requests.map((request) => request.method)).toEqual([
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/list",
+      ]);
+      expect(requests[3]?.params).toEqual({ cursor: "page-two" });
+      expect(requests[3]?.headers.get("mcp-session-id")).toBe("session-42");
+      expect(
+        requests.every((request) => request.headers.get("authorization") === "Bearer bridge-test"),
+      ).toBe(true);
+    }),
+  );
+
+  it.effect("rejects malformed tool discovery responses", () =>
+    Effect.gen(function* () {
+      const error = yield* listAcpMcpTools({
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorization: "Bearer bridge-test",
+        fetchImplementation: async (_url, init) => {
+          const body = JSON.parse(String(init?.body)) as { id?: string; method: string };
+          if (body.method === "notifications/initialized")
+            return new Response(null, { status: 202 });
+          const result =
+            body.method === "initialize" ? { protocolVersion: "2025-06-18" } : { tools: false };
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), {
+            headers: { "content-type": "application/json" },
+          });
+        },
+      }).pipe(Effect.flip);
+      expect(error.message).toContain("tool listing returned invalid data");
     }),
   );
 

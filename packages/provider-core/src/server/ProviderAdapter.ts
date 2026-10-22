@@ -291,6 +291,19 @@ export class ProviderAdapterTurnStartError extends Schema.TaggedError<ProviderAd
   }
 }
 
+/** Proof from an adapter that no native turn submission was attempted. */
+export class ProviderAdapterTurnNotSubmittedError extends Schema.TaggedError<ProviderAdapterTurnNotSubmittedError>()(
+  "ProviderAdapterTurnNotSubmittedError",
+  {
+    driver: ProviderDriverKind,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `${this.driver} turn was rejected before native submission.`;
+  }
+}
+
 export class ProviderAdapterSteerRunUnsupportedError extends Schema.TaggedError<ProviderAdapterSteerRunUnsupportedError>()(
   "ProviderAdapterSteerRunUnsupportedError",
   {
@@ -381,6 +394,7 @@ export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterRollbackThreadError,
   ProviderAdapterForkThreadError,
   ProviderAdapterTurnStartError,
+  ProviderAdapterTurnNotSubmittedError,
   ProviderAdapterSteerRunUnsupportedError,
   ProviderAdapterSteerRunError,
   ProviderAdapterInterruptError,

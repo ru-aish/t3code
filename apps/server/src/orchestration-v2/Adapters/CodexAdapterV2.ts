@@ -6188,19 +6188,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>,
         ) =>
           Effect.gen(function* () {
-            const threadId = yield* getNativeThreadId(turnInput.providerThread);
-            const mcpSession = yield* mcpSessions.read(turnInput.threadId);
-            const turnStartParams = yield* buildCodexTurnStartParams({
-              nativeThreadId: threadId,
-              codexInput,
-              runtimePolicy: turnInput.runtimePolicy,
-              modelSelection: turnInput.modelSelection,
-              hasT3Mcp: mcpSession !== undefined,
-              browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
-              deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
-              omitServiceTier: adapterOptions.resolveRuntime !== undefined,
-              ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
-            });
+            const { threadId, turnStartParams } = yield* Effect.gen(function* () {
+              const threadId = yield* getNativeThreadId(turnInput.providerThread);
+              const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+              const turnStartParams = yield* buildCodexTurnStartParams({
+                nativeThreadId: threadId,
+                codexInput,
+                runtimePolicy: turnInput.runtimePolicy,
+                modelSelection: turnInput.modelSelection,
+                hasT3Mcp: mcpSession !== undefined,
+                browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
+                deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+                omitServiceTier: adapterOptions.resolveRuntime !== undefined,
+                ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
+              });
+              return { threadId, turnStartParams };
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                    driver: CODEX_PROVIDER,
+                    cause,
+                  }),
+              ),
+            );
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
               updated.set(threadId, turnInput);
@@ -6242,7 +6253,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           command: CodexGoalCommand,
         ) =>
           Effect.gen(function* () {
-            const threadId = yield* getNativeThreadId(turnInput.providerThread);
+            const proveNotSubmitted = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                      driver: CODEX_PROVIDER,
+                      cause,
+                    }),
+                ),
+              );
+            // Lookup and thread/goal/get cannot start a native turn.
+            const threadId = yield* proveNotSubmitted(getNativeThreadId(turnInput.providerThread));
             rootProviderThreads.set(threadId, turnInput.providerThread);
             const readGoal = client
               .request("thread/goal/get", { threadId })
@@ -6251,7 +6273,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   response.goal == null ? null : providerGoalFromCodex(response.goal),
                 ),
               );
-            const current = yield* readGoal;
+            const current = yield* proveNotSubmitted(readGoal);
             goalsByNativeThread.set(threadId, current);
             if (command.type === "show") {
               return yield* completeGoalCommandTurn(
@@ -6299,10 +6321,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* startNativeTurn(
                 turnInput,
                 command.type === "set"
-                  ? yield* toCodexInput({
-                      ...turnInput,
-                      message: { ...turnInput.message, text: command.objective },
-                    })
+                  ? yield* proveNotSubmitted(
+                      toCodexInput({
+                        ...turnInput,
+                        message: { ...turnInput.message, text: command.objective },
+                      }),
+                    )
                   : [],
               );
               if (activation.stopped) return;
@@ -6619,12 +6643,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 : null;
             if (goalCommand !== null) return runGoalCommand(turnInput, goalCommand);
             return Effect.gen(function* () {
-              yield* startNativeTurn(
-                turnInput,
+              const codexInput =
                 turnInput.restartContinuationOfRunId === undefined
-                  ? yield* toCodexInput(turnInput)
-                  : [],
-              );
+                  ? yield* toCodexInput(turnInput).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                            driver: CODEX_PROVIDER,
+                            cause,
+                          }),
+                      ),
+                    )
+                  : [];
+              yield* startNativeTurn(turnInput, codexInput);
             }).pipe(
               Effect.mapError(
                 (cause) =>

@@ -573,6 +573,36 @@ describe("presentPendingBackgroundWork", () => {
     ).toMatchObject({ title: "Waiting on 1 command and 1 monitor", waiting: true });
   });
 
+  it("presents detached processes without waiting for them", () => {
+    expect(presentPendingBackgroundWork([{ taskId: "job", kind: "process" }])).toMatchObject({
+      title: "Running a process",
+      items: [{ taskId: "job", kind: "process", label: "process" }],
+      waiting: false,
+    });
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "job", kind: "process", description: "Run regression tests" },
+      ]),
+    ).toMatchObject({ title: "Running: Run regression tests", waiting: false });
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "first", kind: "process" },
+        { taskId: "second", kind: "process" },
+      ]),
+    ).toMatchObject({ title: "Running 2 processes", waiting: false });
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "job", kind: "process" },
+        { taskId: "command", kind: "command" },
+        { taskId: "monitor", kind: "monitor" },
+      ]),
+    ).toMatchObject({
+      title: "Waiting on 1 command, 1 process and 1 monitor",
+      items: [{ kind: "command" }, { kind: "process" }, { kind: "monitor" }],
+      waiting: true,
+    });
+  });
+
   it("groups work by kind, subagents first, and keeps each name", () => {
     const presentation = presentPendingBackgroundWork([
       { taskId: "cmd", kind: "command", description: "npm test" },

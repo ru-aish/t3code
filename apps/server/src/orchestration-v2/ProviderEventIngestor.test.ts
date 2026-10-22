@@ -4,6 +4,7 @@ import {
   CheckpointId,
   CheckpointRef,
   CheckpointScopeId,
+  EventId,
   MessageId,
   GitCommandError,
   type ModelSelection,
@@ -14,10 +15,12 @@ import {
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   PlanId,
   type ProviderThreadId,
   ProviderTurnId,
@@ -32,11 +35,13 @@ import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { toolOutputImages } from "@t3tools/shared/toolOutput";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -45,6 +50,8 @@ import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
@@ -278,6 +285,237 @@ it.effect("records accepted billed turn usage once without billing the context w
     });
   }).pipe(Effect.provide(layerTest.pipe(Layer.provide(layerAnalytics))));
 });
+
+it.effect.each(["starting", "running"] as const)(
+  "settles the interrupted provider turn after steering while the replacement is %s",
+  (replacementStatus) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const created = yield* threadCreatedEvent(now);
+      const threadId = created.threadId;
+      const runId = RunId.make(`run:steering:${replacementStatus}`);
+      const oldAttemptId = RunAttemptId.make(`attempt:steering:${replacementStatus}:old`);
+      const nextAttemptId = RunAttemptId.make(`attempt:steering:${replacementStatus}:next`);
+      const oldNodeId = NodeId.make(`node:steering:${replacementStatus}:old`);
+      const nextNodeId = NodeId.make(`node:steering:${replacementStatus}:next`);
+      const providerThreadId = ids.derive.providerThread({
+        driver: CODEX_DRIVER,
+        nativeThreadId: `steering:${replacementStatus}`,
+      });
+      const providerSessionId = ProviderSessionId.make(`session:steering:${replacementStatus}`);
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver: CODEX_DRIVER,
+        providerInstanceId: modelSelection.instanceId,
+        providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "active",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const oldTurn: OrchestrationV2ProviderTurn = {
+        id: ProviderTurnId.make(`turn:steering:${replacementStatus}:old`),
+        providerThreadId,
+        nodeId: oldNodeId,
+        runAttemptId: oldAttemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      };
+      const replacementRun: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId: modelSelection.instanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make(`message:steering:${replacementStatus}`),
+        rootNodeId: nextNodeId,
+        activeAttemptId: nextAttemptId,
+        status: replacementStatus,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      yield* sink.write({
+        events: [
+          created,
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run.created",
+            threadId,
+            occurredAt: now,
+            payload: replacementRun,
+          },
+          ...[oldAttemptId, nextAttemptId]
+            .map((id, index) => ({
+              id,
+              runId,
+              attemptOrdinal: index + 1,
+              rootNodeId: index === 0 ? oldNodeId : nextNodeId,
+              providerInstanceId: modelSelection.instanceId,
+              providerThreadId,
+              providerTurnId: index === 0 ? oldTurn.id : null,
+              reason: index === 0 ? ("initial" as const) : ("steering_restart" as const),
+              status:
+                index === 0
+                  ? ("superseded" as const)
+                  : replacementStatus === "starting"
+                    ? ("pending" as const)
+                    : ("running" as const),
+              startedAt: index === 0 || replacementStatus === "running" ? now : null,
+              completedAt: index === 0 ? now : null,
+            }))
+            .map((payload) => ({
+              id: EventId.make(`event:steering:${payload.id}`),
+              type: "run-attempt.created" as const,
+              threadId,
+              occurredAt: now,
+              payload,
+            })),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-turn.updated",
+            threadId,
+            occurredAt: now,
+            payload: oldTurn,
+          },
+        ],
+      });
+      const ingestOldTurn = (turn: OrchestrationV2ProviderTurn) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          runId,
+          nodeId: oldNodeId,
+          event: {
+            type: "provider_turn.updated",
+            driver: CODEX_DRIVER,
+            threadId,
+            providerTurn: turn,
+          },
+          writeIfRunCurrent: { runId, activeAttemptId: oldAttemptId, expectedStatus: "running" },
+        });
+      const before = yield* projections.getThreadProjection(threadId);
+      assert.isEmpty(
+        yield* ingestOldTurn({
+          ...oldTurn,
+          nodeId: nextNodeId,
+          status: "completed",
+          completedAt: now,
+        }),
+      );
+      assert.isEmpty(
+        yield* ingestOldTurn({
+          ...oldTurn,
+          runAttemptId: nextAttemptId,
+          status: "completed",
+          completedAt: now,
+        }),
+      );
+      assert.isEmpty(
+        yield* ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          runId,
+          nodeId: oldNodeId,
+          event: {
+            type: "message.updated",
+            driver: CODEX_DRIVER,
+            message: {
+              id: MessageId.make(`message:steering:${replacementStatus}:late`),
+              threadId,
+              runId,
+              nodeId: oldNodeId,
+              role: "assistant",
+              text: "Retired answer",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "provider",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          writeIfRunCurrent: { runId, activeAttemptId: oldAttemptId, expectedStatus: "running" },
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+        yield* control.interruptAndAwaitTerminal({
+          threadId,
+          providerSessionId,
+          providerThreadId,
+          providerTurnId: oldTurn.id,
+          interruptedAttemptId: oldAttemptId,
+        });
+      }).pipe(
+        Effect.provide(
+          ProviderTurnControlService.layer.pipe(
+            Layer.provide(
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+                get: () =>
+                  Effect.succeed(
+                    Option.some({
+                      interruptTurn: () =>
+                        ingestOldTurn({
+                          ...oldTurn,
+                          status: "interrupted",
+                          completedAt: now,
+                        }).pipe(Effect.asVoid),
+                    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+                  ),
+              }),
+            ),
+          ),
+        ),
+      );
+      const after = yield* projections.getThreadProjection(threadId);
+      assert.equal(
+        after.providerTurns.find((turn) => turn.id === oldTurn.id)?.status,
+        "interrupted",
+      );
+      assert.deepEqual(after.runs, before.runs);
+      assert.deepEqual(after.attempts, before.attempts);
+      assert.deepEqual(after.providerThreads, before.providerThreads);
+      assert.deepEqual(after.messages, before.messages);
+      // Retired output cannot reopen the turn, rewrite its identity, or finish the replacement.
+      assert.isEmpty(yield* ingestOldTurn(oldTurn));
+      assert.isEmpty(
+        yield* ingestOldTurn({
+          ...oldTurn,
+          id: ProviderTurnId.make("unknown-old-turn"),
+          status: "completed",
+          completedAt: now,
+        }),
+      );
+      assert.isEmpty(yield* ingestOldTurn({ ...oldTurn, status: "completed", completedAt: now }));
+    }).pipe(Effect.provide(layerTest)),
+);
 
 layer("ProviderEventIngestorV2", (it) => {
   it.effect("normalizes provider events through the real event log and projection store", () =>

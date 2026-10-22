@@ -53,6 +53,7 @@ export function cancelledTurnItemWork(item: OrchestrationV2TurnItem): Work | und
 function restartWorkKind(task: OrchestrationV2PendingBackgroundTask): Work["kind"] {
   switch (task.kind) {
     case "command":
+    case "process":
       return "shell";
     case "subagent":
       return "subagent";

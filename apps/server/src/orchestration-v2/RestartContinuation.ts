@@ -25,7 +25,8 @@ import {
   restartContinuationNote,
 } from "./RestartBackgroundNote.ts";
 
-const CONTINUE_PROMPT = "Continue where you left off.";
+const CONTINUE_PROMPT =
+  "The connection is online again. Continue where you left off without repeating completed work.";
 
 const MAX_CONTINUATION_CHAIN = 3;
 

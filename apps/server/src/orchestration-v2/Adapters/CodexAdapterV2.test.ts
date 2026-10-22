@@ -2078,6 +2078,50 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
+  it.effect("marks input validation failures as definitely not submitted", () =>
+    Effect.gen(function* () {
+      const transcript = makeCodexReplayTranscript({
+        scenario: "pre-submit-rejection",
+        entries: codexReplayPreamble({
+          nativeThreadId: "pre-submit-native",
+          nativeTurnId: "unused",
+          prompt: "unused",
+        }).slice(0, 5),
+      });
+      const requests: string[] = [];
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        () => Effect.void,
+        (method) =>
+          Effect.sync(() => {
+            requests.push(method);
+          }),
+      );
+      const result = yield* harness.runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("pre-submit-attempt"),
+            text: "",
+          }),
+        )
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "ProviderAdapterTurnStartError");
+        assert.propertyVal(result.failure.cause, "_tag", "ProviderAdapterTurnNotSubmittedError");
+      }
+      assert.notInclude(requests, "turn/start");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each(["supported", "unsupported", "invalid"] as const)(
     "delivers native history with %s app-server protocol",
     (response) =>
@@ -8654,6 +8698,74 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.isNull(CodexAdapterV2.parseCodexGoalCommand("/goals"));
       assert.isNull(CodexAdapterV2.parseCodexGoalCommand("set a /goal"));
     });
+
+    it.effect("recovers from failed /goal lookup before any native turn submission", () =>
+      Effect.gen(function* () {
+        const prompt = "Normal turn after rejected goal lookup";
+        const transcript = makeCodexReplayTranscript({
+          scenario: "goal-lookup-rejected-before-submit",
+          entries: [
+            ...sessionStart,
+            {
+              type: "expect_outbound",
+              label: "goal/get failed",
+              frame: {
+                id: 3,
+                method: "thread/goal/get",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "goal/get rejected",
+              frame: { id: 3, error: { code: -32603, message: "goal lookup failed" } },
+            },
+            ...withReplayRequestId(
+              codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId: "recovered-goal-turn",
+                prompt,
+              }).slice(5),
+              4,
+            ),
+          ],
+        });
+        const requests: string[] = [];
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          () => Effect.void,
+          (method) => Effect.sync(() => { requests.push(method); }),
+        );
+        const rejected = yield* harness.runtime.startTurn(
+          yield* goalTurnInput(harness, "/goal show"),
+        ).pipe(Effect.result);
+        assert.equal(rejected._tag, "Failure");
+        if (rejected._tag === "Failure") {
+          assert.equal(rejected.failure._tag, "ProviderAdapterTurnStartError");
+          assert.propertyVal(
+            rejected.failure.cause,
+            "_tag",
+            "ProviderAdapterTurnNotSubmittedError",
+          );
+        }
+        assert.notInclude(requests, "turn/start");
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("goal-recovery-attempt"),
+            text: prompt,
+          }),
+        );
+        assert.equal(requests.filter((method) => method === "turn/start").length, 1);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
 
     it.effect("keeps a /goal run open across the turns Codex continues on its own", () =>
       Effect.gen(function* () {

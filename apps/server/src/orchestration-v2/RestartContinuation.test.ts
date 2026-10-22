@@ -37,6 +37,8 @@ const sessionId = ProviderSessionId.make("session:restart");
 const attemptId = RunAttemptId.make("attempt:restart");
 const scratchProjectId = ProjectId.make("project:scratch");
 const now = DateTime.makeUnsafe("2026-10-03T12:00:00.000Z");
+const connectionRestoredPrompt =
+  "The connection is online again. Continue where you left off without repeating completed work.";
 
 function makeProjection() {
   return {
@@ -827,7 +829,7 @@ it.effect("continues a cut run past queued follow-ups, which stay held", () =>
       ...cut,
       runs: [...cut.runs, queuedFollowUp],
     } as unknown as OrchestrationV2ThreadProjection);
-    assert.deepEqual(texts, ["Continue where you left off."]);
+    assert.deepEqual(texts, [connectionRestoredPrompt]);
   }),
 );
 
@@ -857,7 +859,7 @@ it.effect("continues a resumed queued run that ran after an earlier continuation
       ...cut,
       runs: [...cut.runs, finishedContinuation],
     } as unknown as OrchestrationV2ThreadProjection);
-    assert.deepEqual(texts, ["Continue where you left off."]);
+    assert.deepEqual(texts, [connectionRestoredPrompt]);
   }),
 );
 
@@ -897,7 +899,7 @@ it.effect("tells a turn cut mid-way about the background work it lost", () =>
     );
     assert.lengthOf(texts, 1);
     assert.include(texts[0]!, "Background reviewer");
-    assert.isTrue(texts[0]!.endsWith("Continue where you left off."));
+    assert.isTrue(texts[0]!.endsWith(connectionRestoredPrompt));
   }),
 );
 
@@ -908,7 +910,7 @@ it.effect("shows a continuation as a T3 Code notice whose detail is the prompt",
       source: { kind: "system" },
       outcome: "updated",
       summary: "T3 Code restarted and resumed this turn",
-      detail: "Continue where you left off.",
+      detail: connectionRestoredPrompt,
     });
   }),
 );

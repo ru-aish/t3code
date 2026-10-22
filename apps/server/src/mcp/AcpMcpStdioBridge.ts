@@ -61,6 +61,47 @@ export interface AcpMcpToolCallOptions {
   readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
+export interface AcpMcpToolListOptions {
+  readonly endpoint: string;
+  readonly authorization: string;
+  readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+}
+
+export interface ListedMcpTool {
+  readonly name: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly inputSchema?: unknown;
+  readonly [key: string]: unknown;
+}
+
+function decodeToolPage(result: unknown): {
+  tools: ReadonlyArray<ListedMcpTool>;
+  nextCursor?: string;
+} {
+  if (typeof result !== "object" || result === null || !("tools" in result)) {
+    throw new AcpMcpBridgeError("T3 Code MCP tool listing returned no tools array.");
+  }
+  const { tools, nextCursor } = result as { tools: unknown; nextCursor?: unknown };
+  if (
+    !Array.isArray(tools) ||
+    !tools.every(
+      (tool) =>
+        typeof tool === "object" &&
+        tool !== null &&
+        "name" in tool &&
+        typeof tool.name === "string",
+    ) ||
+    (nextCursor !== undefined && typeof nextCursor !== "string")
+  ) {
+    throw new AcpMcpBridgeError("T3 Code MCP tool listing returned invalid data.");
+  }
+  return {
+    tools: tools as ReadonlyArray<ListedMcpTool>,
+    ...(typeof nextCursor === "string" ? { nextCursor } : {}),
+  };
+}
+
 /**
  * This is the terminal fallback for ACP agents that accept `mcpServers` in
  * `session/new` but fail to expose those tools to their model. Compliant ACP
@@ -68,6 +109,25 @@ export interface AcpMcpToolCallOptions {
  */
 export function callAcpMcpTool(
   options: AcpMcpToolCallOptions,
+): Effect.Effect<unknown, AcpMcpBridgeError> {
+  return callAcpMcpRequest(options, "tools/call", {
+    name: options.tool,
+    arguments: options.arguments,
+  });
+}
+
+export function listAcpMcpTools(
+  options: AcpMcpToolListOptions,
+): Effect.Effect<ReadonlyArray<ListedMcpTool>, AcpMcpBridgeError> {
+  return callAcpMcpRequest(options, "tools/list", {}).pipe(
+    Effect.map((result) => result as ReadonlyArray<ListedMcpTool>),
+  );
+}
+
+function callAcpMcpRequest(
+  options: AcpMcpToolListOptions,
+  method: "tools/call" | "tools/list",
+  params: Readonly<Record<string, unknown>>,
 ): Effect.Effect<unknown, AcpMcpBridgeError> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
   return Effect.gen(function* () {
@@ -125,22 +185,46 @@ export function callAcpMcpTool(
     yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
     const callId = "t3-acp-cli-tool-call";
-    const responses = yield* send({
-      jsonrpc: "2.0",
-      id: callId,
-      method: "tools/call",
-      params: { name: options.tool, arguments: options.arguments },
-    });
-    const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
-    const envelope = asEnvelope(response);
-    if (envelope === null || envelope.error !== undefined) {
-      return yield* Effect.fail(
-        new AcpMcpBridgeError(
-          `T3 Code MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
-        ),
-      );
+    const request = (requestParams: Readonly<Record<string, unknown>>) =>
+      Effect.gen(function* () {
+        const responses = yield* send({
+          jsonrpc: "2.0",
+          id: callId,
+          method,
+          params: requestParams,
+        });
+        const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
+        const envelope = asEnvelope(response);
+        if (envelope === null || envelope.error !== undefined) {
+          return yield* Effect.fail(
+            new AcpMcpBridgeError(
+              `T3 Code MCP ${method} failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
+            ),
+          );
+        }
+        return envelope.result;
+      });
+    if (method === "tools/call") return yield* request(params);
+    const tools: ListedMcpTool[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const result = yield* request(cursor ? { cursor } : {});
+      const listing = yield* Effect.try({
+        try: () => decodeToolPage(result),
+        catch: bridgeError,
+      });
+      tools.push(...listing.tools);
+      if (!listing.nextCursor) return tools;
+      if (cursors.has(listing.nextCursor)) {
+        return yield* Effect.fail(
+          new AcpMcpBridgeError("T3 Code MCP tool listing repeated a cursor."),
+        );
+      }
+      cursors.add(listing.nextCursor);
+      cursor = listing.nextCursor;
     }
-    return envelope.result;
+    return yield* Effect.fail(new AcpMcpBridgeError("T3 Code MCP tool listing exceeded 20 pages."));
   });
 }
 

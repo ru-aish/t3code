@@ -757,6 +757,7 @@ export const layer: Layer.Layer<
           }
           const result = yield* eventSink
             .writeIfRunCurrent({
+              allowHistoricalProviderTurnSettlement: input.event.type === "provider_turn.updated",
               guardPendingUserInputCancellations: true,
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
               threadId: input.threadId,
