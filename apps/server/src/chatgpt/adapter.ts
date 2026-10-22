@@ -9,6 +9,7 @@ import {
   type ThreadId,
   type ProjectId,
   type ChatAttachment,
+  type ServerSettingsError,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderThread,
@@ -157,7 +158,7 @@ export const makeChatGPTAdapter = (
     readonly cacheDir: string;
     readonly attachMcp: Effect.Success<typeof ChatGPTMcpBridge.make>;
     readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
-    readonly resolveLinkedProject?: (projectId: ProjectId) => Effect.Effect<string | null, unknown>;
+    readonly resolveLinkedProject?: (projectId: ProjectId) => Effect.Effect<string | null, ServerSettingsError>;
     readonly linkPullRequest?: (
       threadId: ThreadId,
       url: string,
