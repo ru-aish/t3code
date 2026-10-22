@@ -916,7 +916,11 @@ export const makeChatGPTAdapter = (
               yield* settleReasoning(active);
               streamComplete = true;
               const finalKey = `${active.turn.id}:${active.requestId}:final`;
-              if (emptyToolEnding && !messages.get(finalKey)?.text.trim()) {
+              if (
+                emptyToolEnding &&
+                binding.state !== "done" &&
+                !messages.get(finalKey)?.text.trim()
+              ) {
                 yield* finish(
                   "failed",
                   makeProviderFailure({

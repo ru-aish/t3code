@@ -107,6 +107,7 @@ describe("ChatGPT protocol", () => {
                   connector_id: connectorId,
                   link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
                   connector_name: connectorName,
+                  params: { path: "/fedora_t3code/pretend/tool" },
                   actions: [{ always_allow: { target_message_id: targetMessageId } }],
                 },
               },

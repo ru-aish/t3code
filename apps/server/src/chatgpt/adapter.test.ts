@@ -1169,6 +1169,50 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
+  it.live("does not fail an empty tool ending after Terminal MCP reports done", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId, turnInput } = yield* fixture;
+        yield* Queue.take(events);
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          recipient: "api_tool.call_tool",
+          text: JSON.stringify({
+            path: "/asdk_app_test/link_test/bootstrap_thread",
+            args: { thread_id: turnInput.threadId },
+          }),
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "tool",
+          recipient: "assistant",
+          text: "",
+          endTurn: true,
+          status: "finished_successfully",
+        });
+        const acknowledged = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)).toMatchObject({
+          type: "turn.terminal",
+          status: "completed",
+          failure: null,
+        });
+      }),
+    ),
+  );
+
   it.live("keeps aliased tool turns active until Terminal MCP confirms completion", () =>
     Effect.scoped(
       Effect.gen(function* () {
