@@ -1,12 +1,43 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   imageUploadDestination,
+  isTerminalToolCall,
   mergeFinalAnswer,
   normalizeProjects,
   normalizeStreamMessage,
 } from "./protocol.ts";
 
 describe("ChatGPT protocol", () => {
+  it("recognizes scoped opaque connector aliases in live and serialized history parsing", () => {
+    const serialized = new Function(
+      `return (${isTerminalToolCall.toString()})`,
+    )() as typeof isTerminalToolCall;
+    for (const recognize of [isTerminalToolCall, serialized]) {
+      const message = {
+        role: "assistant",
+        recipient: "api_tool.call_tool",
+        text: JSON.stringify({
+          path: "/asdk_app_opaque/link_opaque/bootstrap_thread",
+          args: { thread_id: "thread-one" },
+        }),
+      };
+      expect(recognize(message, "thread-one")).toBe(true);
+      expect(recognize(message, "other-thread")).toBe(false);
+      expect(recognize({ ...message, role: "tool" }, "thread-one")).toBe(false);
+      expect(recognize({ ...message, text: "invalid JSON" }, "thread-one")).toBe(false);
+      expect(
+        recognize(
+          {
+            ...message,
+            text: JSON.stringify({ path: "/other_app/search", args: { thread_id: "thread-one" } }),
+          },
+          "thread-one",
+        ),
+      ).toBe(false);
+      expect(recognize({ ...message, text: "fedora_t3code.thread_task" }, "thread-one")).toBe(true);
+    }
+  });
+
   it("keeps the complete final answer when hidden stream copies overlap", () => {
     const draft = "Introduction\n\n## Findings\nPart one.";
     const expanded = draft + "\n\n## Root cause\nFixed.";
@@ -56,6 +87,45 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(full);
   });
+  it("recognizes only pending Always allow prompts for the Fedora connector", () => {
+    const approval = (
+      connectorName: string,
+      targetMessageId = "approval-message",
+      connectorId = "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+    ) =>
+      normalizeStreamMessage({
+        message: {
+          id: "approval-message",
+          author: { role: "tool" },
+          content: { parts: [""] },
+          metadata: {
+            jit_plugin_data: {
+              from_server: {
+                type: "confirm_action",
+                body: {
+                  codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                  connector_id: connectorId,
+                  link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+                  connector_name: connectorName,
+                  params: { path: "/fedora_t3code/pretend/tool" },
+                  actions: [{ always_allow: { target_message_id: targetMessageId } }],
+                },
+              },
+            },
+          },
+        },
+      }).fedoraApproval;
+
+    expect(approval("fedora_t3code")).toEqual({
+      messageId: "approval-message",
+      connectorId: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+      linkId: "link_6ad23eb0b6cc819189b71f055d70599c",
+    });
+    expect(approval("another_connector", "approval-message", "another_app")).toBeUndefined();
+    expect(approval("fedora_t3code", "approval-message", "another_app")).toBeUndefined();
+    expect(approval("fedora_t3code", "different-message")).toBeUndefined();
+  });
+
   it("uses a Markdown fallback instead of raw ChatGPT DIL when available", () => {
     const raw = `<box gap={2}><button onClick={()=>GenUI.openUrl("https://example.com/app")}>Download</button></box>`;
     expect(

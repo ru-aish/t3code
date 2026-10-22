@@ -2,7 +2,12 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import { imageUploadDestination, normalizeProjects, normalizeStreamMessage } from "./protocol.ts";
+import {
+  imageUploadDestination,
+  isTerminalToolCall,
+  normalizeProjects,
+  normalizeStreamMessage,
+} from "./protocol.ts";
 import { orchestrationPrompt } from "./mcpBridge.ts";
 import { rendererDiscovery } from "./rendererDiscovery.ts";
 
@@ -19,6 +24,13 @@ export type ChatGPTUpdate = {
   endTurn?: boolean | undefined;
   hidden?: boolean | undefined;
   createdAt?: number | undefined;
+  fedoraApproval?:
+    | {
+        messageId: string;
+        connectorId: string;
+        linkId: string;
+      }
+    | undefined;
 };
 export type TerminalBinding = {
   thread_id: string;
@@ -615,7 +627,7 @@ export class ChatGPTConnection {
       for(const raw of nodes.reverse()){
         const message=normalize(raw);
         if(message.role==='user'){requestId=requests[message.messageId];usesTerminalTools=false;continue;}
-        if(requestId&&message.role==='assistant'&&(message.recipient?.includes('fedora_t3code')||(message.recipient==='api_tool.call_tool'&&message.text?.includes('fedora_t3code'))))usesTerminalTools=true;
+        if(requestId&&(${isTerminalToolCall.toString()})(message,${JSON.stringify(this.options.threadId)}))usesTerminalTools=true;
         if(requestId&&message.role==='assistant'&&!message.hidden&&(!message.recipient||message.recipient==='all'))updates.push({...message,kind:'update',requestId,conversationId:${JSON.stringify(conversationId)},createdAt:raw.create_time});
       }
       const visibleFinal=updates.findLast(message=>message.requestId===requestId&&(!message.channel||message.channel==='final'));
@@ -775,25 +787,110 @@ export class ChatGPTConnection {
       const cancelKey=Symbol.for('t3.chatgpt.cancelled.v1');window[cancelKey] ||= new Set();
       if(window[cancelKey].has(${JSON.stringify(requestId)})){window[cancelKey].delete(${JSON.stringify(requestId)});return {submitted:false,cancelled:true};}
       const key=Symbol.for('t3.chatgpt.streams.v1');window[key] ||= new Map();
-      const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true};
+      const initialRequest=${JSON.stringify(request)};
+      const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true,pendingApprovals:new Map(),attemptedApprovals:new Set(),segment:0,transitioning:false,observedFinal:false};
       window[key].set(${JSON.stringify(this.options.threadId)},state);
       const resolved=await resolveClient();
       if(window[cancelKey].has(state.requestId)){window[cancelKey].delete(state.requestId);if(window[key].get(${JSON.stringify(this.options.threadId)})===state)window[key].delete(${JSON.stringify(this.options.threadId)});return {submitted:false,cancelled:true};}
+      const isCurrent=()=>window[key].get(${JSON.stringify(this.options.threadId)})===state&&state.active&&!window[cancelKey].has(state.requestId);
+      const normalize=(value)=>(${normalizeStreamMessage.toString()})(value);
+      const recordApproval=(message)=>{
+        const approval=normalize(message).fedoraApproval;
+        if(approval&&!state.attemptedApprovals.has(approval.messageId))state.pendingApprovals.set(approval.messageId,approval);
+      };
       const emit=(kind,value)=>{
-        const v=value&&typeof value==='object'?value:{};const candidate=v.message||v.data||v;const m=candidate.message||candidate;
+        if(!isCurrent())return;
+        const v=value&&typeof value==='object'?value:{};const candidate=v.message||v.data||v;
         state.conversationId=v.conversation_id||v.conversationId||candidate.conversation_id||candidate.conversationId||state.conversationId;
-        const normalized=(${normalizeStreamMessage.toString()})(value);
+        const normalized=normalize(value);
+        if(kind==='update'&&normalized.fedoraApproval&&!state.attemptedApprovals.has(normalized.fedoraApproval.messageId))state.pendingApprovals.set(normalized.fedoraApproval.messageId,normalized.fedoraApproval);
+        if(kind==='update'&&normalized.role==='assistant'&&normalized.endTurn===true&&!normalized.hidden&&(!normalized.channel||normalized.channel==='final')&&(!normalized.recipient||normalized.recipient==='all'))state.observedFinal=true;
         if(kind==='complete'||kind==='error')state.active=false;
         const update={kind,requestId:state.requestId,conversationId:state.conversationId,...normalized};
         state.lastUpdate=update;
         if(typeof window[state.binding]==='function')window[state.binding](JSON.stringify(update));
       };
-      try {
+      // One logical T3 turn may span many native stream segments.
+      const finishStream=async(value,segment)=>{
+        if(!isCurrent()||segment!==state.segment||state.transitioning)return;
+        state.transitioning=true;
+        recordApproval(value);
+        try{
+          // Native callbacks can omit confirmation metadata. If no visible
+          // final was streamed, inspect the canonical head once at the segment
+          // boundary, never on a timer.
+          let conversation=null;
+          let head=null;
+          if(state.conversationId&&(state.pendingApprovals.size>0||!state.observedFinal)){
+            const raw=await resolved.client.get(state.conversationId);
+            if(!isCurrent()||segment!==state.segment)return;
+            conversation=raw.conversation||raw.data||raw;
+            if(conversation.conversation_id!==state.conversationId)throw new Error('Conversation identity changed during stream completion');
+            head=conversation.mapping?.[conversation.current_node]?.message;
+            recordApproval(head);
+          }
+          if(state.pendingApprovals.size===0){
+            const server=head?.metadata?.jit_plugin_data?.from_server||head?.metadata?.elicitation_metadata?.plugin_data?.from_server;
+            if(server?.type==='confirm_action'&&server.body?.codex_mcp_elicitation?.status==='pending')
+              throw new Error('Another connector is awaiting approval; Fedora auto-approval is not permitted');
+            state.transitioning=false;
+            emit('complete',value);
+            return;
+          }
+          if(!state.conversationId||!conversation)throw new Error('Cannot approve Fedora without verified conversation state');
+          const approval=normalize(head).fedoraApproval;
+          const queued=approval&&state.pendingApprovals.get(approval.messageId);
+          if(!approval||!queued||approval.connectorId!==queued.connectorId||approval.linkId!==queued.linkId)
+            throw new Error('Pending Fedora approval changed; cannot submit an unverified decision');
+          state.pendingApprovals.clear();
+          state.attemptedApprovals.add(approval.messageId);
+          const responseRequest={
+            action:'next',conversation_id:state.conversationId,parent_message_id:approval.messageId,
+            model:conversation.default_model_slug||initialRequest.model,
+            ...(head.metadata?.thinking_effort?{thinking_effort:head.metadata.thinking_effort}:initialRequest.thinking_effort?{thinking_effort:initialRequest.thinking_effort}:{}),
+            supported_encodings:['v1'],
+            ...(conversation.gizmo_id?{
+              gizmo_id:conversation.gizmo_id,
+              conversation_mode:{kind:'gizmo_interaction',gizmo_id:conversation.gizmo_id},
+            }:{}),
+            timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,
+            timezone_offset_min:-new Date().getTimezoneOffset(),
+            messages:[{
+              id:window.crypto.randomUUID(),author:{role:'tool',name:'api_tool.call_tool',metadata:{}},
+              channel:null,content:{content_type:'text',parts:['']},create_time:Date.now()/1000,end_turn:null,
+              metadata:{jit_plugin_data:{from_client:{target_message_id:approval.messageId,type:'always_allow'}}},
+              recipient:'all',status:'finished_successfully',update_time:null,weight:1,
+            }],
+          };
+          state.transitioning=false;
+          if(isCurrent()&&segment===state.segment)startSegment(responseRequest);
+        }catch(e){
+          state.transitioning=false;
+          emit('error',e);
+        }
+      };
+      const startSegment=(segmentRequest)=>{
+        if(!isCurrent())return;
+        const segment=++state.segment;
         const startupAbort=new AbortController();
         state.startupAbort=startupAbort;
-        const handle=resolved.client.startCompletionStream({request:${JSON.stringify(request)},startupSignal:startupAbort.signal,onUpdate:v=>emit('update',v),onComplete:v=>emit('complete',v),onError:v=>emit('error',v)});
+        state.handle=null;
+        state.handleError=null;
+        state.observedFinal=false;
+        const handle=resolved.client.startCompletionStream({
+          request:segmentRequest,startupSignal:startupAbort.signal,
+          onUpdate:v=>{if(isCurrent()&&state.segment===segment)emit('update',v);},
+          onComplete:v=>{if(isCurrent()&&state.segment===segment)void finishStream(v,segment);},
+          onError:v=>{if(isCurrent()&&state.segment===segment)emit('error',v);},
+        });
         state.handlePromise=Promise.resolve(handle);
-        state.handlePromise.then(h=>{state.handle=h;},e=>{state.handleError=e;emit('error',e);});
+        state.handlePromise.then(
+          h=>{if(state.segment===segment)state.handle=h;},
+          e=>{if(isCurrent()&&state.segment===segment){state.handleError=e;emit('error',e);}},
+        );
+      };
+      try {
+        startSegment(initialRequest);
         return {submitted:true};
       }catch(e){emit('error',e);throw e;}
     })()`),
