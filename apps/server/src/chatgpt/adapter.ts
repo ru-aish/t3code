@@ -157,7 +157,7 @@ export const makeChatGPTAdapter = (
     readonly cacheDir: string;
     readonly attachMcp: Effect.Success<typeof ChatGPTMcpBridge.make>;
     readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
-    readonly resolveLinkedProject?: (projectId: ProjectId) => Effect.Effect<string | null>;
+    readonly resolveLinkedProject?: (projectId: ProjectId) => Effect.Effect<string | null, unknown>;
     readonly linkPullRequest?: (
       threadId: ThreadId,
       url: string,
