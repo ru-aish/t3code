@@ -821,15 +821,15 @@ export function normalizeStreamMessage(
           )
             return true;
         }
-        for (const marker of emphasis.keys()) {
-          if (
-            source.startsWith(marker, i) &&
-            i + marker.length <= tailEnd &&
-            source[i - 1] !== char &&
-            source[i + marker.length] !== char &&
-            flanking(i, i + marker.length, char).canClose
-          )
-            return true;
+        if (char === "*" || char === "_" || char === "~") {
+          let end = i + 1;
+          while (end < tailEnd && source[end] === char) end++;
+          if (flanking(i, end, char).canClose) {
+            for (const marker of emphasis.keys()) {
+              if (marker[0] === char && marker.length <= end - i) return true;
+            }
+          }
+          i = end - 1;
         }
       }
       return false;
