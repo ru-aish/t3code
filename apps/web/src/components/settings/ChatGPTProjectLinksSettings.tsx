@@ -60,7 +60,10 @@ function ChatGPTProjectLinkRow(props: {
 
   const update = (value: string | null) => {
     if (!value || saving || !canWrite || loading || error) return;
-    const projectSettingsOverrides: ServerSettings["projectSettingsOverrides"] = {};
+    const projectSettingsOverrides: Record<
+      ProjectId,
+      ServerSettings["projectSettingsOverrides"][ProjectId]
+    > = {};
     for (const projectId of props.projectIds) {
       const current = props.settings.projectSettingsOverrides[projectId] ?? {};
       const chatgptProjects = { ...current.chatgptProjects };
