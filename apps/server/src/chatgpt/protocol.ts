@@ -661,6 +661,7 @@ export function normalizeStreamMessage(
     const nested = new Set<number>();
     const invalidRoots = new Set<number>();
     const actualCardOpenings = new Set<number>();
+    const markupRanges: Span[] = [];
     const stack: Array<{ name: string; start: number }> = [];
     // A raw HTML/DIL parent changes the meaning of a contained card, even
     // when the parent is not itself a card. Track every non-void element.
@@ -703,6 +704,7 @@ export function normalizeStreamMessage(
         } else if (ch === "<") break;
       }
       if (end < 0) return [];
+      markupRanges.push({ start: at, end });
       scanAt = end;
       const name = opener[0].replace(/^<\/?/, "").toLowerCase();
       if (opener[0].startsWith("</")) {
@@ -726,6 +728,8 @@ export function normalizeStreamMessage(
       if (open.name === "card") invalidRoots.add(open.start);
     }
 
+    const inlineIgnoredRanges = mergeRanges([...protectedRanges, ...markupRanges]);
+
     // A physical line boundary is not necessarily a Markdown block boundary:
     // link labels and emphasis can continue on the next line. Only promote a
     // card when no inline delimiter from the containing paragraph owns it.
@@ -740,6 +744,7 @@ export function normalizeStreamMessage(
         if (
           !line.trim() ||
           /^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) ||
+          /^ {0,3}(?:=+|-+)[ \t]*$/.test(line) ||
           /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(line)
         ) {
           from = next;
@@ -753,8 +758,23 @@ export function normalizeStreamMessage(
       }
       let bracketDepth = 0;
       const emphasis = new Map<string, boolean>();
+      const isPunctuation = (char: string): boolean => /[\p{P}\p{S}]/u.test(char);
+      const flanking = (at: number, end: number, char: string) => {
+        const before = source[at - 1] ?? " ";
+        const after = source[end] ?? " ";
+        const left =
+          !/\s/.test(after) &&
+          (!isPunctuation(after) || /\s/.test(before) || isPunctuation(before));
+        const right =
+          !/\s/.test(before) &&
+          (!isPunctuation(before) || /\s/.test(after) || isPunctuation(after));
+        return {
+          canOpen: char === "_" ? left && (!right || isPunctuation(before)) : left,
+          canClose: char === "_" ? right && (!left || isPunctuation(after)) : right,
+        };
+      };
       for (let i = from; i < start; i++) {
-        if (inRanges(protectedRanges, i)) continue;
+        if (inRanges(inlineIgnoredRanges, i)) continue;
         const char = source[i]!;
         if (char === "\\") {
           i++;
@@ -770,10 +790,7 @@ export function normalizeStreamMessage(
           i = end - 1;
           continue;
         }
-        const before = source[i - 1] ?? " ";
-        const after = source[end] ?? " ";
-        const canOpen = !/\s/.test(after);
-        const canClose = !/\s/.test(before);
+        const { canOpen, canClose } = flanking(i, end, char);
         if (emphasis.get(run) && canClose) emphasis.delete(run);
         else if (canOpen) emphasis.set(run, true);
         i = end - 1;
@@ -783,16 +800,37 @@ export function normalizeStreamMessage(
       // an escaped CDATA sample or a quoted attribute must not hide a root card.
       const candidateEnd = source.indexOf("</card>", start + 6);
       if (candidateEnd < 0) return false;
-      const continuation = source.slice(
-        candidateEnd + "</card>".length,
-        Math.min(source.length, candidateEnd + 4_096),
-      );
+      const tailStart = candidateEnd + "</card>".length;
+      const continuation = source.slice(tailStart, Math.min(source.length, tailStart + 4_096));
       const blank = /\n[ \t]*\n/.exec(continuation);
-      const tail = blank ? continuation.slice(0, blank.index) : continuation;
-      if (bracketDepth > 0 && /\]\s*(?:\(|\[)/.test(tail)) return true;
-      for (const marker of emphasis.keys()) {
-        const closing = tail.indexOf(marker);
-        if (closing > 0 && !/\s/.test(tail[closing - 1]!)) return true;
+      const tailEnd = tailStart + (blank?.index ?? continuation.length);
+      for (let i = tailStart; i < tailEnd; i++) {
+        if (inRanges(inlineIgnoredRanges, i)) continue;
+        const char = source[i]!;
+        if (char === "\\") {
+          i++;
+          continue;
+        }
+        if (bracketDepth > 0 && char === "]") {
+          let linkAt = i + 1;
+          while (linkAt < tailEnd && /\s/.test(source[linkAt]!)) linkAt++;
+          if (
+            linkAt < tailEnd &&
+            !inRanges(inlineIgnoredRanges, linkAt) &&
+            (source[linkAt] === "(" || source[linkAt] === "[")
+          )
+            return true;
+        }
+        for (const marker of emphasis.keys()) {
+          if (
+            source.startsWith(marker, i) &&
+            i + marker.length <= tailEnd &&
+            source[i - 1] !== char &&
+            source[i + marker.length] !== char &&
+            flanking(i, i + marker.length, char).canClose
+          )
+            return true;
+        }
       }
       return false;
     }

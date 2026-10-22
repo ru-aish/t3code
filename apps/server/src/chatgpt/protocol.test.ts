@@ -1115,6 +1115,27 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("does not read Markdown delimiters from quoted DIL attributes", () => {
+    const content = '<box label="[not Markdown" />\n' + card + "\n[Other](https://e.org)";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
+  it("does not mistake intraword underscores for emphasis around a card", () => {
+    const content = "Variable snake_case\n" + card + "\nnew_item";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
+  it("does not close multiline links with escaped or literal Markdown", () => {
+    for (const ending of ["ending \\](url)", "ending `literal ](url)`", "ending <!-- ](url) -->"]) {
+      expect(normalize("[Plain note\n" + card + "\n" + ending)).toContain("t3-card");
+    }
+  });
+
+  it("recognizes setext headings as boundaries for preceding emphasis", () => {
+    const content = "Unmatched **heading\n===\n" + card + "\nafter**";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
   it("still extracts a separate card after completed inline formatting", () => {
     for (const content of [
       "**Completed**\n" + card,
