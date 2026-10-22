@@ -45,6 +45,7 @@ import {
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+import { ChatGPTProjectLinksSettings } from "./ChatGPTProjectLinksSettings";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
@@ -594,6 +595,7 @@ function ProjectDetail({
           />
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
+        <ChatGPTProjectLinksSettings group={group} />
         <ProjectActionsSettings />
         {hasMultipleCheckouts ? checkoutChoices : null}
         <SettingsSection title="Danger">

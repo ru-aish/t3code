@@ -677,6 +677,28 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("preserves ChatGPT links across older project-setting edits and allows unlinking", () => {
+    const projectId = ProjectId.make("project-a");
+    const instanceId = ProviderInstanceId.make("chatgpt");
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      projectSettingsOverrides: {
+        [projectId]: {
+          defaultAutoPull: true,
+          chatgptProjects: { [instanceId]: "g-p-linked" },
+        },
+      },
+    };
+    const updated = applyServerSettingsPatch(current, {
+      projectSettingsOverrides: { [projectId]: { defaultAutoPull: false } },
+    });
+    expect(updated.projectSettingsOverrides[projectId]?.chatgptProjects?.[instanceId]).toBe("g-p-linked");
+    const cleared = applyServerSettingsPatch(updated, {
+      projectSettingsOverrides: { [projectId]: { defaultAutoPull: false, chatgptProjects: {} } },
+    });
+    expect(cleared.projectSettingsOverrides[projectId]?.chatgptProjects).toEqual({});
+  });
+
   it("clears a project's providerInstances override when a patch entry sends an empty map", () => {
     const instanceId = ProviderInstanceId.make("codex_work");
     const projectId = ProjectId.make("project-a");

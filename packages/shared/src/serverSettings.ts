@@ -274,11 +274,15 @@ function mergeProjectSettingsOverridesPatch(
       continue;
     }
     const storedProviderInstances = current[projectId]?.providerInstances;
+    const storedChatGPTProjects = current[projectId]?.chatgptProjects;
     next.set(projectId, {
       ...entry,
       ...(Object.hasOwn(entry, "providerInstances") || storedProviderInstances === undefined
         ? {}
         : { providerInstances: storedProviderInstances }),
+      ...(Object.hasOwn(entry, "chatgptProjects") || storedChatGPTProjects === undefined
+        ? {}
+        : { chatgptProjects: storedChatGPTProjects }),
     });
   }
   return Object.fromEntries(next);

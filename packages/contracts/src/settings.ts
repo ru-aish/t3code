@@ -963,7 +963,10 @@ export const ProjectSettingsOverrides = Schema.Struct({
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
-} satisfies Record<ProjectScopedServerSettingKey | "providerInstances", unknown>);
+  chatgptProjects: Schema.optionalKey(
+    Schema.Record(ProviderInstanceId, Schema.String.check(Schema.isPattern(/^g-p-[a-zA-Z0-9-]+$/))),
+  ),
+} satisfies Record<ProjectScopedServerSettingKey | "providerInstances" | "chatgptProjects", unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
 /**

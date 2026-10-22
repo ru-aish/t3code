@@ -57,6 +57,7 @@ const sourcemapEnv = process.env.T3CODE_WEB_SOURCEMAP?.trim().toLowerCase();
 
 const bundledDevEnv = process.env.T3CODE_BUNDLED_DEV?.trim().toLowerCase();
 const bundledDev = bundledDevEnv === "1" || bundledDevEnv === "true";
+const lightweightDev = process.env.T3CODE_LIGHTWEIGHT_DEV === "1";
 
 const buildSourcemap: boolean | "hidden" =
   sourcemapEnv === "0" || sourcemapEnv === "false"
@@ -153,6 +154,10 @@ export default defineConfig(() => {
       tailwindPlugins(bundledDev),
     ],
     optimizeDeps: {
+      ...(lightweightDev ? { noDiscovery: true, entries: [] } : {}),
+      // Resource-constrained dev still needs targeted prebundling. Disabling it
+      // leaves CommonJS shims broken and makes the browser request thousands of
+      // unoptimized modules over the shared origin.
       include: [
         "@clerk/clerk-js",
         "@clerk/react/internal",
@@ -163,6 +168,8 @@ export default defineConfig(() => {
         "effect/Array",
         "effect/Order",
         "react-dom/client",
+        "zustand > use-sync-external-store/shim",
+        "zustand > use-sync-external-store/shim/with-selector",
       ],
     },
     define: {
@@ -202,9 +209,7 @@ export default defineConfig(() => {
       // first request. Without this, a cold worktree discovers and transforms
       // modules one import-level at a time while the browser waits — which
       // over a tailnet origin turns into minutes of waterfall.
-      warmup: {
-        clientFiles: ["./src/main.tsx"],
-      },
+      ...(lightweightDev ? {} : { warmup: { clientFiles: ["./src/main.tsx"] } }),
       ...(devProxyTarget
         ? {
             // One entry per shared prefix; the server's dev catch-all 404s the

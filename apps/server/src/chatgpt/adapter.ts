@@ -7,6 +7,7 @@ import {
   ProviderTurnId,
   TurnItemId,
   type ThreadId,
+  type ProjectId,
   type ChatAttachment,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ProviderCapabilities,
@@ -156,6 +157,7 @@ export const makeChatGPTAdapter = (
     readonly cacheDir: string;
     readonly attachMcp: Effect.Success<typeof ChatGPTMcpBridge.make>;
     readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
+    readonly resolveLinkedProject?: (projectId: ProjectId) => Effect.Effect<string | null>;
     readonly linkPullRequest?: (
       threadId: ThreadId,
       url: string,
@@ -878,6 +880,17 @@ export const makeChatGPTAdapter = (
             );
             return;
           }
+          const selectedProject = request.modelSelection.options?.find(
+            (option) => option.id === "chatgptProjectId",
+          )?.value;
+          const linkedProject =
+            selectedProject === undefined &&
+            !connection.conversationId &&
+            transport.resolveLinkedProject
+              ? yield* transport.resolveLinkedProject(request.appThread.projectId).pipe(
+                  Effect.orElseSucceed(() => null),
+                )
+              : null;
           yield* attempt(() =>
             connection.send(
               request.message.messageId,
@@ -887,12 +900,11 @@ export const makeChatGPTAdapter = (
               request.modelSelection.options?.find((option) => option.id === "reasoningEffort")
                 ?.value as string | undefined,
               images,
-              request.modelSelection.options?.find((option) => option.id === "chatgptProjectId")
-                ?.value === "general"
+              selectedProject === "general"
                 ? null
-                : (request.modelSelection.options?.find(
-                    (option) => option.id === "chatgptProjectId",
-                  )?.value as string | undefined),
+                : typeof selectedProject === "string"
+                  ? selectedProject
+                  : linkedProject ?? undefined,
             ),
           ).pipe(
             Effect.tapError(() =>

@@ -28,6 +28,7 @@ const fakes = vi.hoisted(() => ({
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
     sent: string[];
+    sentProjectIds: Array<string | null | undefined>;
     stops: number;
     controls: string[];
     idle: boolean;
@@ -48,6 +49,7 @@ vi.mock("./connection.ts", () => ({
     messages = [];
     callback?: (update: ChatGPTUpdate) => void;
     sent: string[] = [];
+    sentProjectIds: Array<string | null | undefined> = [];
     stops = 0;
     controls: string[] = [];
     idle = false;
@@ -94,8 +96,17 @@ vi.mock("./connection.ts", () => ({
         model: "test-model",
       };
     }
-    async send(id: string) {
+    async send(
+      id: string,
+      _text: string,
+      _model: string,
+      _cwd: string,
+      _reasoningEffort?: string,
+      _images?: unknown[],
+      projectId?: string | null,
+    ) {
       this.sent.push(id);
+      this.sentProjectIds.push(projectId);
       if (fakes.failNextSend) {
         fakes.failNextSend = false;
         throw new Error("Image upload failed");
@@ -182,10 +193,19 @@ vi.mock("./connection.ts", () => ({
 }));
 import { makeChatGPTAdapter } from "./adapter.ts";
 
-const fixture = Effect.gen(function* () {
+const fixtureWithProject = (
+  linkedProject: string | null = null,
+  selectedProject?: string,
+) => Effect.gen(function* () {
   const threadId = ThreadId.make("test-thread");
   const now = yield* DateTime.now;
-  const selection = { instanceId: ProviderInstanceId.make("chatgpt"), model: "test-model" };
+  const selection = {
+    instanceId: ProviderInstanceId.make("chatgpt"),
+    model: "test-model",
+    ...(selectedProject === undefined
+      ? {}
+      : { options: [{ id: "chatgptProjectId", value: selectedProject }] }),
+  };
   const policy = {
     runtimeMode: "full-access" as const,
     interactionMode: "default" as const,
@@ -211,6 +231,7 @@ const fixture = Effect.gen(function* () {
       environmentId: "test-environment",
       cacheDir: "/tmp/test-chatgpt",
       attachMcp,
+      resolveLinkedProject: () => Effect.succeed(linkedProject),
     },
   );
   const session = yield* adapter.openSession({
@@ -282,6 +303,7 @@ const fixture = Effect.gen(function* () {
     requestId: turnInput.message.messageId,
   };
 });
+const fixture = fixtureWithProject();
 
 const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
   seq: 1,
@@ -293,6 +315,24 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("applies the linked ChatGPT project when no project was selected", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake } = yield* fixtureWithProject("g-p-linked");
+        expect(fake.sentProjectIds).toEqual(["g-p-linked"]);
+      }),
+    ),
+  );
+
+  it.live("lets an explicit General ChatGPT selection override the link", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake } = yield* fixtureWithProject("g-p-linked", "general");
+        expect(fake.sentProjectIds).toEqual([null]);
+      }),
+    ),
+  );
+
   it.live("attaches the orchestration command and refreshes credentials before a turn", () =>
     Effect.scoped(
       Effect.gen(function* () {

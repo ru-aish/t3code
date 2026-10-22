@@ -244,6 +244,14 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           cacheDir,
           attachMcp: yield* ChatGPTMcpBridge.make,
           resolveAttachmentPath: host.resolveAttachmentPath,
+          resolveLinkedProject: (projectId) =>
+            host.settings.get.pipe(
+              Effect.map(
+                (settings) =>
+                  settings.projectSettingsOverrides[projectId]?.chatgptProjects?.[input.instanceId] ??
+                  null,
+              ),
+            ),
           linkPullRequest: actions.linkPullRequest,
         }),
         textGeneration: {

@@ -276,6 +276,7 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import { ChatGPTProjectPicker } from "./ChatGPTProjectPicker";
+import { resolveChatGPTProjectOption } from "./ChatGPTProjectSelection";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import {
@@ -2286,12 +2287,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedPromptEffort = composerProviderState.promptEffort;
   const chatgptProjectOption =
     selectedProvider === "chatgpt"
-      ? (composerModelOptions?.[selectedInstanceId]?.find(
-          (option) => option.id === "chatgptProjectId",
-        ) ??
-        (activeThreadModelSelection?.instanceId === selectedInstanceId
-          ? activeThreadModelSelection.options?.find((option) => option.id === "chatgptProjectId")
-          : undefined))
+      ? resolveChatGPTProjectOption({
+          explicit:
+            composerModelOptions?.[selectedInstanceId]?.find(
+              (option) => option.id === "chatgptProjectId",
+            ) ??
+            (activeThreadModelSelection?.instanceId === selectedInstanceId
+              ? activeThreadModelSelection.options?.find((option) => option.id === "chatgptProjectId")
+              : undefined),
+          projectId: activeProjectId,
+          instanceId: selectedInstanceId,
+          hasStarted: threadShellHasStarted(props.activeThreadShell),
+          settings,
+        })
       : undefined;
   const selectedModelOptionsForDispatch = useMemo(
     () =>
