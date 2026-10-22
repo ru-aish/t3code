@@ -401,7 +401,10 @@ export const makeChatGPTAdapter = (
         let generation = 0;
         let interrupting = false;
         let nextOrdinal = 0;
-        let recoveryNotice: Extract<OrchestrationV2TurnItem, { type: "system_notice" }> | undefined;
+        const recoveryNotices = new Map<
+          TurnItemId,
+          Extract<OrchestrationV2TurnItem, { type: "system_notice" }>
+        >();
         const itemOrdinals = new Map<string, number>();
         const itemIds = new Map<string, TurnItemId>();
         const restoredItems = new Map<string, OrchestrationV2TurnItem>();
@@ -422,10 +425,10 @@ export const makeChatGPTAdapter = (
         ) {
           if (!active || !thread) return;
           const id = TurnItemId.make(`chatgpt:${input.threadId}:recovery:${active.requestId}`);
-          const previous = recoveryNotice?.id === id ? recoveryNotice : undefined;
+          const previous = recoveryNotices.get(id);
           if (previous?.message === message && previous.status === status) return;
           const now = yield* DateTime.now;
-          recoveryNotice = {
+          const recoveryNotice: Extract<OrchestrationV2TurnItem, { type: "system_notice" }> = {
             id,
             threadId: input.threadId,
             runId: active.input.runId,
@@ -443,6 +446,7 @@ export const makeChatGPTAdapter = (
             type: "system_notice",
             message,
           };
+          recoveryNotices.set(id, recoveryNotice);
           yield* emit({
             type: "turn_item.updated",
             driver: CHATGPT_DRIVER,
@@ -669,15 +673,24 @@ export const makeChatGPTAdapter = (
           const [status, failure] = outcome;
           if (!active || !thread) return;
           const completed = active;
-          if (recoveryNotice?.status === "running")
-            yield* reportRecovery(
-              status === "completed"
-                ? "ChatGPT output recovered."
-                : status === "forced"
-                  ? "Recovery could not confirm ChatGPT completion; the turn was forced closed."
-                  : "ChatGPT recovery stopped with the turn.",
-              "completed",
-            );
+          const recoveryFinishedAt = yield* DateTime.now;
+          for (const [id, notice] of recoveryNotices) {
+            if (notice.runId !== completed.input.runId || notice.status !== "running") continue;
+            const settled: typeof notice = {
+              ...notice,
+              status: "completed",
+              message:
+                status === "completed"
+                  ? "ChatGPT output recovered."
+                  : status === "forced"
+                    ? "Recovery could not confirm ChatGPT completion; the turn was forced closed."
+                    : "ChatGPT recovery stopped with the turn.",
+              completedAt: recoveryFinishedAt,
+              updatedAt: recoveryFinishedAt,
+            };
+            recoveryNotices.set(id, settled);
+            yield* emit({ type: "turn_item.updated", driver: CHATGPT_DRIVER, turnItem: settled });
+          }
           cancelRecovery();
           // Stop acknowledgments can precede late renderer callbacks. Retire the
           // old request before a steering replacement reuses this adapter.
@@ -1213,48 +1226,6 @@ export const makeChatGPTAdapter = (
         ) {
           const projection = request.existingProjection!;
           thread = request.providerThread;
-          const resumeRequestId =
-            active?.requestId ??
-            connection.submittedRequestIds.findLast((requestId) =>
-              projection.runs.some(
-                (run) =>
-                  run.userMessageId === requestId &&
-                  run.status === "running" &&
-                  run.providerThreadId === thread!.id,
-              ),
-            );
-          const snapshot = yield* attempt(() => connection.readConversation(resumeRequestId));
-          if (recoveryScheduled) recoverySnapshot = { token: recoveryToken, snapshot };
-          binding = yield* attempt(() =>
-            connection.control<TerminalBinding>("register", {
-              cwd,
-              model: input.modelSelection.model,
-            }),
-          );
-          for (const item of projection.turnItems) {
-            nextOrdinal = Math.max(nextOrdinal, item.ordinal);
-            if (item.nativeItemRef && item.providerTurnId)
-              restoredItems.set(`${item.providerTurnId}:${item.nativeItemRef.nativeId}`, item);
-            const nativeItemId = item.nativeItemRef?.nativeId;
-            if (
-              nativeItemId &&
-              item.id ===
-                TurnItemId.make(`chatgpt:${input.threadId}:terminal-tool:${nativeItemId}`) &&
-              (item.type === "dynamic_tool" ||
-                item.type === "command_execution" ||
-                item.type === "file_change")
-            ) {
-              terminalToolItems.set(nativeItemId, item);
-              terminalToolInputs.set(
-                nativeItemId,
-                item.type === "dynamic_tool"
-                  ? item.input
-                  : item.type === "command_execution"
-                    ? { command: item.input }
-                    : { path: item.fileName },
-              );
-            }
-          }
           let previous: ActiveTurn | undefined;
           for (const requestId of connection.submittedRequestIds) {
             const known = outputTurns.get(requestId);
@@ -1284,6 +1255,57 @@ export const makeChatGPTAdapter = (
               previous = { ...previous, generation: ++generation, requestId };
             else previous = undefined;
             if (previous) outputTurns.set(requestId, previous);
+          }
+          const resumeRequestId =
+            active?.requestId ??
+            connection.submittedRequestIds.findLast((requestId) => {
+              const candidate = outputTurns.get(requestId);
+              return (
+                candidate?.turn.status === "running" &&
+                projection.runs.some(
+                  (run) =>
+                    run.id === candidate.input.runId &&
+                    run.status === "running" &&
+                    run.providerThreadId === thread!.id,
+                )
+              );
+            });
+          const snapshot = yield* attempt(() => connection.readConversation(resumeRequestId));
+          if (recoveryScheduled) recoverySnapshot = { token: recoveryToken, snapshot };
+          binding = yield* attempt(() =>
+            connection.control<TerminalBinding>("register", {
+              cwd,
+              model: input.modelSelection.model,
+            }),
+          );
+          for (const item of projection.turnItems) {
+            nextOrdinal = Math.max(nextOrdinal, item.ordinal);
+            if (
+              item.type === "system_notice" &&
+              String(item.id).startsWith(`chatgpt:${input.threadId}:recovery:`)
+            )
+              recoveryNotices.set(item.id, item);
+            if (item.nativeItemRef && item.providerTurnId)
+              restoredItems.set(`${item.providerTurnId}:${item.nativeItemRef.nativeId}`, item);
+            const nativeItemId = item.nativeItemRef?.nativeId;
+            if (
+              nativeItemId &&
+              item.id ===
+                TurnItemId.make(`chatgpt:${input.threadId}:terminal-tool:${nativeItemId}`) &&
+              (item.type === "dynamic_tool" ||
+                item.type === "command_execution" ||
+                item.type === "file_change")
+            ) {
+              terminalToolItems.set(nativeItemId, item);
+              terminalToolInputs.set(
+                nativeItemId,
+                item.type === "dynamic_tool"
+                  ? item.input
+                  : item.type === "command_execution"
+                    ? { command: item.input }
+                    : { path: item.fileName },
+              );
+            }
           }
           if (!active && snapshot.latestRequestId) {
             const candidate = outputTurns.get(snapshot.latestRequestId);
@@ -1482,6 +1504,7 @@ export const makeChatGPTAdapter = (
             generation++;
             outputTurns.clear();
             retiredRequestIds.clear();
+            recoveryNotices.clear();
             messages.clear();
             finalFragments.clear();
             reasoningKeys.clear();
@@ -1651,7 +1674,9 @@ export const makeChatGPTAdapter = (
               error.cause instanceof ChatGPTTurnNotSubmittedError
                 ? Effect.gen(function* () {
                     yield* attempt(() =>
-                      connection.control("pause", { requestId: `failed-${request.message.messageId}` }),
+                      connection.control("pause", {
+                        requestId: `failed-${request.message.messageId}`,
+                      }),
                     ).pipe(Effect.ignore);
                     active = null;
                   })
