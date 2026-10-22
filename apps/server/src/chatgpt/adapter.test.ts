@@ -23,7 +23,9 @@ import type { ChatGPTUpdate, TerminalEvent } from "./connection.ts";
 const fakes = vi.hoisted(() => ({
   failNextSend: false,
   failNextStop: false,
+  nextConversationId: null as string | null,
   connections: [] as Array<{
+    conversationId: string | null;
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
     sent: string[];
@@ -41,7 +43,7 @@ const fakes = vi.hoisted(() => ({
 }));
 vi.mock("./connection.ts", () => ({
   ChatGPTConnection: class {
-    conversationId = null;
+    conversationId: string | null;
     messages = [];
     callback?: (update: ChatGPTUpdate) => void;
     sent: string[] = [];
@@ -57,16 +59,21 @@ vi.mock("./connection.ts", () => ({
     readonly options: { orchestrationCommand?: string | undefined };
     constructor(options: { orchestrationCommand?: string | undefined }) {
       this.options = options;
+      this.conversationId = fakes.nextConversationId;
+      fakes.nextConversationId = null;
       fakes.connections.push(this);
     }
     async load() {}
     close() {}
-    async adoptConversation() {}
+    async adoptConversation(conversationId: string) {
+      this.conversationId = conversationId;
+    }
     onUpdate(callback: (update: ChatGPTUpdate) => void) {
       this.callback = callback;
     }
-    async control(action: string) {
+    async control(action: string, payload?: { conversationId?: string }) {
       this.controls.push(action);
+      if (action === "bind") this.conversationId = payload?.conversationId ?? null;
       if (action === "activate") {
         this.epoch++;
         this.state = "working";
@@ -75,7 +82,7 @@ vi.mock("./connection.ts", () => ({
       return {
         thread_id: "test-thread",
         terminal_id: "test-thread",
-        conversation_id: null,
+        conversation_id: this.conversationId,
         epoch: this.epoch,
         state: this.state,
         paused: 0,
@@ -260,6 +267,7 @@ const fixture = Effect.gen(function* () {
   };
   yield* session.startTurn(turnInput);
   return {
+    adapter,
     attachMcp,
     refreshMcp,
     turnInput,
@@ -280,6 +288,42 @@ const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("recovers an existing thread's native identity from its registered conversation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { adapter, turnInput } = yield* fixture;
+        fakes.nextConversationId = "existing-chatgpt-conversation";
+        const session = yield* adapter.openSession({
+          threadId: turnInput.threadId,
+          providerSessionId: ProviderSessionId.make("restored-session"),
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        const restored = yield* session.ensureThread({
+          threadId: turnInput.threadId,
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+          existingProviderThread: { ...turnInput.providerThread, nativeThreadRef: null },
+        });
+        expect(restored.id).toBe(turnInput.providerThread.id);
+        expect(restored.nativeThreadRef?.nativeId).toBe("existing-chatgpt-conversation");
+      }),
+    ),
+  );
+
+  it.live("retains the connection's conversation when resuming a row with no native ID", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake, session, turnInput } = yield* fixture;
+        fake.conversationId = "cached-chatgpt-conversation";
+        const resumed = yield* session.resumeThread({
+          providerThread: { ...turnInput.providerThread, nativeThreadRef: null },
+        });
+        expect(resumed.nativeThreadRef?.nativeId).toBe("cached-chatgpt-conversation");
+      }),
+    ),
+  );
+
   it.live("attaches the orchestration command and refreshes credentials before a turn", () =>
     Effect.scoped(
       Effect.gen(function* () {

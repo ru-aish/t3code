@@ -424,13 +424,15 @@ export const makeChatGPTAdapter = (
               (update.recipient === "api_tool.call_tool" && update.text?.includes("fedora_t3code")))
           )
             usedTerminalTools = true;
-          if (update.conversationId && update.conversationId !== binding.conversation_id) {
-            binding = yield* attempt(() =>
-              connection.control<TerminalBinding>("bind", {
-                conversationId: update.conversationId,
-              }),
-            );
-            if (thread) {
+          if (update.conversationId) {
+            if (update.conversationId !== binding.conversation_id) {
+              binding = yield* attempt(() =>
+                connection.control<TerminalBinding>("bind", {
+                  conversationId: update.conversationId,
+                }),
+              );
+            }
+            if (thread && thread.nativeThreadRef?.nativeId !== update.conversationId) {
               thread = {
                 ...thread,
                 nativeThreadRef: ref(update.conversationId),
@@ -757,9 +759,13 @@ export const makeChatGPTAdapter = (
         ) {
           if (thread) return thread;
           const timestamp = yield* DateTime.now;
+          const conversationId = binding.conversation_id ?? connection.conversationId;
           thread = request.existingProviderThread
             ? {
                 ...request.existingProviderThread,
+                nativeThreadRef: conversationId
+                  ? ref(conversationId)
+                  : request.existingProviderThread.nativeThreadRef,
                 providerSessionId: input.providerSessionId,
                 updatedAt: timestamp,
               }
@@ -770,7 +776,7 @@ export const makeChatGPTAdapter = (
                 providerSessionId: input.providerSessionId,
                 appThreadId: input.threadId,
                 ownerNodeId: null,
-                nativeThreadRef: binding.conversation_id ? ref(binding.conversation_id) : null,
+                nativeThreadRef: conversationId ? ref(conversationId) : null,
                 nativeConversationHeadRef: null,
                 status: "idle",
                 firstRunOrdinal: null,
@@ -907,11 +913,18 @@ export const makeChatGPTAdapter = (
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromQueue(events),
+          contextHandoffDelivery: "reference",
           ensureThread,
           resumeThread: ({ providerThread }) =>
             Effect.sync(() => {
-              thread = providerThread;
-              return providerThread;
+              const conversationId = binding.conversation_id ?? connection.conversationId;
+              thread = {
+                ...providerThread,
+                nativeThreadRef: conversationId
+                  ? ref(conversationId)
+                  : providerThread.nativeThreadRef,
+              };
+              return thread;
             }),
           startTurn,
           steerTurn: () =>

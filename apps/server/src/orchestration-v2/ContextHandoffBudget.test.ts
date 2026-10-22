@@ -491,6 +491,83 @@ describe("handoff delivery", () => {
     }),
   );
 
+  it.effect("sends no local history or budget check for provider-managed continuations", () =>
+    Effect.gen(function* () {
+      for (const nativeThreadRef of [null, providerThread.nativeThreadRef]) {
+        const result = yield* deliverContextHandoffs({
+          handoffs: [
+            {
+              ...handoff,
+              fromProviderThreadIds: [providerThread.id],
+            },
+          ],
+          providerThread: { ...providerThread, nativeThreadRef },
+          referenceOnly: true,
+          budget: Effect.die("The provider manages its existing conversation budget"),
+          alreadyDeliveredItemIds: new Set<string>(),
+          persist: () => Effect.die("Existing conversation history must not be replayed"),
+        });
+        assert.equal(result.context, "");
+        yield* result.delivered;
+      }
+    }),
+  );
+
+  it.effect("preserves history budgeting for providers without the reference opt-in", () =>
+    Effect.gen(function* () {
+      const error = yield* deliverContextHandoffs({
+        handoffs: [{ ...handoff, fromProviderThreadIds: [providerThread.id] }],
+        providerThread,
+        budget: 0,
+        alreadyDeliveredItemIds: new Set<string>(),
+        persist: () => Effect.die("An over-budget handoff must not be delivered"),
+      }).pipe(Effect.flip);
+      assert.equal(error._tag, "ContextHandoffBudgetError");
+    }),
+  );
+
+  it.effect("references imported history without replaying outputs or reading native usage", () =>
+    Effect.gen(function* () {
+      const oversized = message("item:large-output", "assistant", "large output".repeat(20_000));
+      let durable = handoff;
+      const result = yield* deliverContextHandoffs({
+        handoffs: [
+          {
+            ...handoff,
+            history: { ...handoff.history!, messages: [...messages, oversized] },
+          },
+          {
+            ...handoff,
+            id: ContextHandoffId.make("handoff:legacy"),
+            history: undefined,
+            summaryText: "legacy output".repeat(20_000),
+          },
+        ],
+        providerThread,
+        referenceOnly: true,
+        budget: Effect.die("Reference delivery does not estimate the native conversation"),
+        alreadyDeliveredItemIds: new Set<string>(),
+        persist: (value) =>
+          Effect.sync(() => {
+            if (value.id === handoff.id) durable = value;
+          }),
+      });
+      assert.include(result.context, "t3_thread_read");
+      assert.include(result.context, threadId);
+      assert.notInclude(result.context, "large output");
+      assert.notInclude(result.context, "legacy output");
+      assert.notInclude(result.context, messages[0]!.text);
+      assert.isBelow(result.context.length, 1_200);
+      yield* result.delivered;
+      assert.equal(durable.delivery?.status, "inline");
+      assert.deepEqual(durable.delivery?.itemIds, []);
+      assert.deepEqual(
+        durable.delivery?.omittedItemIds,
+        [...messages, oversized].map((item) => item.itemId),
+      );
+    }),
+  );
+
   it.effect("persists successful injection before turn start and skips it on retry", () =>
     Effect.gen(function* () {
       let durable = handoff;

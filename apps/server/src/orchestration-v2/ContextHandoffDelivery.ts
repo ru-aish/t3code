@@ -22,6 +22,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     readonly handoffs: ReadonlyArray<OrchestrationV2ContextHandoff>;
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly budget: number | Effect.Effect<number, BudgetError>;
+    readonly referenceOnly?: boolean;
     readonly deferInline?: boolean;
     readonly alreadyDeliveredItemIds: ReadonlySet<string>;
     readonly inject?: (
@@ -30,15 +31,31 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     readonly persist: (handoff: OrchestrationV2ContextHandoff) => Effect.Effect<void, PersistError>;
   }) {
     const nativeThreadId = input.providerThread.nativeThreadRef?.nativeId ?? undefined;
-    const pending = input.handoffs.filter(
-      (handoff) =>
+    const pending = input.handoffs.filter((handoff) => {
+      // Provider-managed conversations already own their local history, even
+      // when the app has not recovered their native conversation ID yet.
+      if (
+        input.referenceOnly &&
+        (handoff.strategy === "full_thread_summary" ||
+          handoff.strategy === "delta_since_target_last_seen") &&
+        handoff.threadId === input.providerThread.appThreadId &&
+        handoff.fromProviderThreadIds.length === 1 &&
+        handoff.fromProviderThreadIds[0] === input.providerThread.id
+      )
+        return false;
+      return (
         nativeThreadId === undefined ||
         handoff.delivery?.nativeThreadId !== nativeThreadId ||
-        handoff.delivery.status === "pending",
-    );
+        handoff.delivery.status === "pending"
+      );
+    });
     if (pending.length === 0 || (input.deferInline && input.inject === undefined))
       return { context: "", delivered: Effect.void, unsent: Effect.void };
-    const budget = typeof input.budget === "number" ? input.budget : yield* input.budget;
+    const budget = input.referenceOnly
+      ? 0
+      : typeof input.budget === "number"
+        ? input.budget
+        : yield* input.budget;
     let coverage = pending
       .map(
         (handoff) =>
@@ -48,7 +65,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
           }`,
       )
       .join("\n");
-    if (historyCost([], coverage) > Math.min(4_000, budget / 2)) {
+    if (input.referenceOnly || historyCost([], coverage) > Math.min(4_000, budget / 2)) {
       const strategies = Array.from(new Set(pending.map((handoff) => handoff.strategy)));
       coverage = `Context handoff (${strategies.join(", ")}). ${pending.length} handoff records; detailed coverage references omitted. Recover history with t3_thread_read({threadId:"${input.providerThread.appThreadId ?? pending[0]!.threadId}",view:"activity",limit:20,maxCharsPerItem:4000}); paginate with afterPosition=nextPosition. Follow fork/handoff source references in activity. For long items use itemId and textOffset=nextTextOffset until null.`;
     }
@@ -60,21 +77,34 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
         seen.add(message.itemId);
         return true;
       });
-    const oldContext = pending
-      .filter((handoff) => handoff.history === undefined)
-      .map((handoff) => handoff.summaryText)
-      .join("\n\n");
+    const oldContext = input.referenceOnly
+      ? ""
+      : pending
+          .filter((handoff) => handoff.history === undefined)
+          .map((handoff) => handoff.summaryText)
+          .join("\n\n");
     const fullCoverage =
-      oldContext && historyCost([], `${coverage}\n${oldContext}`) + 512 <= budget
+      !input.referenceOnly &&
+      oldContext &&
+      historyCost([], `${coverage}\n${oldContext}`) + 512 <= budget
         ? `${coverage}\n${oldContext}`
         : coverage;
-    const selected = selectHistory({
-      messages,
-      coverage: fullCoverage,
-      omittedItems: pending.reduce((sum, handoff) => sum + (handoff.history?.omittedItems ?? 0), 0),
-      budget,
-    });
-    if (historyCost(selected.messages, selected.context) > budget) {
+    const selected = input.referenceOnly
+      ? {
+          messages: [],
+          context: coverage,
+          omittedItemIds: messages.map((message) => message.itemId),
+        }
+      : selectHistory({
+          messages,
+          coverage: fullCoverage,
+          omittedItems: pending.reduce(
+            (sum, handoff) => sum + (handoff.history?.omittedItems ?? 0),
+            0,
+          ),
+          budget,
+        });
+    if (!input.referenceOnly && historyCost(selected.messages, selected.context) > budget) {
       if (input.deferInline) return { context: "", delivered: Effect.void, unsent: Effect.void };
       return yield* new ContextHandoffBudgetError();
     }

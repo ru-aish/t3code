@@ -1091,6 +1091,7 @@ export const layer: Layer.Layer<
                 ];
           const delivery = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
+            referenceOnly: session.contextHandoffDelivery === "reference",
             deferInline: compact,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {
