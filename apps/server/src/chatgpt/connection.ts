@@ -2,7 +2,12 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import { imageUploadDestination, normalizeProjects, normalizeStreamMessage } from "./protocol.ts";
+import {
+  imageUploadDestination,
+  isTerminalToolCall,
+  normalizeProjects,
+  normalizeStreamMessage,
+} from "./protocol.ts";
 import { orchestrationPrompt } from "./mcpBridge.ts";
 import { rendererDiscovery } from "./rendererDiscovery.ts";
 
@@ -615,7 +620,7 @@ export class ChatGPTConnection {
       for(const raw of nodes.reverse()){
         const message=normalize(raw);
         if(message.role==='user'){requestId=requests[message.messageId];usesTerminalTools=false;continue;}
-        if(requestId&&message.role==='assistant'&&(message.recipient?.includes('fedora_t3code')||(message.recipient==='api_tool.call_tool'&&message.text?.includes('fedora_t3code'))))usesTerminalTools=true;
+        if(requestId&&(${isTerminalToolCall.toString()})(message,${JSON.stringify(this.options.threadId)}))usesTerminalTools=true;
         if(requestId&&message.role==='assistant'&&!message.hidden&&(!message.recipient||message.recipient==='all'))updates.push({...message,kind:'update',requestId,conversationId:${JSON.stringify(conversationId)},createdAt:raw.create_time});
       }
       const visibleFinal=updates.findLast(message=>message.requestId===requestId&&(!message.channel||message.channel==='final'));

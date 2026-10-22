@@ -1128,6 +1128,101 @@ describe("ChatGPT task authority", () => {
       ),
   );
 
+  it.live("reports an empty aliased tool ending as a retryable failure", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId, turnInput } = yield* fixture;
+        yield* Queue.take(events);
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          recipient: "api_tool.call_tool",
+          text: JSON.stringify({
+            path: "/asdk_app_test/link_test/bootstrap_thread",
+            args: { thread_id: turnInput.threadId },
+          }),
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "tool",
+          recipient: "assistant",
+          text: "",
+          endTurn: true,
+          status: "finished_successfully",
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)).toMatchObject({
+          type: "turn.terminal",
+          status: "failed",
+          failure: { code: "chatgpt_empty_tool_completion", retryable: true },
+        });
+        expect(fake.controls).not.toContain("pause");
+      }),
+    ),
+  );
+
+  it.live("keeps aliased tool turns active until Terminal MCP confirms completion", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId, turnInput } = yield* fixture;
+        yield* Queue.take(events);
+        const updatesHandled = Promise.withResolvers<void>();
+        fake.onControl = (action) => {
+          if (action === "bind") updatesHandled.resolve();
+        };
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          recipient: "api_tool.call_tool",
+          text: JSON.stringify({
+            path: "/asdk_app_test/link_test/run_command",
+            args: { session_id: turnInput.threadId, command: "pwd" },
+          }),
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "tool",
+          text: "",
+          endTurn: true,
+        });
+        fake.callback?.({
+          kind: "update",
+          requestId,
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "answer",
+          text: "Work complete.",
+        });
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        // Binding this later update is a barrier after the completion callback.
+        fake.callback?.({ kind: "update", requestId, conversationId: "native-conversation" });
+        yield* Effect.promise(() => updatesHandled.promise);
+        const beforeDone = yield* Queue.takeAll(events);
+        expect(beforeDone.some((event) => event.type === "turn.terminal")).toBe(false);
+        expect(fake.controls).not.toContain("pause");
+        fake.publish(terminal("state", "done"));
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+      }),
+    ),
+  );
+
   it.live("finishes a reply-only stream with no Terminal MCP done event", () =>
     Effect.scoped(
       Effect.gen(function* () {

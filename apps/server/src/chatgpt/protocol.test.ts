@@ -1,12 +1,43 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   imageUploadDestination,
+  isTerminalToolCall,
   mergeFinalAnswer,
   normalizeProjects,
   normalizeStreamMessage,
 } from "./protocol.ts";
 
 describe("ChatGPT protocol", () => {
+  it("recognizes scoped opaque connector aliases in live and serialized history parsing", () => {
+    const serialized = new Function(
+      `return (${isTerminalToolCall.toString()})`,
+    )() as typeof isTerminalToolCall;
+    for (const recognize of [isTerminalToolCall, serialized]) {
+      const message = {
+        role: "assistant",
+        recipient: "api_tool.call_tool",
+        text: JSON.stringify({
+          path: "/asdk_app_opaque/link_opaque/bootstrap_thread",
+          args: { thread_id: "thread-one" },
+        }),
+      };
+      expect(recognize(message, "thread-one")).toBe(true);
+      expect(recognize(message, "other-thread")).toBe(false);
+      expect(recognize({ ...message, role: "tool" }, "thread-one")).toBe(false);
+      expect(recognize({ ...message, text: "invalid JSON" }, "thread-one")).toBe(false);
+      expect(
+        recognize(
+          {
+            ...message,
+            text: JSON.stringify({ path: "/other_app/search", args: { thread_id: "thread-one" } }),
+          },
+          "thread-one",
+        ),
+      ).toBe(false);
+      expect(recognize({ ...message, text: "fedora_t3code.thread_task" }, "thread-one")).toBe(true);
+    }
+  });
+
   it("keeps the complete final answer when hidden stream copies overlap", () => {
     const draft = "Introduction\n\n## Findings\nPart one.";
     const expanded = draft + "\n\n## Root cause\nFixed.";

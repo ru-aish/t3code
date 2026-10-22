@@ -13,6 +13,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2ProviderFailure,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
@@ -25,7 +26,8 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/server/adapterDriver";
 import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
-import { mergeFinalAnswer } from "./protocol.ts";
+import { isTerminalToolCall, mergeFinalAnswer } from "./protocol.ts";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   ChatGPTConnection,
   ChatGPTSubmissionNotStartedError,
@@ -392,6 +394,7 @@ export const makeChatGPTAdapter = (
         });
         const retiredRequestIds = new Set<string>();
         let usedTerminalTools = false;
+        let emptyToolEnding = false;
         let generation = 0;
         let interrupting = false;
         let nextOrdinal = 0;
@@ -622,8 +625,11 @@ export const makeChatGPTAdapter = (
           if (control.kind === "tool_completed") yield* completeWithToolRecovery();
         });
         const finish = Effect.fnUntraced(function* (
-          status: "completed" | "interrupted" | "cancelled" | "forced",
+          ...outcome:
+            | [status: "completed" | "interrupted" | "cancelled" | "forced"]
+            | [status: "failed", failure: OrchestrationV2ProviderFailure]
         ) {
+          const [status, failure] = outcome;
           if (!active || !thread) return;
           const completed = active;
           cancelRecovery();
@@ -640,7 +646,7 @@ export const makeChatGPTAdapter = (
             if (item.providerTurnId !== completed.turn.id || item.status !== "running") continue;
             const settled: TerminalToolItem = {
               ...item,
-              status: status === "completed" ? "failed" : "cancelled",
+              status: status === "completed" || status === "failed" ? "failed" : "cancelled",
               completedAt: timestamp,
               updatedAt: timestamp,
             };
@@ -690,8 +696,9 @@ export const makeChatGPTAdapter = (
             providerThreadId: thread.id,
             providerTurnId: completed.turn.id,
             runOrdinal: completed.input.runOrdinal,
-            status,
-            failure: null,
+            ...(status === "failed"
+              ? { status, failure, failureItemOrdinal: ++nextOrdinal }
+              : { status, failure: null }),
             threadDisposition: "reusable",
           });
         });
@@ -875,12 +882,14 @@ export const makeChatGPTAdapter = (
         });
         const acceptUpdate = Effect.fnUntraced(function* (update: ChatGPTUpdate) {
           if (update.requestId && retiredRequestIds.has(update.requestId)) return;
+          if (isTerminalToolCall(update, input.threadId)) usedTerminalTools = true;
           if (
-            update.role === "assistant" &&
-            (update.recipient?.includes("fedora_t3code") ||
-              (update.recipient === "api_tool.call_tool" && update.text?.includes("fedora_t3code")))
+            active?.requestId === update.requestId &&
+            update.role === "tool" &&
+            update.endTurn === true &&
+            !update.text?.trim()
           )
-            usedTerminalTools = true;
+            emptyToolEnding = true;
           if (update.conversationId) {
             if (update.conversationId !== binding.conversation_id) {
               binding = yield* attempt(() =>
@@ -906,6 +915,20 @@ export const makeChatGPTAdapter = (
             if (active && update.requestId === active.requestId) {
               yield* settleReasoning(active);
               streamComplete = true;
+              const finalKey = `${active.turn.id}:${active.requestId}:final`;
+              if (emptyToolEnding && !messages.get(finalKey)?.text.trim()) {
+                yield* finish(
+                  "failed",
+                  makeProviderFailure({
+                    class: "provider_error",
+                    code: "chatgpt_empty_tool_completion",
+                    message:
+                      "ChatGPT ended after an empty tool response without a final answer. Retry the turn; if it repeats, check the Terminal MCP connector.",
+                    retryable: true,
+                  }),
+                );
+                return;
+              }
               if (!usedTerminalTools && binding.state !== "done") {
                 // Stop Terminal MCP inactivity recovery for reply-only runs.
                 // The next turn reactivates the binding; no completion tool is needed.
@@ -1204,6 +1227,7 @@ export const makeChatGPTAdapter = (
             ) {
               active = candidate;
               streamComplete = false;
+              emptyToolEnding = false;
               usedTerminalTools = true;
             }
           }
@@ -1317,6 +1341,7 @@ export const makeChatGPTAdapter = (
                     active = { ...active, generation, requestId: control.event_id };
                     outputTurns.set(control.event_id, active);
                     streamComplete = false;
+                    emptyToolEnding = false;
                     yield* attempt(() =>
                       connection.send(
                         control.event_id,
@@ -1390,6 +1415,7 @@ export const makeChatGPTAdapter = (
             restoredItems.clear();
             nativeMessageIds.clear();
             streamComplete = false;
+            emptyToolEnding = false;
             thread = null;
           }
           const timestamp = yield* DateTime.now;
@@ -1503,6 +1529,7 @@ export const makeChatGPTAdapter = (
           transportInterrupted = false;
           outputTurns.set(active.requestId, active);
           streamComplete = false;
+          emptyToolEnding = false;
           usedTerminalTools = false;
           yield* emit({
             type: "provider_turn.updated",

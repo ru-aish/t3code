@@ -1,5 +1,31 @@
 import type { ChatGPTUpdate } from "./connection.ts";
 
+// This also runs in the authenticated renderer during transcript recovery.
+export function isTerminalToolCall(
+  message: Pick<ChatGPTUpdate, "role" | "recipient" | "text">,
+  terminalId: string,
+): boolean {
+  if (message.role !== "assistant") return false;
+  if (message.recipient?.includes("fedora_t3code")) return true;
+  if (message.recipient !== "api_tool.call_tool" || !message.text) return false;
+  if (message.text.includes("fedora_t3code")) return true;
+  try {
+    const call = JSON.parse(message.text) as {
+      path?: unknown;
+      args?: { thread_id?: unknown; session_id?: unknown };
+    };
+    // ChatGPT can replace the connector's friendly name with an opaque app ID.
+    // Match the scoped Terminal invocation rather than hard-coding that alias.
+    return (
+      typeof call.path === "string" &&
+      call.path.startsWith("/asdk_app_") &&
+      (call.args?.thread_id === terminalId || call.args?.session_id === terminalId)
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Runs inside the authenticated renderer as well as in focused protocol tests.
 // Keep self-contained so its serialized function needs no module globals.
 export function normalizeStreamMessage(
