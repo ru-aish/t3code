@@ -97,6 +97,10 @@ describe("static ChatGPT cards in native Markdown", () => {
     const value = "R&amp;D &copy; &lt;tag&gt; &#124; &#xA9; A & B &amp;copy;";
     const source = "```t3-card\n" + JSON.stringify({ items: [{ kind: "text", value }] }) + "\n```";
     const result = markdownWithStaticCards(source);
+    expect(result).toContain("R\\&D ©");
+    expect(result).toContain("\\&copy;");
+    expect(result).not.toContain("&amp;");
+    expect(result).not.toContain("&#124;");
     const paragraph = parseMarkdownDocument(result).children.find(
       (node) => node.type === "paragraph",
     );
@@ -105,6 +109,22 @@ describe("static ChatGPT cards in native Markdown", () => {
       expect(paragraph.children.map((node) => ("value" in node ? node.value : "")).join("")).toBe(
         "R&D © <tag> | © A & B &copy;",
       );
+  });
+
+  it("decodes entities in inert code spans without enabling links or images", () => {
+    const value = "https://example.org?q=R&amp;D &copy; ![img](bad.png)";
+    const source = "```t3-card\n" + JSON.stringify({ items: [{ kind: "text", value }] }) + "\n```";
+    const result = markdownWithStaticCards(source);
+    const paragraph = parseMarkdownDocument(result).children.find(
+      (node) => node.type === "paragraph",
+    );
+    expect(paragraph?.type).toBe("paragraph");
+    if (paragraph?.type === "paragraph") {
+      expect(paragraph.children.map((node) => node.type)).toEqual(["inlineCode"]);
+      expect(paragraph.children[0]).toMatchObject({
+        value: "https://example.org?q=R&D © ![img](bad.png)",
+      });
+    }
   });
 
   it("skips a full parse for incidental t3-card mentions without a root fence", () => {

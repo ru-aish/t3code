@@ -812,7 +812,9 @@ export function normalizeStreamMessage(
             if (opener.beforeCard) closedEarlierOpener = true;
             opener.count -= used;
             remaining -= used;
-            if (opener.count === 0) emphasis.splice(index, 1);
+            // Delimiters nested inside a completed emphasis span become literal;
+            // they must not match a later closer across an independent card.
+            emphasis.splice(index + (opener.count > 0 ? 1 : 0));
           }
         }
         if (canOpen && remaining >= (char === "~" ? 2 : 1))

@@ -1136,6 +1136,12 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     expect(normalize("x*a*\n\n" + card)).toContain("t3-card");
   });
 
+  it("does not match orphaned inner emphasis delimiters across a separate card", () => {
+    // The outer *...* closes before the card; the inner ** is literal text.
+    const content = "*a**a*\n" + card + "\nb**";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
   it("does not read Markdown delimiters from quoted DIL attributes", () => {
     const content = '<box label="[not Markdown" />\n' + card + "\n[Other](https://e.org)";
     expect(normalize(content)).toContain("t3-card");

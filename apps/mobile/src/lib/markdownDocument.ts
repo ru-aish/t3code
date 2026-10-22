@@ -2,6 +2,7 @@ import type { Root, RootContent } from "mdast";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
+import { decodeNamedCharacterReference } from "decode-named-character-reference";
 
 const parser = unified().use(remarkParse).use(remarkGfm);
 export type MarkdownNode = Root | RootContent;
@@ -15,30 +16,15 @@ function decodeCodePoint(codePoint: number, entity: string): string {
 
 function decodeHtmlEntities(value: string): string {
   return value.replace(
-    /&(?:#(\d+)|#x([0-9a-f]+)|amp|apos|gt|lt|nbsp|quot);/gi,
-    (entity, decimal: string | undefined, hexadecimal: string | undefined) => {
+    /&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]+));/gi,
+    (entity, decimal: string | undefined, hexadecimal: string | undefined, named: string) => {
       if (decimal) {
         return decodeCodePoint(Number.parseInt(decimal, 10), entity);
       }
       if (hexadecimal) {
         return decodeCodePoint(Number.parseInt(hexadecimal, 16), entity);
       }
-      switch (entity.toLowerCase()) {
-        case "&amp;":
-          return "&";
-        case "&apos;":
-          return "'";
-        case "&gt;":
-          return ">";
-        case "&lt;":
-          return "<";
-        case "&nbsp;":
-          return "\u00a0";
-        case "&quot;":
-          return '"';
-        default:
-          return entity;
-      }
+      return decodeNamedCharacterReference(named) || entity;
     },
   );
 }
@@ -141,7 +127,7 @@ export function markdownWithHtml(markdown: string): string {
 }
 
 function escapeCardText(value: string): string {
-  const text = value.replace(/\s*[\r\n]+\s*/g, " ");
+  const text = decodeHtmlEntities(value.replace(/\s*[\r\n]+\s*/g, " "));
   // GFM auto-links plain URLs even when link punctuation is escaped. Code spans
   // retain their visible text without creating interactive destinations.
   if (/https?:\/\/|www\.|@/i.test(text)) {
@@ -151,22 +137,9 @@ function escapeCardText(value: string): string {
     // Padding keeps edge backticks from merging with the generated delimiter.
     return fence + " " + text + " " + fence;
   }
-  const escapePlain = (part: string) =>
-    part
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/([\\\x60*_{}[\]()#+\-.!|~])/g, "\\$1");
-  // Preserve entity syntax through Markdown. In particular, escaping the # in
-  // &#124; prevents its single intended decode, while escaping &amp; twice
-  // displays the entity rather than its character.
-  let escaped = "";
-  let from = 0;
-  for (const entity of text.matchAll(/&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);/gi)) {
-    escaped += escapePlain(text.slice(from, entity.index)) + entity[0];
-    from = entity.index + entity[0].length;
-  }
-  return escaped + escapePlain(text.slice(from));
+  // Native md4c discards entity tokens; backslash-escape their decoded
+  // characters to keep card text visible without creating HTML or links.
+  return text.replace(/([\\\x60*_{}[\]()#+\-.!|~&<>])/g, "\\$1");
 }
 
 /** Mobile has no t3-card renderer; preserve its short, inert content as readable Markdown. */
