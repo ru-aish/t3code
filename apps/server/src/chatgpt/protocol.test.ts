@@ -1150,6 +1150,18 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     expect(normalize(content)).toContain("t3-card");
   });
 
+  it("keeps cards inside partially consumed and long emphasis openers", () => {
+    for (const content of [
+      "***bold**\n" + card + "\ntail*",
+      "****bold\n" + card + "\ntail****",
+      "****bold***\n" + card + "\ntail*",
+      "**bold*\n" + card + "\ntail*",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+    expect(normalize("****Done****\n" + card)).toContain("t3-card");
+  });
+
   it("still extracts a separate card after completed inline formatting", () => {
     for (const content of [
       "**Completed**\n" + card,

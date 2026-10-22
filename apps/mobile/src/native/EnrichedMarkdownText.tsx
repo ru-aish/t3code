@@ -4,7 +4,11 @@ import {
   formatComposerContextHref,
   formatComposerContextReference,
 } from "@t3tools/shared/composerContextReferences";
-import { markdownWithHtml, markdownWithTableBreaks } from "../lib/markdownDocument";
+import {
+  markdownWithHtml,
+  markdownWithStaticCards,
+  markdownWithTableBreaks,
+} from "../lib/markdownDocument";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Platform, Share, StyleSheet, View } from "react-native";
 import {
@@ -141,7 +145,7 @@ function enrichedStyle(
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource } = props;
   const markdown = useMemo(
-    () => markdownWithTableBreaks(markdownWithHtml(props.markdown)),
+    () => markdownWithTableBreaks(markdownWithHtml(markdownWithStaticCards(props.markdown))),
     [props.markdown],
   );
   const { themeAppearance } = useAppearancePreferences();

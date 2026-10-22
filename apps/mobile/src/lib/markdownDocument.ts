@@ -140,6 +140,65 @@ export function markdownWithHtml(markdown: string): string {
   return markdown;
 }
 
+function escapeCardText(value: string): string {
+  const text = value.replace(/\s*[\r\n]+\s*/g, " ");
+  // GFM auto-links plain URLs even when link punctuation is escaped. Code spans
+  // retain their visible text without creating interactive destinations.
+  if (/https?:\/\/|www\.|@/i.test(text)) {
+    let length = 1;
+    for (const run of text.matchAll(/\x60+/g)) length = Math.max(length, run[0].length + 1);
+    const fence = "\x60".repeat(length);
+    return fence + text + fence;
+  }
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/([\\\x60*_{}[\]()#+\-.!|~])/g, "\\$1");
+}
+
+/** Mobile has no t3-card renderer; preserve its short, inert content as readable Markdown. */
+export function markdownWithStaticCards(markdown: string): string {
+  if (!markdown.includes("t3-card") || markdown.length > 500_000) return markdown;
+  const edits: Array<{ start: number; end: number; content: string }> = [];
+  for (const node of parser.parse(markdown).children) {
+    if (node.type !== "code" || node.lang !== "t3-card" || node.value.length > 4_000) continue;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start === undefined || end === undefined) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(node.value);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const items = (parsed as Record<string, unknown>).items;
+    if (!Array.isArray(items) || items.length === 0 || items.length > 12) continue;
+    const lines: string[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) break;
+      const { kind, value } = item as Record<string, unknown>;
+      if (
+        (kind !== "title" && kind !== "text" && kind !== "caption" && kind !== "badge") ||
+        typeof value !== "string" ||
+        !value.trim() ||
+        value.length > 600
+      )
+        break;
+      const safe = escapeCardText(value.trim());
+      lines.push(kind === "title" ? "### " + safe : kind === "badge" ? "**" + safe + "**" : safe);
+    }
+    if (lines.length !== items.length) continue;
+    edits.push({ start, end, content: "\n\n" + lines.join("\n\n") + "\n\n" });
+  }
+  for (let index = edits.length - 1; index >= 0; index--) {
+    const edit = edits[index]!;
+    markdown = markdown.slice(0, edit.start) + edit.content + markdown.slice(edit.end);
+  }
+  return markdown;
+}
+
 // A delimiter row such as `|---|:--:|`, possibly inside a blockquote or list item.
 function isTableDelimiterRow(line: string): boolean {
   if (!line.includes("-")) return false;

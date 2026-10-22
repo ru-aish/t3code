@@ -757,7 +757,7 @@ export function normalizeStreamMessage(
         return true;
       }
       let bracketDepth = 0;
-      const emphasis = new Map<string, boolean>();
+      const emphasis = new Map<string, number>();
       const isPunctuation = (char: string): boolean => /[\p{P}\p{S}]/u.test(char);
       const flanking = (at: number, end: number, char: string) => {
         const before = source[at - 1] ?? " ";
@@ -786,13 +786,16 @@ export function normalizeStreamMessage(
         let end = i + 1;
         while (end < start && source[end] === char) end++;
         const run = source.slice(i, end);
-        if (run.length > 3 || (char === "~" && run !== "~~")) {
+        if (char === "~" && run.length !== 2) {
           i = end - 1;
           continue;
         }
         const { canOpen, canClose } = flanking(i, end, char);
-        if (emphasis.get(run) && canClose) emphasis.delete(run);
-        else if (canOpen) emphasis.set(run, true);
+        const pending = emphasis.get(char) ?? 0;
+        const consumed = canClose ? Math.min(pending, run.length) : 0;
+        const remaining = pending - consumed + (canOpen ? run.length - consumed : 0);
+        if (remaining > 0) emphasis.set(char, remaining);
+        else emphasis.delete(char);
         i = end - 1;
       }
       // Only a delimiter with a closing continuation after the candidate
@@ -824,11 +827,12 @@ export function normalizeStreamMessage(
         if (char === "*" || char === "_" || char === "~") {
           let end = i + 1;
           while (end < tailEnd && source[end] === char) end++;
-          if (flanking(i, end, char).canClose) {
-            for (const marker of emphasis.keys()) {
-              if (marker[0] === char && marker.length <= end - i) return true;
-            }
-          }
+          if (
+            (char !== "~" || end - i === 2) &&
+            emphasis.has(char) &&
+            flanking(i, end, char).canClose
+          )
+            return true;
           i = end - 1;
         }
       }

@@ -1,6 +1,89 @@
 import { describe, expect, it } from "vite-plus/test";
-import { markdownHtmlContent, markdownWithHtml, parseMarkdownDocument } from "./markdownDocument";
+import {
+  markdownHtmlContent,
+  markdownWithHtml,
+  markdownWithStaticCards,
+  parseMarkdownDocument,
+} from "./markdownDocument";
 import { markdownImageSources } from "./markdownImageSources";
+
+describe("static ChatGPT cards in native Markdown", () => {
+  const items = [
+    { kind: "title", value: "Build status" },
+    { kind: "badge", value: "Passed" },
+    { kind: "text", value: "All checks passed" },
+    { kind: "caption", value: "Verified today" },
+  ];
+
+  it("renders a server card fence as readable content in prose order", () => {
+    const source = "Before\n\n```t3-card\n" + JSON.stringify({ items }) + "\n```\n\nAfter";
+    const result = markdownWithStaticCards(source);
+    expect(result).toContain("### Build status");
+    expect(result).toContain("**Passed**");
+    expect(result).toContain("All checks passed");
+    expect(result).toContain("Verified today");
+    expect(result).not.toContain("t3-card");
+    expect(result.indexOf("Before")).toBeLessThan(result.indexOf("Build status"));
+    expect(result.indexOf("After")).toBeGreaterThan(result.indexOf("Verified today"));
+    expect(parseMarkdownDocument(result).children.some((node) => node.type === "heading")).toBe(
+      true,
+    );
+  });
+
+  it("keeps card text inert instead of enabling images, links or raw HTML", () => {
+    const source =
+      "````t3-card\n" +
+      JSON.stringify({
+        items: [
+          {
+            kind: "text",
+            value: "See [link](https://example.org) ![image](bad.png) <img> **bold**",
+          },
+        ],
+      }) +
+      "\n````";
+    const result = markdownWithStaticCards(source);
+    expect(result).toContain("[link](https://example.org)");
+    expect(result).toContain("![image](bad.png)");
+    expect(result).toContain("<img>");
+    const paragraph = parseMarkdownDocument(result).children.find(
+      (node) => node.type === "paragraph",
+    );
+    expect(paragraph?.type).toBe("paragraph");
+    if (paragraph?.type === "paragraph")
+      expect(paragraph.children.map((node) => node.type)).toEqual(["inlineCode"]);
+  });
+
+  it("does not create GFM auto-links from card text", () => {
+    const value = "Visit https://example.org, www.example.org or team@example.org";
+    const source = "```t3-card\n" + JSON.stringify({ items: [{ kind: "text", value }] }) + "\n```";
+    const result = markdownWithStaticCards(source);
+    const paragraph = parseMarkdownDocument(result).children.find(
+      (node) => node.type === "paragraph",
+    );
+    expect(paragraph?.type).toBe("paragraph");
+    if (paragraph?.type === "paragraph") {
+      expect(paragraph.children.some((node) => node.type === "link")).toBe(false);
+      expect(paragraph.children.map((node) => ("value" in node ? node.value : "")).join("")).toBe(
+        value,
+      );
+    }
+  });
+
+  it("leaves unsupported, malformed and non-root card fences as source", () => {
+    for (const source of [
+      "```t3-card\nnot-json\n```",
+      "```t3-card\n" + JSON.stringify({ items: [{ kind: "button", value: "Run" }] }) + "\n```",
+      "```t3-card\n" +
+        JSON.stringify({ items: [{ kind: "text", value: "x".repeat(601) }] }) +
+        "\n```",
+      "> ```t3-card\n> " + JSON.stringify({ items }) + "\n> ```",
+      "Regular `t3-card` text",
+    ]) {
+      expect(markdownWithStaticCards(source)).toBe(source);
+    }
+  });
+});
 
 describe("HTML in native Markdown", () => {
   it("leaves code inside an HTML details block literal", () => {
