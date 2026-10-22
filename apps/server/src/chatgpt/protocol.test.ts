@@ -87,6 +87,44 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(full);
   });
+  it("recognizes only pending Always allow prompts for the Fedora connector", () => {
+    const approval = (
+      connectorName: string,
+      targetMessageId = "approval-message",
+      connectorId = "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+    ) =>
+      normalizeStreamMessage({
+        message: {
+          id: "approval-message",
+          author: { role: "tool" },
+          content: { parts: [""] },
+          metadata: {
+            jit_plugin_data: {
+              from_server: {
+                type: "confirm_action",
+                body: {
+                  codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                  connector_id: connectorId,
+                  link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+                  connector_name: connectorName,
+                  actions: [{ always_allow: { target_message_id: targetMessageId } }],
+                },
+              },
+            },
+          },
+        },
+      }).fedoraApproval;
+
+    expect(approval("fedora_t3code")).toEqual({
+      messageId: "approval-message",
+      connectorId: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+      linkId: "link_6ad23eb0b6cc819189b71f055d70599c",
+    });
+    expect(approval("another_connector", "approval-message", "another_app")).toBeUndefined();
+    expect(approval("fedora_t3code", "approval-message", "another_app")).toBeUndefined();
+    expect(approval("fedora_t3code", "different-message")).toBeUndefined();
+  });
+
   it("uses a Markdown fallback instead of raw ChatGPT DIL when available", () => {
     const raw = `<box gap={2}><button onClick={()=>GenUI.openUrl("https://example.com/app")}>Download</button></box>`;
     expect(

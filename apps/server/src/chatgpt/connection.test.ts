@@ -494,7 +494,13 @@ describe("ChatGPT streamed update delivery", () => {
 describe("ChatGPT interruption", () => {
   type InterruptHarnessOptions = {
     get?: (...args: unknown[]) => Promise<unknown>;
-    startCompletionStream?: (input: { startupSignal?: AbortSignal }) => unknown;
+    startCompletionStream?: (input: {
+      startupSignal?: AbortSignal;
+      request?: unknown;
+      onUpdate?: (value: unknown) => void;
+      onComplete?: (value: unknown) => void;
+      onError?: (value: unknown) => void;
+    }) => unknown;
     stopCompletion?: (...args: unknown[]) => Promise<void>;
     cancelStream?: (streamRequestId: string) => void;
     streams?: Map<string, unknown>;
@@ -896,6 +902,263 @@ describe("ChatGPT interruption", () => {
       expect(cancelStream).not.toHaveBeenCalled();
       const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
       expect(cancelled.has("request-a")).toBe(false);
+    });
+  });
+
+  it("auto-approves three successive Fedora prompts without premature completion or polling", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const completed = Promise.withResolvers<void>();
+    let latestHead: Record<string, unknown> | null = null;
+    const get = vi.fn(async () => {
+      if (!latestHead) throw new Error("Missing approval head");
+      return {
+        conversation_id: "new-conversation",
+        default_model_slug: "gpt-6-thinking",
+        current_node: latestHead.id,
+        mapping: { [latestHead.id as string]: { message: latestHead } },
+      };
+    });
+    const startCompletionStream = vi.fn(
+      (input: {
+        request?: unknown;
+        onUpdate?: (value: unknown) => void;
+        onComplete?: (value: unknown) => void;
+      }) => {
+        requests.push(input.request as Record<string, unknown>);
+        const index = requests.length;
+        queueMicrotask(() => {
+          if (index <= 3) {
+            const messageId = `approval-${index}`;
+            const message = {
+              id: messageId,
+              author: { role: "tool" },
+              content: { parts: [""] },
+              metadata: {
+                jit_plugin_data: {
+                  from_server: {
+                    type: "confirm_action",
+                    body: {
+                      codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                      connector_id: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+                      link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+                      connector_name: "fedora_t3code",
+                      actions: [{ always_allow: { target_message_id: messageId } }],
+                    },
+                  },
+                },
+              },
+            };
+            latestHead = message;
+            const event = { conversation_id: "new-conversation", message };
+            input.onUpdate?.(event);
+            if (index === 2) input.onUpdate?.(event);
+            input.onComplete?.({ conversation_id: "new-conversation" });
+          } else {
+            input.onUpdate?.({
+              conversation_id: "new-conversation",
+              message: {
+                id: "assistant-final",
+                author: { role: "assistant" },
+                channel: "final",
+                status: "finished_successfully",
+                end_turn: true,
+                content: { parts: ["Y"] },
+              },
+            });
+            input.onComplete?.({ conversation_id: "new-conversation" });
+          }
+        });
+        return { streamRequestId: `stream-${index}` };
+      },
+    );
+
+    await withHarness({ get, startCompletionStream }, async ({ connection, window }) => {
+      vi.spyOn(connection, "control").mockResolvedValue({ servers: [] });
+      Object.assign(window, { crypto: { randomUUID: () => "approval-response-id" } });
+      const internals = connection as unknown as {
+        binding: string;
+        acceptRendererUpdate: (update: ChatGPTUpdate) => void;
+      };
+      Object.assign(window, {
+        [internals.binding]: (payload: string) =>
+          internals.acceptRendererUpdate(JSON.parse(payload) as ChatGPTUpdate),
+      });
+      const updates: ChatGPTUpdate[] = [];
+      connection.onUpdate((update) => {
+        updates.push(update);
+        if (update.kind === "complete") completed.resolve();
+      });
+
+      await connection.send("request", "Run a harmless Fedora command", "gpt-6-thinking", "/tmp");
+      await completed.promise;
+
+      expect(requests).toHaveLength(4);
+      for (let i = 1; i <= 3; i++) {
+        expect(requests[i]).toMatchObject({
+          action: "next",
+          conversation_id: "new-conversation",
+          parent_message_id: `approval-${i}`,
+          model: "gpt-6-thinking",
+          messages: [
+            {
+              author: { role: "tool", name: "api_tool.call_tool" },
+              metadata: {
+                jit_plugin_data: {
+                  from_client: {
+                    target_message_id: `approval-${i}`,
+                    type: "always_allow",
+                  },
+                },
+              },
+            },
+          ],
+        });
+      }
+      expect(get).toHaveBeenCalledTimes(3);
+      expect(updates.filter((update) => update.kind === "complete")).toHaveLength(1);
+      expect(updates.filter((update) => update.fedoraApproval)).toHaveLength(4);
+      expect(updates.some((update) => update.text === "Y")).toBe(true);
+    });
+  });
+
+  it("finds a Fedora approval in the conversation head when the stream omits it", async () => {
+    const completed = Promise.withResolvers<void>();
+    const approvals: Array<Record<string, unknown>> = [];
+    const approvalMessage = {
+      id: "head-only-approval",
+      author: { role: "tool" },
+      metadata: {
+        jit_plugin_data: {
+          from_server: {
+            type: "confirm_action",
+            body: {
+              codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+              connector_id: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+              link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+              actions: [{ always_allow: { target_message_id: "head-only-approval" } }],
+            },
+          },
+        },
+      },
+    };
+    const get = vi.fn(async () => ({
+      conversation_id: "new-conversation",
+      default_model_slug: "gpt-6-thinking",
+      current_node: approvalMessage.id,
+      mapping: { [approvalMessage.id]: { message: approvalMessage } },
+    }));
+    const startCompletionStream = vi.fn((input: {
+      request?: unknown;
+      onUpdate?: (value: unknown) => void;
+      onComplete?: (value: unknown) => void;
+    }) => {
+      approvals.push(input.request as Record<string, unknown>);
+      queueMicrotask(() => {
+        if (approvals.length === 1) {
+          input.onUpdate?.({
+            conversation_id: "new-conversation",
+            message: { id: "thinking", author: { role: "assistant" }, channel: "analysis" },
+          });
+          input.onComplete?.({ conversation_id: "new-conversation" });
+        } else {
+          input.onUpdate?.({
+            conversation_id: "new-conversation",
+            message: {
+              id: "final",
+              author: { role: "assistant" },
+              channel: "final",
+              end_turn: true,
+              content: { parts: ["Y"] },
+            },
+          });
+          input.onComplete?.({ conversation_id: "new-conversation" });
+        }
+      });
+      return { streamRequestId: `stream-${approvals.length}` };
+    });
+    await withHarness({ get, startCompletionStream }, async ({ connection, directory, window }) => {
+      vi.spyOn(connection, "control").mockResolvedValue({ servers: [] });
+      Object.assign(window, { crypto: { randomUUID: () => "approval-response-id" } });
+      const internals = connection as unknown as {
+        binding: string;
+        acceptRendererUpdate: (update: ChatGPTUpdate) => void;
+      };
+      Object.assign(window, {
+        [internals.binding]: (payload: string) =>
+          internals.acceptRendererUpdate(JSON.parse(payload) as ChatGPTUpdate),
+      });
+      const events: ChatGPTUpdate[] = [];
+      connection.onUpdate((update) => {
+        events.push(update);
+        if (update.kind === "complete") completed.resolve();
+      });
+      await connection.send("request", "Run Fedora", "gpt-6-thinking", directory);
+      await completed.promise;
+      expect(get).toHaveBeenCalledOnce();
+      expect(approvals).toHaveLength(2);
+      expect(approvals[1]).toMatchObject({
+        parent_message_id: "head-only-approval",
+        messages: [{
+          metadata: {
+            jit_plugin_data: {
+              from_client: {
+                target_message_id: "head-only-approval",
+                type: "always_allow",
+              },
+            },
+          },
+        }],
+      });
+      expect(events.filter((event) => event.kind === "complete")).toHaveLength(1);
+    });
+  });
+
+  it("never resumes an approval after the owning turn is stopped during verification", async () => {
+    const checking = Promise.withResolvers<void>();
+    const approvalRead = Promise.withResolvers<unknown>();
+    const get = vi.fn(() => {
+      checking.resolve();
+      return approvalRead.promise;
+    });
+    const startCompletionStream = vi.fn(
+      (input: { onUpdate?: (value: unknown) => void; onComplete?: (value: unknown) => void }) => {
+        queueMicrotask(() => {
+          const message = {
+            id: "approval-stopped",
+            author: { role: "tool" },
+            metadata: {
+              jit_plugin_data: {
+                from_server: {
+                  type: "confirm_action",
+                  body: {
+                    codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                    connector_id: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+                    link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+                    actions: [{ always_allow: { target_message_id: "approval-stopped" } }],
+                  },
+                },
+              },
+            },
+          };
+          input.onUpdate?.({ conversation_id: "new-conversation", message });
+          input.onComplete?.({ conversation_id: "new-conversation" });
+        });
+        return { streamRequestId: "first-stream" };
+      },
+    );
+    await withHarness({ get, startCompletionStream }, async ({ connection, directory, window }) => {
+      vi.spyOn(connection, "control").mockResolvedValue({ servers: [] });
+      Object.assign(window, { crypto: { randomUUID: () => "approval-response-id" } });
+      await connection.send("request", "Run Fedora", "gpt-6-thinking", directory);
+      await checking.promise;
+      await connection.stop("request");
+      approvalRead.resolve({
+        conversation_id: "new-conversation",
+        current_node: "approval-stopped",
+        mapping: { "approval-stopped": { message: { id: "approval-stopped" } } },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(startCompletionStream).toHaveBeenCalledTimes(1);
     });
   });
 

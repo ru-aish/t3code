@@ -44,6 +44,8 @@ export function normalizeStreamMessage(
     metadata?: {
       is_visually_hidden_from_conversation?: boolean;
       model_dil_v2?: { fallbackMarkdown?: string };
+      jit_plugin_data?: { from_server?: unknown };
+      elicitation_metadata?: { plugin_data?: { from_server?: unknown } };
     };
   };
   const value = raw as Message;
@@ -87,6 +89,57 @@ export function normalizeStreamMessage(
       .join("")
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
   }
+  const approvalServer = (metadata.jit_plugin_data?.from_server ??
+    metadata.elicitation_metadata?.plugin_data?.from_server) as
+    | {
+        type?: string;
+        body?: {
+          codex_mcp_elicitation?: { kind?: string; status?: string };
+          connector_id?: unknown;
+          link_id?: unknown;
+          connector_name?: unknown;
+          connectorName?: unknown;
+          app_name?: unknown;
+          app?: unknown;
+          params?: { path?: unknown };
+          actions?: Array<{ always_allow?: { target_message_id?: unknown } }>;
+        };
+      }
+    | undefined;
+  const approvalBody = approvalServer?.body;
+  const connectorId =
+    typeof approvalBody?.connector_id === "string" ? approvalBody.connector_id : "";
+  const linkId = typeof approvalBody?.link_id === "string" ? approvalBody.link_id : "";
+  const connectorLabel = [
+    approvalBody?.connector_name,
+    approvalBody?.connectorName,
+    approvalBody?.app_name,
+    approvalBody?.app,
+  ].find((candidate): candidate is string => typeof candidate === "string");
+  const normalizedLabel = (connectorLabel ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  const connectorPath =
+    typeof approvalBody?.params?.path === "string" ? approvalBody.params.path.toLowerCase() : "";
+  const fedoraAppId = "asdk_app_6ad23e985b608191984705f0c25f1ba3";
+  const isFedoraConnector =
+    connectorId === fedoraAppId ||
+    connectorPath.startsWith(`/${fedoraAppId}/`) ||
+    (normalizedLabel === "fedora_t3code" && connectorPath.startsWith("/fedora_t3code/"));
+  const offersAlwaysAllow =
+    approvalBody?.actions?.some(
+      (action) => action.always_allow?.target_message_id === message.id,
+    ) === true;
+  const fedoraApproval =
+    message.author?.role === "tool" &&
+    approvalServer?.type === "confirm_action" &&
+    approvalBody?.codex_mcp_elicitation?.kind === "mcpToolCall" &&
+    approvalBody.codex_mcp_elicitation.status === "pending" &&
+    isFedoraConnector &&
+    offersAlwaysAllow &&
+    typeof message.id === "string" &&
+    connectorId.length > 0 &&
+    linkId.length > 0
+      ? { messageId: message.id, connectorId, linkId }
+      : undefined;
   return {
     messageId: message.id,
     role: message.author?.role,
@@ -96,6 +149,7 @@ export function normalizeStreamMessage(
     text: displayText,
     status: message.status,
     endTurn: message.end_turn,
+    ...(fedoraApproval ? { fedoraApproval } : {}),
   };
 }
 
