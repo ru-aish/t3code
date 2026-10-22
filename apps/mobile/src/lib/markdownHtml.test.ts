@@ -70,6 +70,50 @@ describe("static ChatGPT cards in native Markdown", () => {
     }
   });
 
+  it("keeps leading and trailing backticks inert around mobile card URLs", () => {
+    for (const value of [
+      "`![x](https://a.example/track.png)",
+      "![x](https://a.example/track.png)`",
+      "`[click](https://a.example)",
+      "`https://a.example",
+      "`name@example.org",
+      "``![x](https://a.example/track.png)``",
+    ]) {
+      const source =
+        "```t3-card\n" + JSON.stringify({ items: [{ kind: "text", value }] }) + "\n```";
+      const result = markdownWithStaticCards(source);
+      const paragraph = parseMarkdownDocument(result).children.find(
+        (node) => node.type === "paragraph",
+      );
+      expect(paragraph?.type).toBe("paragraph");
+      if (paragraph?.type === "paragraph") {
+        expect(paragraph.children.map((node) => node.type)).toEqual(["inlineCode"]);
+        expect(paragraph.children[0]).toMatchObject({ value });
+      }
+    }
+  });
+
+  it("decodes card HTML character references exactly once", () => {
+    const value = "R&amp;D &copy; &lt;tag&gt; &#124; &#xA9; A & B &amp;copy;";
+    const source = "```t3-card\n" + JSON.stringify({ items: [{ kind: "text", value }] }) + "\n```";
+    const result = markdownWithStaticCards(source);
+    const paragraph = parseMarkdownDocument(result).children.find(
+      (node) => node.type === "paragraph",
+    );
+    expect(paragraph?.type).toBe("paragraph");
+    if (paragraph?.type === "paragraph")
+      expect(paragraph.children.map((node) => ("value" in node ? node.value : "")).join("")).toBe(
+        "R&D © <tag> | © A & B &copy;",
+      );
+  });
+
+  it("skips a full parse for incidental t3-card mentions without a root fence", () => {
+    const plain = "Prose about t3-card with no fence.\n".repeat(3_000);
+    expect(markdownWithStaticCards(plain)).toBe(plain);
+    const tilde = "~~~t3-card\n" + JSON.stringify({ items }) + "\n~~~";
+    expect(markdownWithStaticCards(tilde)).toContain("### Build status");
+  });
+
   it("leaves unsupported, malformed and non-root card fences as source", () => {
     for (const source of [
       "```t3-card\nnot-json\n```",

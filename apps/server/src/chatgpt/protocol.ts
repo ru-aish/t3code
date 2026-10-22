@@ -757,7 +757,12 @@ export function normalizeStreamMessage(
         return true;
       }
       let bracketDepth = 0;
-      const emphasis = new Map<string, number>();
+      const emphasis: Array<{
+        char: string;
+        count: number;
+        canClose: boolean;
+        beforeCard: boolean;
+      }> = [];
       const isPunctuation = (char: string): boolean => /[\p{P}\p{S}]/u.test(char);
       const flanking = (at: number, end: number, char: string) => {
         const before = source[at - 1] ?? " ";
@@ -772,6 +777,47 @@ export function normalizeStreamMessage(
           canOpen: char === "_" ? left && (!right || isPunctuation(before)) : left,
           canClose: char === "_" ? right && (!left || isPunctuation(after)) : right,
         };
+      };
+      const consumeEmphasis = (
+        char: string,
+        count: number,
+        canOpen: boolean,
+        canClose: boolean,
+        beforeCard: boolean,
+      ): boolean => {
+        let remaining = count;
+        let closedEarlierOpener = false;
+        if (canClose) {
+          for (let index = emphasis.length - 1; index >= 0 && remaining > 0; index--) {
+            const opener = emphasis[index]!;
+            if (opener.char !== char) continue;
+            // CommonMark's rule of three disallows certain mixed open/close
+            // delimiter pairs even when both runs are otherwise flanking.
+            if (
+              char !== "~" &&
+              (opener.canClose || canOpen) &&
+              (opener.count + remaining) % 3 === 0 &&
+              (opener.count % 3 !== 0 || remaining % 3 !== 0)
+            )
+              continue;
+            const used =
+              char === "~"
+                ? opener.count >= 2 && remaining >= 2
+                  ? 2
+                  : 0
+                : opener.count >= 2 && remaining >= 2
+                  ? 2
+                  : 1;
+            if (used === 0) continue;
+            if (opener.beforeCard) closedEarlierOpener = true;
+            opener.count -= used;
+            remaining -= used;
+            if (opener.count === 0) emphasis.splice(index, 1);
+          }
+        }
+        if (canOpen && remaining >= (char === "~" ? 2 : 1))
+          emphasis.push({ char, count: remaining, canClose, beforeCard });
+        return closedEarlierOpener;
       };
       for (let i = from; i < start; i++) {
         if (inRanges(inlineIgnoredRanges, i)) continue;
@@ -791,11 +837,7 @@ export function normalizeStreamMessage(
           continue;
         }
         const { canOpen, canClose } = flanking(i, end, char);
-        const pending = emphasis.get(char) ?? 0;
-        const consumed = canClose ? Math.min(pending, run.length) : 0;
-        const remaining = pending - consumed + (canOpen ? run.length - consumed : 0);
-        if (remaining > 0) emphasis.set(char, remaining);
-        else emphasis.delete(char);
+        consumeEmphasis(char, run.length, canOpen, canClose, true);
         i = end - 1;
       }
       // Only a delimiter with a closing continuation after the candidate
@@ -827,12 +869,10 @@ export function normalizeStreamMessage(
         if (char === "*" || char === "_" || char === "~") {
           let end = i + 1;
           while (end < tailEnd && source[end] === char) end++;
-          if (
-            (char !== "~" || end - i === 2) &&
-            emphasis.has(char) &&
-            flanking(i, end, char).canClose
-          )
-            return true;
+          if (char !== "~" || end - i === 2) {
+            const { canOpen, canClose } = flanking(i, end, char);
+            if (consumeEmphasis(char, end - i, canOpen, canClose, false)) return true;
+          }
           i = end - 1;
         }
       }

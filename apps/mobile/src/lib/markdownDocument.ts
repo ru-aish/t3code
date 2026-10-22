@@ -148,18 +148,35 @@ function escapeCardText(value: string): string {
     let length = 1;
     for (const run of text.matchAll(/\x60+/g)) length = Math.max(length, run[0].length + 1);
     const fence = "\x60".repeat(length);
-    return fence + text + fence;
+    // Padding keeps edge backticks from merging with the generated delimiter.
+    return fence + " " + text + " " + fence;
   }
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/([\\\x60*_{}[\]()#+\-.!|~])/g, "\\$1");
+  const escapePlain = (part: string) =>
+    part
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/([\\\x60*_{}[\]()#+\-.!|~])/g, "\\$1");
+  // Preserve entity syntax through Markdown. In particular, escaping the # in
+  // &#124; prevents its single intended decode, while escaping &amp; twice
+  // displays the entity rather than its character.
+  let escaped = "";
+  let from = 0;
+  for (const entity of text.matchAll(/&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);/gi)) {
+    escaped += escapePlain(text.slice(from, entity.index)) + entity[0];
+    from = entity.index + entity[0].length;
+  }
+  return escaped + escapePlain(text.slice(from));
 }
 
 /** Mobile has no t3-card renderer; preserve its short, inert content as readable Markdown. */
 export function markdownWithStaticCards(markdown: string): string {
-  if (!markdown.includes("t3-card") || markdown.length > 500_000) return markdown;
+  // Only a line-start code-fence candidate warrants parsing the whole document.
+  if (
+    markdown.length > 500_000 ||
+    !/(?:^|[\r\n]) {0,3}(?:`{3,}|~{3,})[ \t]*t3-card(?=[ \t\r\n]|$)/.test(markdown)
+  )
+    return markdown;
   const edits: Array<{ start: number; end: number; content: string }> = [];
   for (const node of parser.parse(markdown).children) {
     if (node.type !== "code" || node.lang !== "t3-card" || node.value.length > 4_000) continue;

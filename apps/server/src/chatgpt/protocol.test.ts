@@ -1129,6 +1129,13 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     }
   });
 
+  it("respects CommonMark's rule of three before promoting a card from emphasis", () => {
+    const content = "x*a**\n" + card + "\nb*";
+    expect(normalize(content)).not.toContain("t3-card");
+    // A complete emphasis span before a new root block does not own the card.
+    expect(normalize("x*a*\n\n" + card)).toContain("t3-card");
+  });
+
   it("does not read Markdown delimiters from quoted DIL attributes", () => {
     const content = '<box label="[not Markdown" />\n' + card + "\n[Other](https://e.org)";
     expect(normalize(content)).toContain("t3-card");
