@@ -30,6 +30,7 @@ export function isTerminalToolCall(
 // Keep self-contained so its serialized function needs no module globals.
 export function normalizeStreamMessage(
   raw: unknown,
+  terminalId?: string,
 ): Omit<ChatGPTUpdate, "kind" | "conversationId"> {
   type Message = {
     message?: Message;
@@ -96,7 +97,9 @@ export function normalizeStreamMessage(
         body?: {
           codex_mcp_elicitation?: { kind?: string; status?: string };
           connector_id?: unknown;
+          connector_name?: unknown;
           link_id?: unknown;
+          params?: { path?: unknown; args?: { thread_id?: unknown; session_id?: unknown } };
           actions?: Array<{ always_allow?: { target_message_id?: unknown } }>;
         };
       }
@@ -105,8 +108,24 @@ export function normalizeStreamMessage(
   const connectorId =
     typeof approvalBody?.connector_id === "string" ? approvalBody.connector_id : "";
   const linkId = typeof approvalBody?.link_id === "string" ? approvalBody.link_id : "";
-  const fedoraAppId = "asdk_app_6ad23e985b608191984705f0c25f1ba3";
-  const isFedoraConnector = connectorId === fedoraAppId;
+  const call = approvalBody?.params;
+  const callIds = [call?.args?.thread_id, call?.args?.session_id].filter((id) => id !== undefined);
+  const route = typeof call?.path === "string" ? call.path.split("/") : [];
+  // Recreated Fedora connections have different opaque IDs. Check the
+  // server's connector name together with the canonical route and thread IDs.
+  const isScopedTerminalCall =
+    typeof terminalId === "string" &&
+    terminalId.length > 0 &&
+    callIds.length > 0 &&
+    callIds.every((id) => id === terminalId) &&
+    (approvalBody?.connector_name === "fedora" ||
+      approvalBody?.connector_name === "fedora_t3code") &&
+    connectorId.startsWith("asdk_app_") &&
+    linkId.startsWith("link_") &&
+    route.length === 4 &&
+    route[1] === connectorId &&
+    route[2] === linkId &&
+    /^[a-zA-Z0-9_]+$/.test(route[3] ?? "");
   const offersAlwaysAllow =
     approvalBody?.actions?.some(
       (action) => action.always_allow?.target_message_id === message.id,
@@ -116,7 +135,7 @@ export function normalizeStreamMessage(
     approvalServer?.type === "confirm_action" &&
     approvalBody?.codex_mcp_elicitation?.kind === "mcpToolCall" &&
     approvalBody.codex_mcp_elicitation.status === "pending" &&
-    isFedoraConnector &&
+    isScopedTerminalCall &&
     offersAlwaysAllow &&
     typeof message.id === "string" &&
     connectorId.length > 0 &&

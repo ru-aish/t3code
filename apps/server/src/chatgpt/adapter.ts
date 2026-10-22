@@ -381,15 +381,18 @@ export const makeChatGPTAdapter = (
         let transportInterrupted = false;
         let recoveryToken = 0;
         let recoveryScheduled = false;
+        let recoverySnapshot: { token: number; snapshot: ConversationSnapshot } | undefined;
         const cancelRecovery = () => {
           ++recoveryToken;
           recoveryScheduled = false;
+          recoverySnapshot = undefined;
         };
         const requestRecovery = Effect.fnUntraced(function* () {
           transportInterrupted = true;
-          if (recoveryScheduled || !thread || (active && retiredRequestIds.has(active.requestId)))
+          if (recoveryScheduled || !thread || !active || retiredRequestIds.has(active.requestId))
             return;
           recoveryScheduled = true;
+          yield* reportRecovery("ChatGPT stream interrupted. Recovering this turn.", "running");
           yield* Queue.offer(incoming, { kind: "recover", token: ++recoveryToken, retry: 0 });
         });
         const retiredRequestIds = new Set<string>();
@@ -398,6 +401,7 @@ export const makeChatGPTAdapter = (
         let generation = 0;
         let interrupting = false;
         let nextOrdinal = 0;
+        let recoveryNotice: Extract<OrchestrationV2TurnItem, { type: "system_notice" }> | undefined;
         const itemOrdinals = new Map<string, number>();
         const itemIds = new Map<string, TurnItemId>();
         const restoredItems = new Map<string, OrchestrationV2TurnItem>();
@@ -411,6 +415,39 @@ export const makeChatGPTAdapter = (
           driver: CHATGPT_DRIVER,
           nativeId: id,
           strength: "strong" as const,
+        });
+        const reportRecovery = Effect.fnUntraced(function* (
+          message: string,
+          status: "running" | "completed",
+        ) {
+          if (!active || !thread) return;
+          const id = TurnItemId.make(`chatgpt:${input.threadId}:recovery:${active.requestId}`);
+          const previous = recoveryNotice?.id === id ? recoveryNotice : undefined;
+          if (previous?.message === message && previous.status === status) return;
+          const now = yield* DateTime.now;
+          recoveryNotice = {
+            id,
+            threadId: input.threadId,
+            runId: active.input.runId,
+            nodeId: active.input.rootNodeId,
+            providerThreadId: active.turn.providerThreadId,
+            providerTurnId: active.turn.id,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: previous?.ordinal ?? ++nextOrdinal,
+            status,
+            title: "ChatGPT recovery",
+            startedAt: previous?.startedAt ?? now,
+            completedAt: status === "completed" ? now : null,
+            updatedAt: now,
+            type: "system_notice",
+            message,
+          };
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_DRIVER,
+            turnItem: recoveryNotice,
+          });
         });
         const settleReasoning = Effect.fnUntraced(function* (turn: ActiveTurn) {
           const timestamp = yield* DateTime.now;
@@ -632,6 +669,15 @@ export const makeChatGPTAdapter = (
           const [status, failure] = outcome;
           if (!active || !thread) return;
           const completed = active;
+          if (recoveryNotice?.status === "running")
+            yield* reportRecovery(
+              status === "completed"
+                ? "ChatGPT output recovered."
+                : status === "forced"
+                  ? "Recovery could not confirm ChatGPT completion; the turn was forced closed."
+                  : "ChatGPT recovery stopped with the turn.",
+              "completed",
+            );
           cancelRecovery();
           // Stop acknowledgments can precede late renderer callbacks. Retire the
           // old request before a steering replacement reuses this adapter.
@@ -1142,7 +1188,14 @@ export const makeChatGPTAdapter = (
                   yield* Effect.logWarning("ChatGPT refresh waits for the runtime to recover", {
                     threadId: input.threadId,
                   });
-              } else recoveryGate.unavailableUntil = 0;
+              } else {
+                recoveryGate.unavailableUntil = 0;
+                if (event.token === recoveryToken && retry)
+                  yield* reportRecovery(
+                    "Conversation state recovered; waiting for ChatGPT to finish.",
+                    "running",
+                  );
+              }
             }),
           );
           if (event.token !== recoveryToken) return;
@@ -1160,7 +1213,18 @@ export const makeChatGPTAdapter = (
         ) {
           const projection = request.existingProjection!;
           thread = request.providerThread;
-          const snapshot = yield* attempt(() => connection.readConversation());
+          const resumeRequestId =
+            active?.requestId ??
+            connection.submittedRequestIds.findLast((requestId) =>
+              projection.runs.some(
+                (run) =>
+                  run.userMessageId === requestId &&
+                  run.status === "running" &&
+                  run.providerThreadId === thread!.id,
+              ),
+            );
+          const snapshot = yield* attempt(() => connection.readConversation(resumeRequestId));
+          if (recoveryScheduled) recoverySnapshot = { token: recoveryToken, snapshot };
           binding = yield* attempt(() =>
             connection.control<TerminalBinding>("register", {
               cwd,
@@ -1286,8 +1350,15 @@ export const makeChatGPTAdapter = (
               }
               if (event.kind === "recover_snapshot") {
                 yield* Effect.gen(function* () {
-                  if (event.token !== recoveryToken) return false;
-                  const snapshot = yield* attempt(() => connection.readConversation());
+                  if (event.token !== recoveryToken || !active || streamComplete) return false;
+                  // Refresh may reconcile through this actor. Another session
+                  // instance still needs its own snapshot, but this one can reuse it.
+                  const requestId = active.requestId;
+                  const snapshot =
+                    recoverySnapshot?.token === event.token
+                      ? recoverySnapshot.snapshot
+                      : yield* attempt(() => connection.readConversation(requestId));
+                  recoverySnapshot = undefined;
                   const currentBinding = yield* attempt(() =>
                     connection.control<TerminalBinding>("get"),
                   );

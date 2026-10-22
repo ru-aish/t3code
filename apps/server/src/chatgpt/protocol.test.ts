@@ -87,43 +87,71 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(full);
   });
-  it("recognizes only pending Always allow prompts for the Fedora connector", () => {
-    const approval = (
-      connectorName: string,
-      targetMessageId = "approval-message",
-      connectorId = "asdk_app_6ad23e985b608191984705f0c25f1ba3",
-    ) =>
-      normalizeStreamMessage({
-        message: {
-          id: "approval-message",
-          author: { role: "tool" },
-          content: { parts: [""] },
-          metadata: {
-            jit_plugin_data: {
-              from_server: {
-                type: "confirm_action",
-                body: {
-                  codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
-                  connector_id: connectorId,
-                  link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
-                  connector_name: connectorName,
-                  params: { path: "/fedora_t3code/pretend/tool" },
-                  actions: [{ always_allow: { target_message_id: targetMessageId } }],
+  it("recognizes Terminal approvals by canonical invocation and exact thread scope", () => {
+    const approval = (connectorId: string, threadId = "thread", pathConnector = connectorId) => ({
+      message: {
+        id: "approval-message",
+        author: { role: "tool" },
+        content: { parts: [""] },
+        metadata: {
+          jit_plugin_data: {
+            from_server: {
+              type: "confirm_action",
+              body: {
+                codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                connector_id: connectorId,
+                connector_name: "fedora_t3code",
+                link_id: "link_current",
+                params: {
+                  path: `/${pathConnector}/link_current/bootstrap_thread`,
+                  args: { thread_id: threadId },
                 },
+                actions: [{ always_allow: { target_message_id: "approval-message" } }],
               },
             },
           },
         },
-      }).fedoraApproval;
-
-    expect(approval("fedora_t3code")).toEqual({
-      messageId: "approval-message",
-      connectorId: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
-      linkId: "link_6ad23eb0b6cc819189b71f055d70599c",
+      },
     });
-    expect(approval("another_connector", "approval-message", "another_app")).toBeUndefined();
-    expect(approval("fedora_t3code", "approval-message", "another_app")).toBeUndefined();
-    expect(approval("fedora_t3code", "different-message")).toBeUndefined();
+    for (const connectorId of [
+      "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+      "asdk_app_6a9b31f86efc81918287f37a02413746",
+      "asdk_app_recreated_connection",
+    ]) {
+      const raw = approval(connectorId);
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toEqual({
+        messageId: "approval-message",
+        connectorId,
+        linkId: "link_current",
+      });
+      raw.message.metadata.jit_plugin_data.from_server.body.connector_name = "fedora";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeDefined();
+      raw.message.metadata.jit_plugin_data.from_server.body.connector_name = "unrelated-app";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      raw.message.metadata.jit_plugin_data.from_server.body.connector_name = "fedora_t3code";
+      expect(normalizeStreamMessage(raw).fedoraApproval).toBeUndefined();
+      expect(
+        normalizeStreamMessage(approval(connectorId, "other-thread"), "thread").fedoraApproval,
+      ).toBeUndefined();
+      expect(
+        normalizeStreamMessage(approval(connectorId, "thread", "asdk_app_other"), "thread")
+          .fedoraApproval,
+      ).toBeUndefined();
+      const body = raw.message.metadata.jit_plugin_data.from_server.body;
+      Object.assign(body.params.args, { session_id: "another-thread" });
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      Object.assign(body.params.args, { session_id: "thread" });
+      Reflect.deleteProperty(body.params.args, "thread_id");
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeDefined();
+      body.params.path = `/${connectorId}/link_other/bootstrap_thread`;
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      body.params.path = `/${connectorId}/link_current/bootstrap_thread`;
+      body.actions[0]!.always_allow.target_message_id = "another-message";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      body.actions[0]!.always_allow.target_message_id = "approval-message";
+      body.codex_mcp_elicitation.status = "accepted";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+    }
   });
 
   it("uses a Markdown fallback instead of raw ChatGPT DIL when available", () => {

@@ -511,7 +511,8 @@ describe("ChatGPT interruption", () => {
     const stopCompletion = options.stopCompletion ?? vi.fn(async () => {});
     const cancelStream = options.cancelStream ?? vi.fn();
     const startCompletionStream =
-      options.startCompletionStream ?? vi.fn(() => Promise.resolve({ streamRequestId: "stream-1" }));
+      options.startCompletionStream ??
+      vi.fn(() => Promise.resolve({ streamRequestId: "stream-1" }));
     const client = {
       get: options.get ?? (async () => ({ current_node: "parent" })),
       list: async () => ({}),
@@ -523,6 +524,13 @@ describe("ChatGPT interruption", () => {
     const window: Record<symbol, unknown> = {
       [Symbol.for("terminal-mcp.chat-runtime.client.v5")]: client,
     };
+    const storage = new Map<string, string>();
+    Object.assign(window, {
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => { storage.set(key, value); },
+      },
+    });
     if (options.streams) window[Symbol.for("t3.chatgpt.streams.v1")] = options.streams;
     const connection = new ChatGPTConnection({
       cdpEndpoint: "http://127.0.0.1:9234",
@@ -553,7 +561,11 @@ describe("ChatGPT interruption", () => {
       stopCompletion,
       cancelStream,
       startCompletionStream,
-      cleanup: () => NodeFSP.rm(directory, { recursive: true, force: true }),
+      cleanup: async () => {
+        connection.close();
+        await (connection as unknown as { writes: Promise<unknown> }).writes;
+        await NodeFSP.rm(directory, { recursive: true, force: true });
+      },
     };
   };
 
@@ -644,8 +656,8 @@ describe("ChatGPT interruption", () => {
           const stopping = connection.stop("request");
           await new Promise<void>((resolve) => setImmediate(resolve));
 
-          expect(stopCompletion).toHaveBeenCalledWith(nativeStopPayload);
           await stopping;
+          expect(stopCompletion).toHaveBeenCalledWith(nativeStopPayload);
           expect(cancelStream).not.toHaveBeenCalled();
 
           handle.resolve({ streamRequestId: "stream-pending" });
@@ -677,7 +689,7 @@ describe("ChatGPT interruption", () => {
     );
   });
 
-  it("clears the cancellation marker when every stop mechanism fails", async () => {
+  it("keeps the request retired when every native stop mechanism fails", async () => {
     await withHarness(
       {
         stopCompletion: vi.fn(async () => {
@@ -695,7 +707,7 @@ describe("ChatGPT interruption", () => {
         expect(stopCompletion).toHaveBeenCalledOnce();
         expect(cancelStream).not.toHaveBeenCalled();
         const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
-        expect(cancelled.has("request")).toBe(false);
+        expect(cancelled.has("request")).toBe(true);
       },
     );
   });
@@ -886,7 +898,7 @@ describe("ChatGPT interruption", () => {
       expect(stopCompletion).not.toHaveBeenCalled();
       expect(cancelStream).not.toHaveBeenCalled();
       const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
-      expect(cancelled.has("request-a")).toBe(false);
+      expect(cancelled.has("request-a")).toBe(true);
     });
   });
 
@@ -901,127 +913,159 @@ describe("ChatGPT interruption", () => {
       expect(stopCompletion).not.toHaveBeenCalled();
       expect(cancelStream).not.toHaveBeenCalled();
       const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
-      expect(cancelled.has("request-a")).toBe(false);
+      expect(cancelled.has("request-a")).toBe(true);
     });
   });
 
-  it("auto-approves three successive Fedora prompts without premature completion or polling", async () => {
-    const requests: Array<Record<string, unknown>> = [];
-    const completed = Promise.withResolvers<void>();
-    let latestHead: Record<string, unknown> | null = null;
-    const get = vi.fn(async () => {
-      if (!latestHead) throw new Error("Missing approval head");
-      return {
-        conversation_id: "new-conversation",
-        default_model_slug: "gpt-6-thinking",
-        current_node: latestHead.id,
-        mapping: { [latestHead.id as string]: { message: latestHead } },
-      };
-    });
-    const startCompletionStream = vi.fn(
-      (input: {
-        request?: unknown;
-        onUpdate?: (value: unknown) => void;
-        onComplete?: (value: unknown) => void;
-      }) => {
-        requests.push(input.request as Record<string, unknown>);
-        const index = requests.length;
-        queueMicrotask(() => {
-          if (index <= 3) {
-            const messageId = `approval-${index}`;
-            const message = {
-              id: messageId,
-              author: { role: "tool" },
-              content: { parts: [""] },
-              metadata: {
-                jit_plugin_data: {
-                  from_server: {
-                    type: "confirm_action",
-                    body: {
-                      codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
-                      connector_id: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
-                      link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
-                      connector_name: "fedora_t3code",
-                      actions: [{ always_allow: { target_message_id: messageId } }],
+  it.each([
+    "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+    "asdk_app_6a9b31f86efc81918287f37a02413746",
+    "asdk_app_recreated_connection",
+  ])(
+    "auto-approves successive Terminal prompts without losing output or polling (%s)",
+    async (connectorId) => {
+      const requests: Array<Record<string, unknown>> = [];
+      const completed = Promise.withResolvers<void>();
+      let latestHead: Record<string, unknown> | null = null;
+      const get = vi.fn(async () => {
+        if (!latestHead) throw new Error("Missing approval head");
+        return {
+          conversation_id: "new-conversation",
+          default_model_slug: "gpt-6-thinking",
+          current_node: latestHead.id,
+          mapping: { [latestHead.id as string]: { message: latestHead } },
+        };
+      });
+      const startCompletionStream = vi.fn(
+        (input: {
+          request?: unknown;
+          onUpdate?: (value: unknown) => void;
+          onComplete?: (value: unknown) => void;
+        }) => {
+          requests.push(input.request as Record<string, unknown>);
+          const index = requests.length;
+          queueMicrotask(() => {
+            if (index <= 3) {
+              const messageId = `approval-${index}`;
+              const message = {
+                id: messageId,
+                author: { role: "tool" },
+                content: { parts: [""] },
+                metadata: {
+                  jit_plugin_data: {
+                    from_server: {
+                      type: "confirm_action",
+                      body: {
+                        codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                        connector_id: connectorId,
+                        params: {
+                          path: `/${connectorId}/link_6ad23eb0b6cc819189b71f055d70599c/bootstrap_thread`,
+                          args: { thread_id: "thread" },
+                        },
+                        link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+                        connector_name: "fedora_t3code",
+                        actions: [{ always_allow: { target_message_id: messageId } }],
+                      },
+                    },
+                  },
+                },
+              };
+              latestHead = message;
+              const event = { conversation_id: "new-conversation", message };
+              input.onUpdate?.(event);
+              if (index === 2) input.onUpdate?.(event);
+              input.onComplete?.({ conversation_id: "new-conversation" });
+            } else {
+              input.onUpdate?.({
+                conversation_id: "new-conversation",
+                message: {
+                  id: "assistant-final",
+                  author: { role: "assistant" },
+                  channel: "final",
+                  status: "finished_successfully",
+                  end_turn: true,
+                  content: { parts: ["Y"] },
+                },
+              });
+              input.onComplete?.({ conversation_id: "new-conversation" });
+            }
+          });
+          return { streamRequestId: `stream-${index}` };
+        },
+      );
+
+      await withHarness({ get, startCompletionStream }, async ({ connection, window }) => {
+        vi.spyOn(connection, "control").mockResolvedValue({ servers: [] });
+        Object.assign(window, { crypto: { randomUUID: () => "approval-response-id" } });
+        const internals = connection as unknown as {
+          binding: string;
+          acceptRendererUpdate: (update: ChatGPTUpdate) => void;
+        };
+        Object.assign(window, {
+          [internals.binding]: (payload: string) =>
+            internals.acceptRendererUpdate(JSON.parse(payload) as ChatGPTUpdate),
+        });
+        const updates: ChatGPTUpdate[] = [];
+        connection.onUpdate((update) => {
+          updates.push(update);
+          if (update.kind === "complete") completed.resolve();
+        });
+
+        await connection.send("request", "Run a harmless Fedora command", "gpt-6-thinking", "/tmp");
+        await completed.promise;
+
+        expect(requests).toHaveLength(4);
+        for (let i = 1; i <= 3; i++) {
+          expect(requests[i]).toMatchObject({
+            action: "next",
+            conversation_id: "new-conversation",
+            parent_message_id: `approval-${i}`,
+            model: "gpt-6-thinking",
+            messages: [
+              {
+                author: { role: "tool", name: "api_tool.call_tool" },
+                metadata: {
+                  jit_plugin_data: {
+                    from_client: {
+                      target_message_id: `approval-${i}`,
+                      type: "always_allow",
                     },
                   },
                 },
               },
-            };
-            latestHead = message;
-            const event = { conversation_id: "new-conversation", message };
-            input.onUpdate?.(event);
-            if (index === 2) input.onUpdate?.(event);
-            input.onComplete?.({ conversation_id: "new-conversation" });
-          } else {
-            input.onUpdate?.({
-              conversation_id: "new-conversation",
-              message: {
-                id: "assistant-final",
-                author: { role: "assistant" },
-                channel: "final",
-                status: "finished_successfully",
-                end_turn: true,
-                content: { parts: ["Y"] },
-              },
-            });
-            input.onComplete?.({ conversation_id: "new-conversation" });
-          }
-        });
-        return { streamRequestId: `stream-${index}` };
-      },
-    );
-
-    await withHarness({ get, startCompletionStream }, async ({ connection, window }) => {
-      vi.spyOn(connection, "control").mockResolvedValue({ servers: [] });
-      Object.assign(window, { crypto: { randomUUID: () => "approval-response-id" } });
-      const internals = connection as unknown as {
-        binding: string;
-        acceptRendererUpdate: (update: ChatGPTUpdate) => void;
-      };
-      Object.assign(window, {
-        [internals.binding]: (payload: string) =>
-          internals.acceptRendererUpdate(JSON.parse(payload) as ChatGPTUpdate),
+            ],
+          });
+        }
+        expect(get).toHaveBeenCalledTimes(3);
+        expect(updates.filter((update) => update.kind === "complete")).toHaveLength(1);
+        expect(updates.filter((update) => update.fedoraApproval)).toHaveLength(4);
+        expect(updates.some((update) => update.text === "Y")).toBe(true);
       });
-      const updates: ChatGPTUpdate[] = [];
-      connection.onUpdate((update) => {
-        updates.push(update);
-        if (update.kind === "complete") completed.resolve();
-      });
+    },
+  );
 
-      await connection.send("request", "Run a harmless Fedora command", "gpt-6-thinking", "/tmp");
-      await completed.promise;
-
-      expect(requests).toHaveLength(4);
-      for (let i = 1; i <= 3; i++) {
-        expect(requests[i]).toMatchObject({
-          action: "next",
-          conversation_id: "new-conversation",
-          parent_message_id: `approval-${i}`,
-          model: "gpt-6-thinking",
-          messages: [
-            {
-              author: { role: "tool", name: "api_tool.call_tool" },
-              metadata: {
-                jit_plugin_data: {
-                  from_client: {
-                    target_message_id: `approval-${i}`,
-                    type: "always_allow",
-                  },
-                },
-              },
-            },
-          ],
-        });
-      }
-      expect(get).toHaveBeenCalledTimes(3);
-      expect(updates.filter((update) => update.kind === "complete")).toHaveLength(1);
-      expect(updates.filter((update) => update.fedoraApproval)).toHaveLength(4);
-      expect(updates.some((update) => update.text === "Y")).toBe(true);
-    });
-  });
-
-  it("finds a Fedora approval in the conversation head when the stream omits it", async () => {
+  it.each([
+    "success",
+    "recover-read",
+    "cancel-recovery",
+    "reload-renderer",
+    "replace-connection",
+    "passive-refresh",
+    "stream-error",
+    "stop-after-reload",
+    "stop-during-recovery",
+    "older-runtime",
+    "lost-completion",
+    "manual-resume",
+    "stopped-cache-reload",
+    "uncertain-reload",
+  ])("continues head-only approval after verification (%s)", async (scenario) => {
+    const verificationFailed = Promise.withResolvers<void>();
+    const approvalFailed = Promise.withResolvers<void>();
+    const recoveryReading = Promise.withResolvers<void>();
+    const recoveryRead = Promise.withResolvers<void>();
+    let reads = 0;
+    let canonicalRequestId = "request";
     const completed = Promise.withResolvers<void>();
     const approvals: Array<Record<string, unknown>> = [];
     const approvalMessage = {
@@ -1034,48 +1078,82 @@ describe("ChatGPT interruption", () => {
             body: {
               codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
               connector_id: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+              connector_name: "fedora_t3code",
               link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+              params: {
+                path: "/asdk_app_6ad23e985b608191984705f0c25f1ba3/link_6ad23eb0b6cc819189b71f055d70599c/bootstrap_thread",
+                args: { thread_id: "thread" },
+              },
               actions: [{ always_allow: { target_message_id: "head-only-approval" } }],
             },
           },
         },
       },
     };
-    const get = vi.fn(async () => ({
-      conversation_id: "new-conversation",
-      default_model_slug: "gpt-6-thinking",
-      current_node: approvalMessage.id,
-      mapping: { [approvalMessage.id]: { message: approvalMessage } },
-    }));
-    const startCompletionStream = vi.fn((input: {
-      request?: unknown;
-      onUpdate?: (value: unknown) => void;
-      onComplete?: (value: unknown) => void;
-    }) => {
-      approvals.push(input.request as Record<string, unknown>);
-      queueMicrotask(() => {
-        if (approvals.length === 1) {
-          input.onUpdate?.({
-            conversation_id: "new-conversation",
-            message: { id: "thinking", author: { role: "assistant" }, channel: "analysis" },
-          });
-          input.onComplete?.({ conversation_id: "new-conversation" });
-        } else {
-          input.onUpdate?.({
-            conversation_id: "new-conversation",
-            message: {
-              id: "final",
-              author: { role: "assistant" },
-              channel: "final",
-              end_turn: true,
-              content: { parts: ["Y"] },
-            },
-          });
-          input.onComplete?.({ conversation_id: "new-conversation" });
-        }
-      });
-      return { streamRequestId: `stream-${approvals.length}` };
+    const get = vi.fn(async () => {
+      reads++;
+      if (
+        scenario !== "success" &&
+        scenario !== "stream-error" &&
+        scenario !== "lost-completion" &&
+        reads === 1
+      )
+        throw new Error("Too many requests");
+      if (scenario === "stop-during-recovery" && reads === 2) {
+        recoveryReading.resolve();
+        await recoveryRead.promise;
+      }
+      return {
+        conversation_id: "new-conversation",
+        default_model_slug: "gpt-6-thinking",
+        async_status: null,
+        current_node: approvalMessage.id,
+        mapping: {
+          user: {
+            message: { id: stableMessageId(canonicalRequestId), author: { role: "user" } },
+            parent: null,
+          },
+          [approvalMessage.id]: { message: approvalMessage, parent: "user" },
+        },
+      };
     });
+    const startCompletionStream = vi.fn(
+      (input: {
+        request?: unknown;
+        onUpdate?: (value: unknown) => void;
+        onComplete?: (value: unknown) => void;
+        onError?: (value: unknown) => void;
+      }) => {
+        approvals.push(input.request as Record<string, unknown>);
+        queueMicrotask(() => {
+          if (approvals.length === 1 || (scenario === "manual-resume" && approvals.length === 2)) {
+            input.onUpdate?.({
+              conversation_id: "new-conversation",
+              message: { id: "thinking", author: { role: "assistant" }, channel: "analysis" },
+            });
+            if (scenario === "stream-error") input.onError?.(new Error("Network changed"));
+            else if (scenario === "lost-completion") verificationFailed.resolve();
+            else input.onComplete?.({ conversation_id: "new-conversation" });
+          } else if (scenario === "uncertain-reload") {
+            input.onError?.(new Error("Connection lost during approval submission"));
+            approvalFailed.resolve();
+          } else {
+            input.onUpdate?.({
+              conversation_id: "new-conversation",
+              message: {
+                id: "final",
+                author: { role: "assistant" },
+                channel: "final",
+                end_turn: true,
+                content: { parts: ["Y"] },
+              },
+            });
+            input.onComplete?.({ conversation_id: "new-conversation" });
+          }
+        });
+        return { streamRequestId: `stream-${approvals.length}` };
+      },
+    );
     await withHarness({ get, startCompletionStream }, async ({ connection, directory, window }) => {
       vi.spyOn(connection, "control").mockResolvedValue({ servers: [] });
       Object.assign(window, { crypto: { randomUUID: () => "approval-response-id" } });
@@ -1091,25 +1169,118 @@ describe("ChatGPT interruption", () => {
       connection.onUpdate((update) => {
         events.push(update);
         if (update.kind === "complete") completed.resolve();
+        if (update.kind === "error") verificationFailed.resolve();
       });
       await connection.send("request", "Run Fedora", "gpt-6-thinking", directory);
+      if (scenario !== "success") {
+        await verificationFailed.promise;
+        if (
+          scenario === "reload-renderer" ||
+          scenario === "stop-after-reload" ||
+          scenario === "stop-during-recovery" ||
+          scenario === "stopped-cache-reload"
+        )
+          delete window[Symbol.for("t3.chatgpt.streams.v1")];
+        if (scenario === "older-runtime") {
+          const state = (
+            window[Symbol.for("t3.chatgpt.streams.v1")] as Map<
+              string,
+              { resumeCompletion?: unknown }
+            >
+          ).get("thread")!;
+          delete state.resumeCompletion;
+        }
+        if (scenario === "passive-refresh") {
+          await connection.readConversation();
+          expect(approvals).toHaveLength(1);
+        }
+        if (
+          scenario === "cancel-recovery" ||
+          scenario === "stop-after-reload" ||
+          scenario === "stopped-cache-reload"
+        )
+          await connection.stop("request");
+        if (scenario === "manual-resume") {
+          await connection.stop("request");
+          canonicalRequestId = "replacement-request";
+          await connection.send(canonicalRequestId, "Continue", "gpt-6-thinking", directory);
+        } else if (scenario === "replace-connection" || scenario === "stopped-cache-reload") {
+          const replacement = new ChatGPTConnection(connection.options);
+          Object.assign(replacement, { renderer: Reflect.get(connection, "renderer") });
+          await replacement.load();
+          const replacementBinding = Reflect.get(replacement, "binding") as string;
+          Object.assign(window, {
+            [replacementBinding]: (payload: string) =>
+              Reflect.get(replacement, "acceptRendererUpdate").call(
+                replacement,
+                JSON.parse(payload),
+              ),
+          });
+          replacement.onUpdate((update) => {
+            events.push(update);
+            if (update.kind === "complete") completed.resolve();
+          });
+          connection.close();
+          try {
+            await replacement.readConversation("request");
+            if (scenario === "replace-connection") await completed.promise;
+          } finally {
+            replacement.close();
+            await Reflect.get(replacement, "writes");
+          }
+        } else if (scenario === "stop-during-recovery") {
+          const recovering = connection.readConversation("request");
+          await recoveryReading.promise;
+          await connection.stop("request");
+          recoveryRead.resolve();
+          await recovering;
+        } else await connection.readConversation("request");
+        if (scenario === "uncertain-reload") {
+          await approvalFailed.promise;
+          delete window[Symbol.for("t3.chatgpt.streams.v1")];
+          await connection.readConversation("request");
+          expect(approvals).toHaveLength(2);
+          expect(events.some((event) => event.kind === "complete")).toBe(false);
+          return;
+        }
+        if (
+          scenario === "cancel-recovery" ||
+          scenario === "stop-after-reload" ||
+          scenario === "stop-during-recovery" ||
+          scenario === "stopped-cache-reload"
+        ) {
+          expect(approvals).toHaveLength(1);
+          expect(events.some((event) => event.kind === "complete")).toBe(false);
+          return;
+        }
+      }
       await completed.promise;
-      expect(get).toHaveBeenCalledOnce();
-      expect(approvals).toHaveLength(2);
-      expect(approvals[1]).toMatchObject({
+      expect(get).toHaveBeenCalledTimes(
+        scenario === "success" || scenario === "stream-error" || scenario === "lost-completion"
+          ? 1
+          : scenario === "passive-refresh" || scenario === "manual-resume"
+            ? 3
+            : 2,
+      );
+      expect(approvals).toHaveLength(scenario === "manual-resume" ? 3 : 2);
+      expect(approvals.at(-1)).toMatchObject({
         parent_message_id: "head-only-approval",
-        messages: [{
-          metadata: {
-            jit_plugin_data: {
-              from_client: {
-                target_message_id: "head-only-approval",
-                type: "always_allow",
+        messages: [
+          {
+            metadata: {
+              jit_plugin_data: {
+                from_client: {
+                  target_message_id: "head-only-approval",
+                  type: "always_allow",
+                },
               },
             },
           },
-        }],
+        ],
       });
-      expect(events.filter((event) => event.kind === "complete")).toHaveLength(1);
+      expect(events.filter((event) => event.kind === "complete")).toEqual([
+        expect.objectContaining({ requestId: canonicalRequestId }),
+      ]);
     });
   });
 
@@ -1133,7 +1304,12 @@ describe("ChatGPT interruption", () => {
                   body: {
                     codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
                     connector_id: "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+                    connector_name: "fedora_t3code",
                     link_id: "link_6ad23eb0b6cc819189b71f055d70599c",
+                    params: {
+                      path: "/asdk_app_6ad23e985b608191984705f0c25f1ba3/link_6ad23eb0b6cc819189b71f055d70599c/bootstrap_thread",
+                      args: { thread_id: "thread" },
+                    },
                     actions: [{ always_allow: { target_message_id: "approval-stopped" } }],
                   },
                 },
@@ -1172,7 +1348,7 @@ describe("ChatGPT interruption", () => {
       expect(stopCompletion).not.toHaveBeenCalled();
       expect(cancelStream).not.toHaveBeenCalled();
       const cancelled = window[Symbol.for("t3.chatgpt.cancelled.v1")] as Set<string>;
-      expect(cancelled.has("request")).toBe(false);
+      expect(cancelled.has("request")).toBe(true);
     });
   });
 
@@ -1243,6 +1419,13 @@ describe("ChatGPT image and project submissions", () => {
     const window: Record<symbol | string, unknown> = {
       [Symbol.for("terminal-mcp.chat-runtime.client.v5")]: client,
     };
+    const storage = new Map<string, string>();
+    Object.assign(window, {
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => { storage.set(key, value); },
+      },
+    });
     class Image {
       naturalWidth = 300;
       naturalHeight = 200;

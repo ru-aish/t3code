@@ -21,7 +21,13 @@ import {
   OrchestrationV2AppThread,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import { ChatGPTSubmissionNotStartedError, type ChatGPTUpdate, type TerminalEvent } from "./connection.ts";
+import {
+  ChatGPTSubmissionNotStartedError,
+  type ChatGPTUpdate,
+  type TerminalEvent,
+} from "./connection.ts";
+
+const decodeThreadProjection = Schema.decodeUnknownEffect(OrchestrationV2ThreadProjection);
 
 const fakes = vi.hoisted(() => ({
   failNextSend: false,
@@ -49,6 +55,7 @@ const fakes = vi.hoisted(() => ({
     state: string;
     conversationId: string | null;
     conversationReads: number;
+    resumeRequests: Array<string | undefined>;
     conversationFailures: number;
     onConversationRead?: () => void;
     conversationReadGate?: Promise<void>;
@@ -156,7 +163,9 @@ vi.mock("./connection.ts", () => ({
     get submittedRequestIds() {
       return [...this.sent];
     }
-    async readConversation() {
+    readonly resumeRequests: Array<string | undefined> = [];
+    async readConversation(resumeRequestId?: string) {
+      this.resumeRequests.push(resumeRequestId);
       this.conversationReads++;
       this.onConversationRead?.();
       await this.conversationReadGate;
@@ -244,6 +253,7 @@ const fixture = Effect.gen(function* () {
       refresh: Effect.sync(refreshMcp),
     }),
   );
+  const refreshThread = vi.fn((): Effect.Effect<void> => Effect.void);
   const adapter = makeChatGPTAdapter(
     {
       instanceId: selection.instanceId,
@@ -259,7 +269,7 @@ const fixture = Effect.gen(function* () {
       attachMcp,
       // Production recovery persists through the Refresh service first. Keep the
       // unit harness on that path so local reconciliation cannot silently drift.
-      refreshThread: () => Effect.void,
+      refreshThread,
     },
   );
   const session = yield* adapter.openSession({
@@ -325,6 +335,7 @@ const fixture = Effect.gen(function* () {
     adapter,
     attachMcp,
     refreshMcp,
+    refreshThread,
     turnInput,
     session,
     events,
@@ -425,43 +436,129 @@ describe("ChatGPT task authority", () => {
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runCollect,
         );
-        expect(recorded.findLast((event) => event.type === "message.updated")?.message.text).toBe("Recovered final answer");
+        expect(recorded.findLast((event) => event.type === "message.updated")?.message.text).toBe(
+          "Recovered final answer",
+        );
         expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
         expect(fake.sent).toEqual([requestId]);
         expect(fake.stops).toBe(0);
         expect(fake.conversationReads).toBe(1);
+        expect(fake.resumeRequests).toEqual([requestId]);
+        for (const [status, message] of [
+          ["running", "ChatGPT stream interrupted. Recovering this turn."],
+          ["completed", "ChatGPT output recovered."],
+        ])
+          expect(recorded).toContainEqual(
+            expect.objectContaining({
+              type: "turn_item.updated",
+              turnItem: expect.objectContaining({ type: "system_notice", status, message }),
+            }),
+          );
         expect(session.providerSessionId).toBe(ProviderSessionId.make("test-session"));
       }),
     ),
   );
 
+  it.live("reuses the snapshot when Refresh reconciles through the live actor", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, events, fake, requestId, refreshThread, turnInput } = yield* fixture;
+        const projection = yield* decodeThreadProjection({
+          thread: turnInput.appThread,
+          runs: [],
+          attempts: [],
+          nodes: [],
+          subagents: [],
+          providerSessions: [],
+          providerThreads: [],
+          providerTurns: [],
+          runtimeRequests: [],
+          messages: [],
+          plans: [],
+          turnItems: [],
+          checkpointScopes: [],
+          checkpoints: [],
+          contextHandoffs: [],
+          contextTransfers: [],
+          visibleTurnItems: [],
+          updatedAt: turnInput.appThread.updatedAt,
+        });
+        refreshThread.mockImplementation(() =>
+          session
+            .readThreadSnapshot({
+              providerThread: turnInput.providerThread,
+              existingProjection: projection,
+            })
+            .pipe(Effect.asVoid, Effect.orDie),
+        );
+        fake.callback?.({ kind: "error", requestId, conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "system_notice" &&
+              event.turnItem.message ===
+                "Conversation state recovered; waiting for ChatGPT to finish.",
+          ),
+          Stream.runDrain,
+        );
+        expect(fake.conversationReads).toBe(1);
+        expect(fake.resumeRequests).toEqual([requestId]);
+      }),
+    ),
+  );
+
+  it.effect("does not start recovery for an idle thread after a connection change", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId, refreshThread } = yield* fixture;
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* TestClock.adjust("1 minute");
+        expect(refreshThread).not.toHaveBeenCalled();
+        expect(fake.conversationReads).toBe(0);
+      }),
+    ),
+  );
+
   it.effect("waits through a runtime outage beyond the forced-completion deadline", () =>
-    Effect.scoped(Effect.gen(function* () {
-      const { events, fake, requestId } = yield* fixture;
-      yield* Queue.take(events);
-      const acknowledged = Promise.withResolvers<void>();
-      const read = Promise.withResolvers<void>();
-      fake.onDoneAcknowledged = () => acknowledged.resolve();
-      fake.onConversationRead = () => read.resolve();
-      fake.conversationFailures = 100;
-      fake.publish(terminal("state", "done"));
-      yield* Effect.promise(() => acknowledged.promise);
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* Effect.promise(() => read.promise);
-      yield* TestClock.adjust("4 minutes");
-      expect(fake.stops).toBe(0);
-      expect(fake.sent).toEqual([requestId]);
-      expect(yield* Queue.size(events)).toBe(0);
-      fake.conversationFailures = 0;
-      fake.idle = true;
-      fake.state = "done";
-      yield* TestClock.adjust("30 seconds");
-      const recovered = yield* Stream.fromQueue(events).pipe(
-        Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect,
-      );
-      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
-      expect(fake.stops).toBe(0);
-    })).pipe(Effect.provide(TestClock.layer())),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const acknowledged = Promise.withResolvers<void>();
+        const read = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.onConversationRead = () => read.resolve();
+        fake.conversationFailures = 100;
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Effect.promise(() => read.promise);
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "turn_item.updated",
+          turnItem: { type: "system_notice", status: "running" },
+        });
+        yield* TestClock.adjust("4 minutes");
+        expect(fake.stops).toBe(0);
+        expect(fake.sent).toEqual([requestId]);
+        expect(yield* Queue.size(events)).toBe(0);
+        fake.conversationFailures = 0;
+        fake.idle = true;
+        fake.state = "done";
+        yield* TestClock.adjust("30 seconds");
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(fake.stops).toBe(0);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("refreshes a still-running native generation again instead of sending continue", () =>
