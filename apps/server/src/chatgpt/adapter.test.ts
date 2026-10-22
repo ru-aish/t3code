@@ -238,7 +238,7 @@ const fixture = Effect.gen(function* () {
     cwd: "/tmp",
   };
   const refreshMcp = vi.fn();
-  const attachMcp = vi.fn(() =>
+  const attachMcp = vi.fn<Parameters<typeof makeChatGPTAdapter>[1]["attachMcp"]>(() =>
     Effect.succeed({
       command: "test-orchestration-command",
       refresh: Effect.sync(refreshMcp),
@@ -357,6 +357,31 @@ const terminalTool = (
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("keeps inline handoff support when the orchestration bridge is unavailable", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { adapter, attachMcp, turnInput } = yield* fixture;
+        attachMcp.mockImplementation(() => Effect.succeed(undefined));
+        const session = yield* adapter.openSession({
+          threadId: turnInput.threadId,
+          providerSessionId: ProviderSessionId.make("session-without-bridge"),
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        const providerThread = yield* session.ensureThread({
+          threadId: turnInput.threadId,
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        yield* session.startTurn({ ...turnInput, providerThread });
+        const fake = fakes.connections.at(-1)!;
+        expect(fake.sent).toEqual([turnInput.message.messageId]);
+        expect(fake.options.orchestrationCommand).toBeUndefined();
+        expect(session.contextHandoffDelivery).toBeUndefined();
+      }),
+    ),
+  );
+
   it.live("recovers a resumed thread's native identity from its registered conversation", () =>
     Effect.scoped(
       Effect.gen(function* () {

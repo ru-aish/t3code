@@ -1563,7 +1563,7 @@ export const makeChatGPTAdapter = (
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromQueue(events),
-          contextHandoffDelivery: "reference",
+          ...(orchestration === undefined ? {} : { contextHandoffDelivery: "reference" as const }),
           ensureThread,
           resumeThread: ({ providerThread }) =>
             Effect.sync(() => {

@@ -23,6 +23,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly budget: number | Effect.Effect<number, BudgetError>;
     readonly referenceOnly?: boolean;
+    readonly preservesLocalHistory?: boolean;
     readonly deferInline?: boolean;
     readonly alreadyDeliveredItemIds: ReadonlySet<string>;
     readonly inject?: (
@@ -32,10 +33,12 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
   }) {
     const nativeThreadId = input.providerThread.nativeThreadRef?.nativeId ?? undefined;
     const pending = input.handoffs.filter((handoff) => {
-      // Provider-managed conversations already own their local history, even
-      // when the app has not recovered their native conversation ID yet.
+      // Reusing an app row does not prove a replaced native conversation owns
+      // its history. Explicit recovery transfers must remain discoverable on retry.
       if (
         input.referenceOnly &&
+        input.preservesLocalHistory &&
+        handoff.transferId == null &&
         (handoff.strategy === "full_thread_summary" ||
           handoff.strategy === "delta_since_target_last_seen") &&
         handoff.threadId === input.providerThread.appThreadId &&

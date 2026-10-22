@@ -653,6 +653,7 @@ export const layer: Layer.Layer<
           return undefined;
         });
       let effectiveHandoffs = handoffs;
+      let nativeConversationReplaced = requiresFreshNative;
       const loadedProviderThread = yield* Effect.gen(function* () {
         if (nativeForkTransfer !== undefined) {
           const sourceProjection = yield* projectionStore.getThreadRecords(
@@ -693,7 +694,7 @@ export const layer: Layer.Layer<
           );
         }
         if (providerThread.nativeThreadRef === null) {
-          if (session.contextHandoffDelivery === "reference" && !requiresFreshNative) {
+          if (session.driver === "chatgpt" && !requiresFreshNative) {
             return yield* loadFromProvider(
               session.resumeThread({
                 providerThread,
@@ -761,6 +762,7 @@ export const layer: Layer.Layer<
             : uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
           errorTag: resumed.failure._tag,
         });
+        nativeConversationReplaced = true;
         const replacement = yield* loadFromProvider(
           session.ensureThread({
             threadId: projection.thread.id,
@@ -1179,6 +1181,7 @@ export const layer: Layer.Layer<
           const delivery = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
             referenceOnly: session.contextHandoffDelivery === "reference",
+            preservesLocalHistory: !nativeConversationReplaced && sameNativeThread,
             deferInline: compact,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {

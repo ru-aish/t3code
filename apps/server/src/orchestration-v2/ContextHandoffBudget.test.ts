@@ -2,6 +2,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { assert, describe, it } from "@effect/vitest";
 import {
   ContextHandoffId,
+  ContextTransferId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -503,6 +504,7 @@ describe("handoff delivery", () => {
           ],
           providerThread: { ...providerThread, nativeThreadRef },
           referenceOnly: true,
+          preservesLocalHistory: true,
           budget: Effect.die("The provider manages its existing conversation budget"),
           alreadyDeliveredItemIds: new Set<string>(),
           persist: () => Effect.die("Existing conversation history must not be replayed"),
@@ -524,6 +526,81 @@ describe("handoff delivery", () => {
       }).pipe(Effect.flip);
       assert.equal(error._tag, "ContextHandoffBudgetError");
     }),
+  );
+
+  it.effect(
+    "keeps a recovery reference when the native conversation changes on the same app row",
+    () =>
+      Effect.gen(function* () {
+        const result = yield* deliverContextHandoffs({
+          handoffs: [{ ...handoff, fromProviderThreadIds: [providerThread.id] }],
+          providerThread: {
+            ...providerThread,
+            nativeThreadRef: { ...providerThread.nativeThreadRef!, nativeId: "native:replacement" },
+          },
+          referenceOnly: true,
+          preservesLocalHistory: false,
+          budget: Effect.die("Recovery references must not budget the old transcript"),
+          alreadyDeliveredItemIds: new Set<string>(),
+          persist: () => Effect.void,
+        });
+        assert.include(result.context, "t3_thread_read");
+        assert.include(result.context, threadId);
+        assert.notInclude(result.context, messages[0]!.text);
+      }),
+  );
+
+  it.effect(
+    "retains explicit recovery references across retries of a replacement conversation",
+    () =>
+      Effect.gen(function* () {
+        for (const nativeThreadRef of [
+          null,
+          { ...providerThread.nativeThreadRef!, nativeId: "native:replacement" },
+        ]) {
+          let durable = handoff;
+          durable = {
+            ...handoff,
+            transferId: ContextTransferId.make("transfer:native-recovery"),
+            fromProviderThreadIds: [providerThread.id],
+          };
+          const input = {
+            providerThread: { ...providerThread, nativeThreadRef },
+            referenceOnly: true,
+            budget: Effect.die("Recovery references must not budget the old transcript"),
+            alreadyDeliveredItemIds: new Set<string>(),
+            persist: (value: OrchestrationV2ContextHandoff) =>
+              Effect.sync(() => {
+                durable = value;
+              }),
+          };
+          const first = yield* deliverContextHandoffs({
+            ...input,
+            handoffs: [durable],
+            preservesLocalHistory: false,
+          });
+          assert.include(first.context, "t3_thread_read");
+          yield* first.unsent;
+          const retry = yield* deliverContextHandoffs({
+            ...input,
+            handoffs: [durable],
+            preservesLocalHistory: true,
+          });
+          assert.include(retry.context, "t3_thread_read");
+          assert.notInclude(retry.context, messages[0]!.text);
+          yield* retry.delivered;
+          if (nativeThreadRef !== null) {
+            assert.equal(durable.delivery?.nativeThreadId, nativeThreadRef.nativeId);
+            assert.equal(durable.delivery?.status, "inline");
+            const settled = yield* deliverContextHandoffs({
+              ...input,
+              handoffs: [durable],
+              preservesLocalHistory: true,
+            });
+            assert.equal(settled.context, "");
+          }
+        }
+      }),
   );
 
   it.effect("references imported history without replaying outputs or reading native usage", () =>
