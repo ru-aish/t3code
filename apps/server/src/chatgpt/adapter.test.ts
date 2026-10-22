@@ -29,6 +29,7 @@ const fakes = vi.hoisted(() => ({
   failNextStop: false,
   failNextPause: false,
   failNextReset: false,
+  nextConversationId: null as string | null,
   connections: [] as Array<{
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
@@ -79,11 +80,15 @@ vi.mock("./connection.ts", () => ({
     readonly options: { orchestrationCommand?: string | undefined };
     constructor(options: { orchestrationCommand?: string | undefined }) {
       this.options = options;
+      this.conversationId = fakes.nextConversationId;
+      fakes.nextConversationId = null;
       fakes.connections.push(this);
     }
     async load() {}
     close() {}
-    async adoptConversation() {}
+    async adoptConversation(conversationId: string) {
+      this.conversationId = conversationId;
+    }
     async resetNativeConversation() {
       if (fakes.failNextReset) {
         fakes.failNextReset = false;
@@ -115,7 +120,7 @@ vi.mock("./connection.ts", () => ({
       return {
         thread_id: "test-thread",
         terminal_id: "test-thread",
-        conversation_id: null,
+        conversation_id: this.conversationId,
         epoch: this.epoch,
         state: this.state,
         paused: 0,
@@ -233,7 +238,7 @@ const fixture = Effect.gen(function* () {
     cwd: "/tmp",
   };
   const refreshMcp = vi.fn();
-  const attachMcp = vi.fn(() =>
+  const attachMcp = vi.fn<Parameters<typeof makeChatGPTAdapter>[1]["attachMcp"]>(() =>
     Effect.succeed({
       command: "test-orchestration-command",
       refresh: Effect.sync(refreshMcp),
@@ -317,6 +322,7 @@ const fixture = Effect.gen(function* () {
   };
   yield* session.startTurn(turnInput);
   return {
+    adapter,
     attachMcp,
     refreshMcp,
     turnInput,
@@ -351,6 +357,64 @@ const terminalTool = (
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("keeps inline handoff support when the orchestration bridge is unavailable", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { adapter, attachMcp, turnInput } = yield* fixture;
+        attachMcp.mockImplementation(() => Effect.succeed(undefined));
+        const session = yield* adapter.openSession({
+          threadId: turnInput.threadId,
+          providerSessionId: ProviderSessionId.make("session-without-bridge"),
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        const providerThread = yield* session.ensureThread({
+          threadId: turnInput.threadId,
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        yield* session.startTurn({ ...turnInput, providerThread });
+        const fake = fakes.connections.at(-1)!;
+        expect(fake.sent).toEqual([turnInput.message.messageId]);
+        expect(fake.options.orchestrationCommand).toBeUndefined();
+        expect(session.contextHandoffDelivery).toBeUndefined();
+      }),
+    ),
+  );
+
+  it.live("recovers a resumed thread's native identity from its registered conversation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { adapter, turnInput } = yield* fixture;
+        fakes.nextConversationId = "existing-chatgpt-conversation";
+        const session = yield* adapter.openSession({
+          threadId: turnInput.threadId,
+          providerSessionId: ProviderSessionId.make("restored-session"),
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        const restored = yield* session.resumeThread({
+          providerThread: { ...turnInput.providerThread, nativeThreadRef: null },
+        });
+        expect(restored.id).toBe(turnInput.providerThread.id);
+        expect(restored.nativeThreadRef?.nativeId).toBe("existing-chatgpt-conversation");
+      }),
+    ),
+  );
+
+  it.live("retains the connection's conversation when resuming a row with no native ID", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake, session, turnInput } = yield* fixture;
+        fake.conversationId = "cached-chatgpt-conversation";
+        const resumed = yield* session.resumeThread({
+          providerThread: { ...turnInput.providerThread, nativeThreadRef: null },
+        });
+        expect(resumed.nativeThreadRef?.nativeId).toBe("cached-chatgpt-conversation");
+      }),
+    ),
+  );
+
   it.live("automatically refreshes a lost stream without submitting or stopping work", () =>
     Effect.scoped(
       Effect.gen(function* () {

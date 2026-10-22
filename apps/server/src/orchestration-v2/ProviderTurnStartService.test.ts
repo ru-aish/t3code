@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -610,6 +611,83 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect(
+  "sends only the current ChatGPT message despite stale local handoffs and usage",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({ text: "continue" });
+      const projection = harness.projection();
+      const run = projection.runs.at(-1)!;
+      const providerThread = {
+        ...projection.providerThreads.at(-1)!,
+        driver: ProviderDriverKind.make("chatgpt"),
+        contextUsage: { usedTokens: 1_000_000, maxTokens: 128_000 },
+      };
+      harness.setProjection({
+        ...projection,
+        providerThreads: [providerThread],
+        contextHandoffs: [
+          {
+            id: ContextHandoffId.make("stale-chatgpt-handoff"),
+            threadId: projection.thread.id,
+            targetRunId: run.id,
+            fromProviderThreadIds: [providerThread.id],
+            toProviderThreadId: providerThread.id,
+            coveredRunOrdinals: { from: 1, to: 1 },
+            strategy: "full_thread_summary",
+            status: "ready",
+            summaryMessageId: null,
+            summaryText: "Old command output".repeat(20_000),
+            createdByProviderInstanceId: providerThread.providerInstanceId,
+            createdAt: run.requestedAt,
+            updatedAt: run.requestedAt,
+          },
+        ],
+      });
+      const sent: string[] = [];
+      harness.open.mockImplementation(() =>
+        Effect.succeed({
+          driver: providerThread.driver,
+          providerSession: {
+            id: providerThread.providerSessionId!,
+            driver: providerThread.driver,
+            providerInstanceId: providerThread.providerInstanceId,
+            status: "ready",
+            cwd: "/tmp/native-account-command",
+            model: null,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: run.requestedAt,
+            updatedAt: run.requestedAt,
+            lastError: null,
+          },
+          contextHandoffDelivery: "reference",
+          ensureThread: () => Effect.succeed(providerThread),
+          resumeThread: () => Effect.succeed(providerThread),
+          startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            Effect.sync(() => {
+              sent.push(input.message.text);
+            }),
+        } as never),
+      );
+      harness.startRootRun.mockImplementation((input) =>
+        input.session
+          .startTurn({
+            ...input,
+            threadId: input.appThread.id,
+            runId: input.run.id,
+            runOrdinal: input.run.ordinal,
+            rootNodeId: input.rootNode.id,
+          })
+          .pipe(Effect.orDie),
+      );
+
+      yield* harness.start;
+
+      expect(sent).toEqual(["continue"]);
+      expect(harness.projection().runs.at(-1)?.status).toBe("running");
+    }),
+);
 
 effectIt.effect.each(["cleanup-first", "startup-first"])(
   "coordinates provider startup with %s",
