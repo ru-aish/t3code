@@ -791,30 +791,32 @@ export function normalizeStreamMessage(
           for (let index = emphasis.length - 1; index >= 0 && remaining > 0; index--) {
             const opener = emphasis[index]!;
             if (opener.char !== char) continue;
-            // CommonMark's rule of three disallows certain mixed open/close
-            // delimiter pairs even when both runs are otherwise flanking.
-            if (
-              char !== "~" &&
-              (opener.canClose || canOpen) &&
-              (opener.count + remaining) % 3 === 0 &&
-              (opener.count % 3 !== 0 || remaining % 3 !== 0)
-            )
-              continue;
-            const used =
-              char === "~"
-                ? opener.count >= 2 && remaining >= 2
-                  ? 2
-                  : 0
-                : opener.count >= 2 && remaining >= 2
-                  ? 2
-                  : 1;
-            if (used === 0) continue;
-            if (opener.beforeCard) closedEarlierOpener = true;
-            opener.count -= used;
-            remaining -= used;
-            // Delimiters nested inside a completed emphasis span become literal;
-            // they must not match a later closer across an independent card.
-            emphasis.splice(index + (opener.count > 0 ? 1 : 0));
+            // A closer can consume multiple pairs from the same opener. Its
+            // leftovers must not match a later closer across an independent card.
+            while (opener.count > 0 && remaining > 0) {
+              // CommonMark's rule of three applies to each residual pair.
+              if (
+                char !== "~" &&
+                (opener.canClose || canOpen) &&
+                (opener.count + remaining) % 3 === 0 &&
+                (opener.count % 3 !== 0 || remaining % 3 !== 0)
+              )
+                break;
+              const used =
+                char === "~"
+                  ? opener.count >= 2 && remaining >= 2
+                    ? 2
+                    : 0
+                  : opener.count >= 2 && remaining >= 2
+                    ? 2
+                    : 1;
+              if (used === 0) break;
+              if (opener.beforeCard) closedEarlierOpener = true;
+              opener.count -= used;
+              remaining -= used;
+              // Unmatched nested delimiters inside a completed span are literal.
+              emphasis.splice(index + (opener.count > 0 ? 1 : 0));
+            }
           }
         }
         if (canOpen && remaining >= (char === "~" ? 2 : 1))

@@ -1142,6 +1142,15 @@ describe("ChatGPT bounded static DIL card preservation", () => {
     expect(normalize(content)).toContain("t3-card");
   });
 
+  it("consumes completed emphasis runs before considering a later card", () => {
+    for (const content of [
+      "***a***b\n" + card + "\nc*",
+      "**a\n" + card + "\na****b****",
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
   it("does not read Markdown delimiters from quoted DIL attributes", () => {
     const content = '<box label="[not Markdown" />\n' + card + "\n[Other](https://e.org)";
     expect(normalize(content)).toContain("t3-card");
