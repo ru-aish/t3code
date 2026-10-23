@@ -350,7 +350,7 @@ const fixture = Effect.gen(function* () {
 // Persisted runs retain the first user message while Terminal MCP's continuation
 // IDs are only present in the native submission history.
 const runningProjection = (
-  fixtureValue: Effect.Effect.Success<typeof fixture>,
+  fixtureValue: Effect.Success<typeof fixture>,
   turnItems: ReadonlyArray<unknown> = [],
 ) => {
   const { turnInput } = fixtureValue;
@@ -659,6 +659,29 @@ describe("ChatGPT task authority", () => {
             }),
           }),
         );
+      }),
+    ),
+  );
+
+  it.live("completes a recovered final when Terminal MCP already marked the task done", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        fake.idle = true;
+        fake.recoveredTerminalTools = true;
+        fake.state = "done";
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(recorded.findLast((event) => event.type === "message.updated")?.message.text).toBe(
+          "Recovered final answer",
+        );
+        expect(fake.resumeRequests).toEqual([requestId]);
+        expect(fake.stops).toBe(0);
+        expect(fake.sent).toEqual([requestId]);
       }),
     ),
   );

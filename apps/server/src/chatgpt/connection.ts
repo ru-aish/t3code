@@ -640,7 +640,9 @@ export class ChatGPTConnection {
       const visibleFinal=updates.findLast(message=>message.requestId===requestId&&(!message.channel||message.channel==='final'));
       const complete=head.role==='assistant'&&head.status==='finished_successfully'&&head.endTurn===true&&(!head.channel||head.channel==='final')&&(!head.recipient||head.recipient==='all')&&(!head.hidden||visibleFinal?.status==='finished_successfully');
       if(requestId&&requestId===${JSON.stringify(resumeRequestId)}&&c.conversation_id===${JSON.stringify(conversationId)})await ${this.streamExpression(resumeRequestId ?? "", "{model:c.default_model_slug}", conversationId, true)};
-      return {updates,idle:c.async_status===null,complete,latestRequestId:requestId,usesTerminalTools};
+      // Finished background replies remain UNREAD (4) until viewed in ChatGPT.
+      const idle=c.async_status===null||c.async_status===4;
+      return {updates,idle,complete,latestRequestId:requestId,usesTerminalTools};
     })()`,
       10_000,
     );

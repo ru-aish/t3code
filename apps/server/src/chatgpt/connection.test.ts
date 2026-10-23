@@ -1550,7 +1550,7 @@ describe("ChatGPT image and project submissions", () => {
 });
 
 describe("ChatGPT conversation reconciliation", () => {
-  it("reads one active branch, restores the final answer, and rejects other submissions", async () => {
+  it.each([null, 4])("reconciles the active branch with idle async status %s", async (asyncStatus) => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-refresh-"));
     const connection = new ChatGPTConnection({
       cdpEndpoint: "http://127.0.0.1:9234",
@@ -1562,7 +1562,7 @@ describe("ChatGPT conversation reconciliation", () => {
       cacheDir: directory,
     });
     const snapshot = {
-      async_status: null as string | null,
+      async_status: asyncStatus as string | number | null,
       current_node: "final",
       mapping: {
         user: {
@@ -1644,7 +1644,9 @@ describe("ChatGPT conversation reconciliation", () => {
       snapshot.current_node = "final";
       snapshot.async_status = "running";
       expect(await connection.readCompletion("request")).toBeNull();
-      snapshot.async_status = null;
+      snapshot.async_status = 3;
+      expect(await connection.readCompletion("request")).toBeNull();
+      snapshot.async_status = asyncStatus;
       snapshot.mapping.final.message.end_turn = false;
       expect(await connection.readCompletion("request")).toBeNull();
       snapshot.mapping.final.message.end_turn = true;
