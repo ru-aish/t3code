@@ -2,6 +2,7 @@ import { vi } from "vite-plus/test";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  ChatGPTSettings,
   CommandId,
   ContextTransferId,
   type ChatAttachment,
@@ -48,6 +49,7 @@ import {
 } from "../Adapters/CodexAdapterV2.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
+import { CHATGPT_DRIVER, makeChatGPTAdapter } from "../../chatgpt/adapter.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "../legacy/LegacyV1ThreadImporter.ts";
@@ -69,6 +71,7 @@ import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeChatGPTSettings = Schema.decodeEffect(ChatGPTSettings);
 
 const threadId = ThreadId.make("thread:provider-switch");
 const projectId = ProjectId.make("project:provider-switch");
@@ -113,6 +116,8 @@ function makeTestAdapter(input: {
   readonly initialContextUsage?: OrchestrationV2ProviderThread["contextUsage"];
   readonly getModelContextWindow?: (selection: ModelSelection) => number | undefined;
   readonly canReuseContextUsage?: ProviderAdapter.ProviderAdapterV2SessionRuntime["canReuseContextUsage"];
+  readonly contextHandoffDelivery?: "reference";
+  readonly resumedNativeThreadId?: string;
   readonly tokenUsageByRunOrdinal?: Readonly<
     Record<number, Omit<OrchestrationV2ProviderTurnTokenUsage, "updatedAt">>
   >;
@@ -150,6 +155,9 @@ function makeTestAdapter(input: {
           providerSessionId: sessionInput.providerSessionId,
           providerSession,
           events: Stream.fromPubSub(events),
+          ...(input.contextHandoffDelivery === undefined
+            ? {}
+            : { contextHandoffDelivery: input.contextHandoffDelivery }),
           ...(input.getModelContextWindow === undefined
             ? {}
             : { getModelContextWindow: input.getModelContextWindow }),
@@ -195,7 +203,16 @@ function makeTestAdapter(input: {
                   (yield* Ref.getAndSet(input.failResumeOnce, false)))
               )
                 return yield* unimplemented(input.driver, "simulated native resume failure");
-              return providerThread;
+              return input.resumedNativeThreadId === undefined
+                ? providerThread
+                : {
+                    ...providerThread,
+                    nativeThreadRef: {
+                      driver: input.driver,
+                      nativeId: input.resumedNativeThreadId,
+                      strength: "strong" as const,
+                    },
+                  };
             }),
           ...(input.injectedHistory === undefined
             ? {}
@@ -395,6 +412,168 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
 });
 
 describe("orchestration v2 provider switching", () => {
+  it.live.each(["reference", "inline", "reference-interrupted", "inline-interrupted"] as const)(
+    "returns to ChatGPT with missed context using %s delivery",
+    (scenario) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`chatgpt-return-${scenario}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const chatgptSelection = {
+            instanceId: ProviderInstanceId.make("chatgpt"),
+            model: "gpt-6-thinking",
+          };
+          const referenceOnly = scenario.startsWith("reference");
+          const interrupted = scenario.endsWith("interrupted");
+          const chatgptCapabilities = yield* makeChatGPTAdapter(
+            {
+              instanceId: chatgptSelection.instanceId,
+              displayName: undefined,
+              environment: [],
+              enabled: true,
+              config: yield* decodeChatGPTSettings({}),
+            },
+            {
+              token: "test-token",
+              environmentId: "test-environment",
+              cacheDir: cwd,
+              attachMcp: () => Effect.succeed(undefined),
+            },
+          ).getCapabilities();
+          const registry = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: chatgptSelection.instanceId,
+              driver: CHATGPT_DRIVER,
+              capabilities: chatgptCapabilities,
+              modelSelection: chatgptSelection,
+              responseByRunOrdinal: {},
+              capturedTurns,
+              resumedNativeThreadId: "chatgpt:return-conversation",
+              ...(referenceOnly ? { contextHandoffDelivery: "reference" } : {}),
+              ...(interrupted ? { interruptedRunOrdinals: new Set([1]) } : {}),
+            }),
+            makeTestAdapter({
+              instanceId: CODEX_MODEL_SELECTION.instanceId,
+              driver: CODEX_DRIVER,
+              capabilities: CodexProviderCapabilitiesV2,
+              modelSelection: CODEX_MODEL_SELECTION,
+              responseByRunOrdinal: { 2: "Codex update alpha", 4: "Codex update beta" },
+              capturedTurns,
+            }),
+          ]);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("chatgpt-return:create"),
+              threadId,
+              projectId,
+              title: "ChatGPT return",
+              modelSelection: chatgptSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            });
+            for (const ordinal of [1, 2, 3, 4, 5]) {
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`chatgpt-return:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`chatgpt-return:${ordinal}`),
+                text: `Request ${ordinal}`,
+                attachments: [],
+                modelSelection: ordinal % 2 === 1 ? chatgptSelection : CODEX_MODEL_SELECTION,
+                dispatchMode: { type: "start_immediately" },
+              });
+              yield* orchestrator.streamStoredEvents.pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "run.updated" &&
+                    event.payload.ordinal === ordinal &&
+                    (event.payload.status === "completed" ||
+                      event.payload.status === "interrupted" ||
+                      event.payload.status === "failed"),
+                ),
+                Stream.runHead,
+              );
+              yield* worker.drain();
+            }
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            assert.deepEqual(
+              projection.runs.map((run) => run.status),
+              [
+                interrupted ? "interrupted" : "completed",
+                "completed",
+                "completed",
+                "completed",
+                "completed",
+              ],
+            );
+            assert.lengthOf(projection.providerThreads, 2);
+            assert.equal(
+              projection.runs[0]?.providerThreadId,
+              projection.runs[2]?.providerThreadId,
+            );
+            assert.equal(
+              projection.runs[2]?.providerThreadId,
+              projection.runs[4]?.providerThreadId,
+            );
+            const handoffs = projection.contextHandoffs.filter(
+              (handoff) => handoff.toProviderThreadId === projection.runs[2]?.providerThreadId,
+            );
+            assert.deepEqual(
+              handoffs.map((handoff) => [handoff.strategy, handoff.coveredRunOrdinals]),
+              [
+                ["delta_since_target_last_seen", { from: 2, to: 2 }],
+                ["delta_since_target_last_seen", { from: 4, to: 4 }],
+              ],
+            );
+            assert.deepEqual(
+              handoffs.map((handoff) => handoff.delivery?.status),
+              ["inline", "inline"],
+            );
+            const turns = yield* Ref.get(capturedTurns);
+            assert.lengthOf(turns, 5);
+            for (const [index, update] of [
+              [2, "Codex update alpha"],
+              [4, "Codex update beta"],
+            ] as const) {
+              const text = turns[index]!.text;
+              assert.include(text, "Context handoff (delta_since_target_last_seen)");
+              assert.include(text, `Request ${index + 1}`);
+              if (referenceOnly) {
+                assert.include(text, `t3_thread_read({threadId:"${threadId}"`);
+                assert.notInclude(text, update);
+              } else {
+                assert.include(text, update);
+              }
+            }
+            assert.notInclude(turns[4]!.text, "Codex update alpha");
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `chatgpt-return-${scenario}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: { type: "readOnly" },
+                  },
+                },
+                registry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   it.live.each([
     "compact-native",
     "compact-fallback",
