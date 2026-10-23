@@ -1140,9 +1140,10 @@ describe("ChatGPT task authority", () => {
   it.live("attaches the orchestration command and refreshes credentials before a turn", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { fake, attachMcp, refreshMcp } = yield* fixture;
+        const { fake, attachMcp, refreshMcp, session } = yield* fixture;
         expect(attachMcp).toHaveBeenCalledWith(ThreadId.make("test-thread"), "/tmp/test-chatgpt");
         expect(fake.options.orchestrationCommand).toBe("test-orchestration-command");
+        expect(session.contextHandoffDelivery).toBe("reference");
         expect(refreshMcp).toHaveBeenCalledOnce();
       }),
     ),
