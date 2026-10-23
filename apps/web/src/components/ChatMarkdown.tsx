@@ -158,6 +158,8 @@ import { createIncrementalHighlightedDocument } from "../lib/incrementalHighligh
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { MermaidDiagram } from "./chat/MermaidDiagram";
+import { SafeSvgDiagram } from "./chat/SafeSvgDiagram";
+import { SafeAgentChart } from "./chat/SafeAgentChart";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
@@ -976,19 +978,23 @@ function MarkdownCodeBlock({
   );
 }
 
-function MarkdownMermaidCodeBlock({
+function MarkdownDiagramCodeBlock({
   code,
+  language,
   fenceTitle,
   theme,
   isStreaming,
-  onExpand,
+  sourceLabel,
+  diagram,
   children,
 }: {
   code: string;
+  language: "svg" | "mermaid" | "t3-chart";
   fenceTitle: string | null;
   theme: "light" | "dark";
   isStreaming: boolean;
-  onExpand: (imageUrl: string) => void;
+  sourceLabel: string;
+  diagram: ReactNode;
   children: ReactNode;
 }) {
   const [showCode, setShowCode] = useState(false);
@@ -996,11 +1002,11 @@ function MarkdownMermaidCodeBlock({
   const revealSource = useCallback(() => setShowCode(true), []);
   const sourceRevealRef = useFindRevealRef(revealSource);
   const showDiagram = !showCode && !isStreaming && code.trim().length > 0;
-  const toggleLabel = showCode ? "Show diagram" : "Show code";
+  const toggleLabel = showCode ? sourceLabel : "Show code";
   return (
     <MarkdownCodeBlock
       code={code}
-      language="mermaid"
+      language={language}
       fenceTitle={fenceTitle}
       theme={theme}
       isStreaming={isStreaming}
@@ -1028,6 +1034,73 @@ function MarkdownMermaidCodeBlock({
       }
     >
       {showDiagram ? (
+        <>
+          {diagram}
+          {searching ? (
+            <pre ref={sourceRevealRef} hidden>
+              {code}
+            </pre>
+          ) : null}
+        </>
+      ) : (
+        children
+      )}
+    </MarkdownCodeBlock>
+  );
+}
+
+function MarkdownSvgCodeBlock({
+  code,
+  fenceTitle,
+  theme,
+  isStreaming,
+  children,
+}: {
+  code: string;
+  fenceTitle: string | null;
+  theme: "light" | "dark";
+  isStreaming: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <MarkdownDiagramCodeBlock
+      code={code}
+      language="svg"
+      fenceTitle={fenceTitle}
+      theme={theme}
+      isStreaming={isStreaming}
+      sourceLabel="Show image"
+      diagram={<SafeSvgDiagram source={code} />}
+    >
+      {children}
+    </MarkdownDiagramCodeBlock>
+  );
+}
+
+function MarkdownMermaidCodeBlock({
+  code,
+  fenceTitle,
+  theme,
+  isStreaming,
+  onExpand,
+  children,
+}: {
+  code: string;
+  fenceTitle: string | null;
+  theme: "light" | "dark";
+  isStreaming: boolean;
+  onExpand: (imageUrl: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <MarkdownDiagramCodeBlock
+      code={code}
+      language="mermaid"
+      fenceTitle={fenceTitle}
+      theme={theme}
+      isStreaming={isStreaming}
+      sourceLabel="Show diagram"
+      diagram={
         <RenderErrorBoundary resetKeys={[code, theme]} fallback={children}>
           <Suspense
             fallback={
@@ -1038,16 +1111,11 @@ function MarkdownMermaidCodeBlock({
           >
             <MermaidDiagram source={code} theme={theme} onExpand={onExpand} />
           </Suspense>
-          {searching ? (
-            <pre ref={sourceRevealRef} hidden>
-              {code}
-            </pre>
-          ) : null}
         </RenderErrorBoundary>
-      ) : (
-        children
-      )}
-    </MarkdownCodeBlock>
+      }
+    >
+      {children}
+    </MarkdownDiagramCodeBlock>
   );
 }
 
@@ -3280,6 +3348,33 @@ const CHAT_MARKDOWN_COMPONENTS = {
         </Suspense>
       </RenderErrorBoundary>
     );
+    if (language === "svg") {
+      return (
+        <MarkdownSvgCodeBlock
+          code={codeBlock.code}
+          fenceTitle={fenceTitle}
+          theme={resolvedTheme}
+          isStreaming={isStreaming}
+        >
+          {highlightedCode}
+        </MarkdownSvgCodeBlock>
+      );
+    }
+    if (language === "t3-chart") {
+      return (
+        <MarkdownDiagramCodeBlock
+          code={codeBlock.code}
+          language="t3-chart"
+          fenceTitle={fenceTitle}
+          theme={resolvedTheme}
+          isStreaming={isStreaming}
+          sourceLabel="Show chart"
+          diagram={<SafeAgentChart source={codeBlock.code} />}
+        >
+          {highlightedCode}
+        </MarkdownDiagramCodeBlock>
+      );
+    }
     if (language === "mermaid") {
       return (
         <MarkdownMermaidCodeBlock
