@@ -472,12 +472,18 @@ function isClosedCodeFence(node: ReactMarkdownExtraProps["node"], text: string):
   // unlock an incomplete code fence while the surrounding reply streams.
   const opening = /^(?: {0,3}>[ \t]?)* {0,3}(`{3,}|~{3,})/.exec(source)?.[1];
   const lastLine = source.slice(source.lastIndexOf("\n") + 1);
-  const closing = /^(?: {0,3}>[ \t]?)* {0,3}(`{3,}|~{3,})[ \t\r]*$/.exec(lastLine)?.[1];
+  // The opening position skips list nesting indentation, but the closing
+  // line retains it. Allow that container indent plus at most three spaces.
+  const openingLineStart = text.lastIndexOf("\n", start - 1) + 1;
+  const containerIndent = / *$/.exec(text.slice(openingLineStart, start))?.[0].length ?? 0;
+  const closingMatch = /^(?: {0,3}>[ \t]?)*([ \t]*)(`{3,}|~{3,})[ \t\r]*$/.exec(lastLine);
+  const closing = closingMatch?.[2];
   return (
     opening !== undefined &&
     closing !== undefined &&
     opening[0] === closing[0] &&
-    closing.length >= opening.length
+    closing.length >= opening.length &&
+    (closingMatch?.[1].length ?? 0) <= containerIndent + 3
   );
 }
 

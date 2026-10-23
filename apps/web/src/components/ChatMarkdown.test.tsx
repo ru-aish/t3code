@@ -332,6 +332,23 @@ describe("Closed-fence streaming visual previews", () => {
     );
     expect(document.querySelector('[aria-label="SVG illustration"]')).not.toBeNull();
   });
+
+  it("previews a closed fence indented within a nested list while streaming", () => {
+    const source = [
+      "  - A nested illustration",
+      "",
+      "    " + backticks + "svg",
+      '    <svg xmlns="http://www.w3.org/2000/svg"/>',
+      "    " + backticks,
+      "",
+      "More text still streaming",
+    ].join("\n");
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={source} isStreaming />),
+      "text/html",
+    );
+    expect(document.querySelector('[aria-label="SVG illustration"]')).not.toBeNull();
+  });
 });
 
 describe("ChatMarkdown bare anchor placeholders", () => {
