@@ -558,6 +558,410 @@ export function normalizeStreamMessage(
     }
     return snapshots;
   }
+  // Preserve a narrow, declarative subset of cards as data. No DIL callbacks,
+  // JavaScript expressions, attributes or nested components are interpreted.
+  function staticCardSnapshots(
+    source: string,
+  ): Array<{ json: string; start: number; end: number }> {
+    if (!source.includes("<card>") || source.length > 500_000) return [];
+    const literals = markdownLiteralRanges(source);
+    const cdataRanges: Span[] = [];
+    // Tokenize markup before detecting raw blocks or card ownership. This
+    // rejects escaped delimiters and ignores tag-like strings in attributes.
+    const markupStarts = new Set<number>();
+    let markupAt = 0;
+    let markupCount = 0;
+    while (markupAt < source.length) {
+      const at = source.indexOf("<", markupAt);
+      if (at < 0) break;
+      markupAt = at + 1;
+      if (inRanges(literals, at)) continue;
+      let slashes = 0;
+      for (let i = at - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+      if (slashes % 2 === 1) continue;
+      if (source.startsWith("<![CDATA[", at)) {
+        if (++markupCount > 4_000) return [];
+        const close = source.indexOf("]]>", at + 9);
+        const end = close < 0 ? source.length : close + 3;
+        cdataRanges.push({ start: at, end });
+        markupAt = end;
+        continue;
+      }
+      if (source.startsWith("<!--", at)) {
+        if (++markupCount > 4_000) return [];
+        markupStarts.add(at);
+        const close = source.indexOf("-->", at + 4);
+        markupAt = close < 0 ? source.length : close + 3;
+        continue;
+      }
+      const opener = /^<\/?[A-Za-z][A-Za-z0-9:-]*(?=[\s/>])/.exec(source.slice(at, at + 80));
+      if (!opener) continue;
+      if (++markupCount > 4_000) return [];
+      let quote: string | null = null;
+      let end = -1;
+      for (let i = at + opener[0].length; i < source.length && i - at <= 4_096; i++) {
+        const ch = source[i];
+        if (quote) {
+          if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") {
+          end = i + 1;
+          break;
+        } else if (ch === "<") break;
+      }
+      if (end < 0) return [];
+      markupStarts.add(at);
+      markupAt = end;
+    }
+    const protectedRaw: Span[] = [];
+    const rawOpen = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b/g;
+    let raw: RegExpExecArray | null;
+    while ((raw = rawOpen.exec(source))) {
+      if (!markupStarts.has(raw.index)) continue;
+      if (raw[0] !== "<!--") {
+        let quote: string | null = null;
+        let openingEnd = -1;
+        for (let i = rawOpen.lastIndex; i < source.length; i++) {
+          const ch = source[i];
+          if (quote) {
+            if (ch === quote) quote = null;
+          } else if (ch === '"' || ch === "'") quote = ch;
+          else if (ch === ">") {
+            openingEnd = i + 1;
+            break;
+          } else if (ch === "<") break;
+        }
+        if (openingEnd < 0) {
+          protectedRaw.push({ start: raw.index, end: source.length });
+          break;
+        }
+        rawOpen.lastIndex = openingEnd;
+        if (/\/\s*>$/.test(source.slice(raw.index, openingEnd))) {
+          // Self-closing raw nodes own only their opening tag.
+          protectedRaw.push({ start: raw.index, end: openingEnd });
+          continue;
+        }
+      }
+      const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
+      let closeAt = source.indexOf(closing, rawOpen.lastIndex);
+      if (raw[0] !== "<!--") {
+        // A closing marker inside another tag's attribute or Markdown escape
+        // cannot terminate a raw block.
+        while (closeAt >= 0 && !markupStarts.has(closeAt)) {
+          closeAt = source.indexOf(closing, closeAt + 1);
+        }
+      }
+      const end = closeAt < 0 ? source.length : closeAt + closing.length;
+      protectedRaw.push({ start: raw.index, end });
+      rawOpen.lastIndex = end;
+    }
+    const protectedRanges = mergeRanges([...literals, ...cdataRanges, ...protectedRaw]);
+    // Scan all markup once. Card-like tokens inside other tags' quoted
+    // attributes are data, not actual opening or closing tags.
+    const nested = new Set<number>();
+    const invalidRoots = new Set<number>();
+    const actualCardOpenings = new Set<number>();
+    const markupRanges: Span[] = [];
+    const stack: Array<{ name: string; start: number }> = [];
+    // A raw HTML/DIL parent changes the meaning of a contained card, even
+    // when the parent is not itself a card. Track every non-void element.
+    const voidTags = new Set([
+      "area",
+      "base",
+      "br",
+      "col",
+      "embed",
+      "hr",
+      "img",
+      "input",
+      "link",
+      "meta",
+      "param",
+      "source",
+      "track",
+      "wbr",
+    ]);
+    let tagCount = 0;
+    let scanAt = 0;
+    while (scanAt < source.length) {
+      const at = source.indexOf("<", scanAt);
+      if (at < 0) break;
+      scanAt = at + 1;
+      if (inRanges(protectedRanges, at) || !markupStarts.has(at)) continue;
+      const opener = /^<\/?[A-Za-z][A-Za-z0-9:-]*/.exec(source.slice(at, at + 80));
+      if (!opener) continue;
+      if (++tagCount > 4_000) return [];
+      let quote: string | null = null;
+      let end = -1;
+      for (let i = at + opener[0].length; i < source.length && i - at <= 4_096; i++) {
+        const ch = source[i];
+        if (quote) {
+          if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") {
+          end = i + 1;
+          break;
+        } else if (ch === "<") break;
+      }
+      if (end < 0) return [];
+      markupRanges.push({ start: at, end });
+      scanAt = end;
+      const name = opener[0].replace(/^<\/?/, "").toLowerCase();
+      if (opener[0].startsWith("</")) {
+        // An unmatched closer must not pop an unrelated enclosing element.
+        if (stack[stack.length - 1]?.name === name) stack.pop();
+        continue;
+      }
+      const selfClosing = /\/\s*>$/.test(source.slice(at, end)) || voidTags.has(name);
+      if (name === "card" && !selfClosing) {
+        actualCardOpenings.add(at);
+        if (stack.length) {
+          nested.add(at);
+          for (const parent of stack) {
+            if (parent.name === "card") invalidRoots.add(parent.start);
+          }
+        }
+      }
+      if (!selfClosing) stack.push({ name, start: at });
+    }
+    for (const open of stack) {
+      if (open.name === "card") invalidRoots.add(open.start);
+    }
+
+    const inlineIgnoredRanges = mergeRanges([...protectedRanges, ...markupRanges]);
+
+    // A physical line boundary is not necessarily a Markdown block boundary:
+    // link labels and emphasis can continue on the next line. Only promote a
+    // card when no inline delimiter from the containing paragraph owns it.
+    function insideMultilineInline(start: number): boolean {
+      const lookBehind = Math.max(0, start - 8_192);
+      const paragraph = source.slice(lookBehind, start);
+      const lines = paragraph.split("\n");
+      let from = lookBehind;
+      let offset = lookBehind;
+      for (const line of lines.slice(0, -1)) {
+        const next = offset + line.length + 1;
+        if (
+          !line.trim() ||
+          /^ {0,3}#{1,6}(?:[ \t]|$)/.test(line) ||
+          /^ {0,3}(?:=+|-+)[ \t]*$/.test(line) ||
+          /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(line)
+        ) {
+          from = next;
+        }
+        offset = next;
+      }
+      // If the containing paragraph exceeds the bounded look-behind, leave
+      // the card as source rather than guess at unmatched opener ownership.
+      if (from === lookBehind && lookBehind > 0 && source[lookBehind - 1] !== "\n") {
+        return true;
+      }
+      let bracketDepth = 0;
+      const emphasis: Array<{
+        char: string;
+        count: number;
+        canClose: boolean;
+        beforeCard: boolean;
+      }> = [];
+      const isPunctuation = (char: string): boolean => /[\p{P}\p{S}]/u.test(char);
+      const flanking = (at: number, end: number, char: string) => {
+        const before = source[at - 1] ?? " ";
+        const after = source[end] ?? " ";
+        const left =
+          !/\s/.test(after) &&
+          (!isPunctuation(after) || /\s/.test(before) || isPunctuation(before));
+        const right =
+          !/\s/.test(before) &&
+          (!isPunctuation(before) || /\s/.test(after) || isPunctuation(after));
+        return {
+          canOpen: char === "_" ? left && (!right || isPunctuation(before)) : left,
+          canClose: char === "_" ? right && (!left || isPunctuation(after)) : right,
+        };
+      };
+      const consumeEmphasis = (
+        char: string,
+        count: number,
+        canOpen: boolean,
+        canClose: boolean,
+        beforeCard: boolean,
+      ): boolean => {
+        let remaining = count;
+        let closedEarlierOpener = false;
+        if (canClose) {
+          for (let index = emphasis.length - 1; index >= 0 && remaining > 0; index--) {
+            const opener = emphasis[index]!;
+            if (opener.char !== char) continue;
+            // A closer can consume multiple pairs from the same opener. Its
+            // leftovers must not match a later closer across an independent card.
+            while (opener.count > 0 && remaining > 0) {
+              // CommonMark's rule of three applies to each residual pair.
+              if (
+                char !== "~" &&
+                (opener.canClose || canOpen) &&
+                (opener.count + remaining) % 3 === 0 &&
+                (opener.count % 3 !== 0 || remaining % 3 !== 0)
+              )
+                break;
+              const used =
+                char === "~"
+                  ? opener.count >= 2 && remaining >= 2
+                    ? 2
+                    : 0
+                  : opener.count >= 2 && remaining >= 2
+                    ? 2
+                    : 1;
+              if (used === 0) break;
+              if (opener.beforeCard) closedEarlierOpener = true;
+              opener.count -= used;
+              remaining -= used;
+              // Unmatched nested delimiters inside a completed span are literal.
+              emphasis.splice(index + (opener.count > 0 ? 1 : 0));
+            }
+          }
+        }
+        if (canOpen && remaining >= (char === "~" ? 2 : 1))
+          emphasis.push({ char, count: remaining, canClose, beforeCard });
+        return closedEarlierOpener;
+      };
+      for (let i = from; i < start; i++) {
+        if (inRanges(inlineIgnoredRanges, i)) continue;
+        const char = source[i]!;
+        if (char === "\\") {
+          i++;
+          continue;
+        }
+        if (char === "[") bracketDepth++;
+        else if (char === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+        if (char !== "*" && char !== "_" && char !== "~") continue;
+        let end = i + 1;
+        while (end < start && source[end] === char) end++;
+        const run = source.slice(i, end);
+        if (char === "~" && run.length !== 2) {
+          i = end - 1;
+          continue;
+        }
+        const { canOpen, canClose } = flanking(i, end, char);
+        consumeEmphasis(char, run.length, canOpen, canClose, true);
+        i = end - 1;
+      }
+      // Only a delimiter with a closing continuation after the candidate
+      // establishes inline ownership. A literal '[' or '*' in ordinary text,
+      // an escaped CDATA sample or a quoted attribute must not hide a root card.
+      const candidateEnd = source.indexOf("</card>", start + 6);
+      if (candidateEnd < 0) return false;
+      const tailStart = candidateEnd + "</card>".length;
+      const continuation = source.slice(tailStart, Math.min(source.length, tailStart + 4_096));
+      const blank = /\n[ \t]*\n/.exec(continuation);
+      const tailEnd = tailStart + (blank?.index ?? continuation.length);
+      for (let i = tailStart; i < tailEnd; i++) {
+        if (inRanges(inlineIgnoredRanges, i)) continue;
+        const char = source[i]!;
+        if (char === "\\") {
+          i++;
+          continue;
+        }
+        if (bracketDepth > 0 && char === "]") {
+          let linkAt = i + 1;
+          while (linkAt < tailEnd && /\s/.test(source[linkAt]!)) linkAt++;
+          if (
+            linkAt < tailEnd &&
+            !inRanges(inlineIgnoredRanges, linkAt) &&
+            (source[linkAt] === "(" || source[linkAt] === "[")
+          )
+            return true;
+        }
+        if (char === "*" || char === "_" || char === "~") {
+          let end = i + 1;
+          while (end < tailEnd && source[end] === char) end++;
+          if (char !== "~" || end - i === 2) {
+            const { canOpen, canClose } = flanking(i, end, char);
+            if (consumeEmphasis(char, end - i, canOpen, canClose, false)) return true;
+          }
+          i = end - 1;
+        }
+      }
+      return false;
+    }
+
+    // CommonMark lazy continuation lines can belong to a quoted/listed
+    // paragraph even without a marker or indentation.
+    const containerCardStarts = new Set<number>();
+    let quotedOrListedParagraph = false;
+    let fenced: { marker: string; length: number } | null = null;
+    let lineStart = 0;
+    while (lineStart < source.length) {
+      const newline = source.indexOf("\n", lineStart);
+      const end = newline < 0 ? source.length : newline;
+      const line = source.slice(lineStart, end);
+      // A heading, blank line or completed fence inside a quote cannot
+      // lazily continue a paragraph on the following unquoted line.
+      const quoteContent = line.replace(/^ {0,3}(?:>[ \t]?)+/, "");
+      if (fenced) {
+        const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(quoteContent);
+        if (closing && closing[1]![0] === fenced.marker && closing[1]!.length >= fenced.length)
+          fenced = null;
+        quotedOrListedParagraph = false;
+      } else {
+        const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(quoteContent);
+        if (opening && (opening[1]![0] === "~" || !opening[2]!.includes("`"))) {
+          fenced = { marker: opening[1]![0]!, length: opening[1]!.length };
+          quotedOrListedParagraph = false;
+        } else if (!quoteContent.trim()) {
+          quotedOrListedParagraph = false;
+        } else {
+          const marker = /^ {0,3}(?:>[ \t]?|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line);
+          const interrupt = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(quoteContent);
+          if (interrupt) quotedOrListedParagraph = false;
+          else if (marker) quotedOrListedParagraph = true;
+          else if (quotedOrListedParagraph && line.startsWith("<card>"))
+            containerCardStarts.add(lineStart);
+        }
+      }
+      if (newline < 0) break;
+      lineStart = end + 1;
+    }
+    const cards: Array<{ json: string; start: number; end: number }> = [];
+    const opening = /<card>/g;
+    let match: RegExpExecArray | null;
+    let attempts = 0;
+    while ((match = opening.exec(source)) && cards.length < 6 && ++attempts <= 40) {
+      const start = match.index;
+      if (
+        inRanges(protectedRanges, start) ||
+        !actualCardOpenings.has(start) ||
+        nested.has(start) ||
+        invalidRoots.has(start) ||
+        containerCardStarts.has(start) ||
+        insideMultilineInline(start)
+      )
+        continue;
+      // Avoid promoting Markdown list or blockquote content to a root card.
+      if (source.lastIndexOf("\n", start - 1) + 1 !== start) continue;
+      const closing = source.indexOf("</card>", opening.lastIndex);
+      if (closing < 0 || closing - opening.lastIndex > 4_000) continue;
+      const end = closing + "</card>".length;
+      if (intersectsRanges(protectedRanges, start, end)) continue;
+      const inside = source.slice(opening.lastIndex, closing);
+      if (/<\/?card\b/.test(inside) || /[{}]/.test(inside)) continue;
+      const items: Array<{ kind: string; value: string }> = [];
+      const item = /\s*<(title|text|caption|badge)>([^<>]{1,600})<\/\1>/gy;
+      let cursor = 0;
+      while (cursor < inside.length && items.length <= 12) {
+        item.lastIndex = cursor;
+        const found = item.exec(inside);
+        if (!found) break;
+        const value = found[2]!.trim();
+        if (value) items.push({ kind: found[1]!, value });
+        cursor = item.lastIndex;
+      }
+      if (items.length === 0 || items.length > 12 || inside.slice(cursor).trim()) continue;
+      const json = JSON.stringify({ items });
+      if (json.length > 4_000) continue;
+      cards.push({ json, start, end });
+      opening.lastIndex = end;
+    }
+    return cards;
+  }
   const charts = isFinal ? chartSnapshots(originalText) : [];
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
@@ -644,6 +1048,15 @@ export function normalizeStreamMessage(
         table.markdown +
         "\n\n" +
         displayText.slice(table.end);
+    }
+    for (const card of staticCardSnapshots(displayText).toReversed()) {
+      let ticks = 2;
+      for (const match of card.json.matchAll(/`+/g)) ticks = Math.max(ticks, match[0].length);
+      const fence = "`".repeat(ticks + 1);
+      displayText =
+        displayText.slice(0, card.start) +
+        `\n\n${fence}t3-card\n${card.json}\n${fence}\n\n` +
+        displayText.slice(card.end);
     }
   }
   if (

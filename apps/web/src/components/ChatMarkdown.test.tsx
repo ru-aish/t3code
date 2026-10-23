@@ -161,6 +161,45 @@ describe("ChatGPT static table Markdown preview", () => {
   });
 });
 
+describe("ChatGPT static card Markdown preview", () => {
+  const text = [
+    "Before.",
+    "",
+    "```t3-card",
+    JSON.stringify({
+      items: [
+        { kind: "title", value: "Deploy complete" },
+        { kind: "badge", value: "Passed" },
+        { kind: "text", value: "All 8 checks passed" },
+      ],
+    }),
+    "```",
+    "",
+    "After.",
+  ].join("\n");
+
+  it("renders a safe card between surrounding prose", () => {
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />),
+      "text/html",
+    );
+    const card = document.querySelector("section[aria-labelledby]");
+    expect(card).not.toBeNull();
+    expect(card?.querySelector("h3")?.textContent).toBe("Deploy complete");
+    expect(card?.textContent).toContain("All 8 checks passed");
+    expect(document.body.textContent).toContain("Before.");
+    expect(document.body.textContent).toContain("After.");
+  });
+
+  it("does not preview cards while still streaming", () => {
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming />),
+      "text/html",
+    );
+    expect(document.querySelector("section[aria-labelledby]")).toBeNull();
+  });
+});
+
 describe("ChatMarkdown bare anchor placeholders", () => {
   it.each(["<A>", "<a>", "<a >", "<a/>", "<A/>", "<a />"])(
     "preserves unmatched %s without linking later blocks",
@@ -1300,7 +1339,7 @@ it.each([
   { text: ARTIFACT_TEMPLATE_DIRECTIVE, query: "Use template", count: 0, useTemplate: true },
 ])(
   "highlights the indexed occurrences of $query in $text",
-  async ({ text, query, count, lineBreaks, user, useTemplate }) => {
+  async ({ text, query, count, lineBreaks, user, useTemplate: shouldUseTemplate }) => {
     const skills = [{ name: "test-t3-app", displayName: "T3 App Testing" }];
     const highlights = new Map<string, Set<Range>>();
     vi.stubGlobal(
@@ -1334,7 +1373,7 @@ it.each([
                 skills={skills}
                 lineBreaks={lineBreaks ?? false}
                 parseRawHtml={!user}
-                onUseArtifactTemplate={useTemplate ? () => undefined : undefined}
+                onUseArtifactTemplate={shouldUseTemplate ? () => undefined : undefined}
               />
             </MarkdownFindContext>
           </div>

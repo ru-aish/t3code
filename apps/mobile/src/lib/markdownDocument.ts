@@ -2,6 +2,7 @@ import type { Root, RootContent } from "mdast";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
+import { decodeNamedCharacterReference } from "decode-named-character-reference";
 
 const parser = unified().use(remarkParse).use(remarkGfm);
 export type MarkdownNode = Root | RootContent;
@@ -15,30 +16,15 @@ function decodeCodePoint(codePoint: number, entity: string): string {
 
 function decodeHtmlEntities(value: string): string {
   return value.replace(
-    /&(?:#(\d+)|#x([0-9a-f]+)|amp|apos|gt|lt|nbsp|quot);/gi,
-    (entity, decimal: string | undefined, hexadecimal: string | undefined) => {
+    /&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]+));/gi,
+    (entity, decimal: string | undefined, hexadecimal: string | undefined, named: string) => {
       if (decimal) {
         return decodeCodePoint(Number.parseInt(decimal, 10), entity);
       }
       if (hexadecimal) {
         return decodeCodePoint(Number.parseInt(hexadecimal, 16), entity);
       }
-      switch (entity.toLowerCase()) {
-        case "&amp;":
-          return "&";
-        case "&apos;":
-          return "'";
-        case "&gt;":
-          return ">";
-        case "&lt;":
-          return "<";
-        case "&nbsp;":
-          return "\u00a0";
-        case "&quot;":
-          return '"';
-        default:
-          return entity;
-      }
+      return decodeNamedCharacterReference(named) || entity;
     },
   );
 }
@@ -137,6 +123,69 @@ export function markdownWithHtml(markdown: string): string {
   visit(parser.parse(markdown));
   for (const edit of edits.reverse())
     markdown = markdown.slice(0, edit.start) + edit.content + markdown.slice(edit.end);
+  return markdown;
+}
+
+function escapeCardText(value: string): string {
+  const text = decodeHtmlEntities(value.replace(/\s*[\r\n]+\s*/g, " "));
+  // GFM auto-links plain URLs even when link punctuation is escaped. Code spans
+  // retain their visible text without creating interactive destinations.
+  if (/https?:\/\/|www\.|@/i.test(text)) {
+    let length = 1;
+    for (const run of text.matchAll(/\x60+/g)) length = Math.max(length, run[0].length + 1);
+    const fence = "\x60".repeat(length);
+    // Padding keeps edge backticks from merging with the generated delimiter.
+    return fence + " " + text + " " + fence;
+  }
+  // Native md4c discards entity tokens; backslash-escape their decoded
+  // characters to keep card text visible without creating HTML or links.
+  return text.replace(/([\\\x60*_{}[\]()#+\-.!|~&<>])/g, "\\$1");
+}
+
+/** Mobile has no t3-card renderer; preserve its short, inert content as readable Markdown. */
+export function markdownWithStaticCards(markdown: string): string {
+  // Only a line-start code-fence candidate warrants parsing the whole document.
+  if (
+    markdown.length > 500_000 ||
+    !/(?:^|[\r\n]) {0,3}(?:`{3,}|~{3,})[ \t]*t3-card(?=[ \t\r\n]|$)/.test(markdown)
+  )
+    return markdown;
+  const edits: Array<{ start: number; end: number; content: string }> = [];
+  for (const node of parser.parse(markdown).children) {
+    if (node.type !== "code" || node.lang !== "t3-card" || node.value.length > 4_000) continue;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start === undefined || end === undefined) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(node.value);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const items = (parsed as Record<string, unknown>).items;
+    if (!Array.isArray(items) || items.length === 0 || items.length > 12) continue;
+    const lines: string[] = [];
+    for (const item of items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) break;
+      const { kind, value } = item as Record<string, unknown>;
+      if (
+        (kind !== "title" && kind !== "text" && kind !== "caption" && kind !== "badge") ||
+        typeof value !== "string" ||
+        !value.trim() ||
+        value.length > 600
+      )
+        break;
+      const safe = escapeCardText(value.trim());
+      lines.push(kind === "title" ? "### " + safe : kind === "badge" ? "**" + safe + "**" : safe);
+    }
+    if (lines.length !== items.length) continue;
+    edits.push({ start, end, content: "\n\n" + lines.join("\n\n") + "\n\n" });
+  }
+  for (let index = edits.length - 1; index >= 0; index--) {
+    const edit = edits[index]!;
+    markdown = markdown.slice(0, edit.start) + edit.content + markdown.slice(edit.end);
+  }
   return markdown;
 }
 

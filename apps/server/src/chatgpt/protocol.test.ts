@@ -930,9 +930,7 @@ describe("ChatGPT static DIL table preservation", () => {
     expect(normalize("<CodeBlock data-test='x > y'>" + source + "</CodeBlock>")).not.toContain(
       "| Month | Sales |",
     );
-    expect(normalize("<CodeBlock>literal</CodeBlock>\n" + source)).toContain(
-      "| Month | Sales |",
-    );
+    expect(normalize("<CodeBlock>literal</CodeBlock>\n" + source)).toContain("| Month | Sales |");
   });
 
   it("never promotes a nested table inside unsupported outer table markup", () => {
@@ -1016,5 +1014,315 @@ describe("ChatGPT static DIL table preservation", () => {
     expect(result.indexOf("```t3-chart")).toBeGreaterThan(result.indexOf("Middle"));
     expect(result.lastIndexOf("| Month | Sales |")).toBeGreaterThan(result.indexOf("```t3-chart"));
     expect(result.indexOf("After")).toBeGreaterThan(result.lastIndexOf("| Month | Sales |"));
+  });
+});
+
+describe("ChatGPT bounded static DIL card preservation", () => {
+  const card =
+    "<card><title>Build status</title><badge>Passed</badge><text>All checks passed</text><caption>Verified today</caption></card>";
+  const normalize = (content: string, fallback?: string) =>
+    normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [content] },
+        ...(fallback === undefined
+          ? {}
+          : { metadata: { model_dil_v2: { fallbackMarkdown: fallback } } }),
+      },
+    }).text ?? "";
+
+  it("preserves a complete static card in original prose order", () => {
+    const output = normalize(`Before\n${card}\nAfter`);
+    expect(output).toContain("```t3-card\n");
+    expect(output).toContain('"kind":"title","value":"Build status"');
+    expect(output).not.toContain("<card>");
+    expect(output.indexOf("Before")).toBeLessThan(output.indexOf("t3-card"));
+    expect(output.indexOf("After")).toBeGreaterThan(output.indexOf('"Verified today"'));
+  });
+
+  it("does not duplicate cards from the official fallback", () => {
+    const output = normalize(card, "Build status: all checks passed.");
+    expect(output).toBe("Build status: all checks passed.");
+  });
+
+  it("preserves fenced and inline code, comments and raw application blocks", () => {
+    for (const content of [
+      "```xml\n" + card + "\n```",
+      "`" + card + "`",
+      "<!--\n" + card + "\n-->",
+      '<AppBlock language="html">\n' + card + "\n</AppBlock>",
+      '<CodeBlock language="xml">\n' + card + "\n</CodeBlock>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("rejects unsupported props, nesting, dynamic and malformed cards", () => {
+    for (const content of [
+      "<card padding={3}><title>Hello</title></card>",
+      "<card><title>{danger()}</title></card>",
+      "<card><title>A</title><card><title>B</title></card></card>",
+      "<card><title>Unclosed",
+      "<card><text>Hello</text><button onClick={()=>evil()}>Act</button></card>",
+      "> <card><title>Quoted</title></card>",
+      "- <card><title>Nested list</title></card>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("chooses a safe fence when a card contains backtick runs", () => {
+    const output = normalize("<card><title>Command ``` copy</title></card>");
+    expect(output).toContain("````t3-card\n");
+  });
+
+  it("does not promote a complete card inside an unclosed outer card", () => {
+    const output = normalize("<card>missing closing\n" + card);
+    expect(output).not.toContain("t3-card");
+  });
+
+  it("does not promote nested cards inside unsupported outer card markup", () => {
+    for (const outer of [
+      "<card padding={3}>\n" + card + "\n</card>",
+      '<card label="quoted > and < markup">\n' + card + "\n</card>",
+      "<card>\n" + card + "\n</card>",
+    ]) {
+      expect(normalize(outer)).not.toContain("t3-card");
+    }
+  });
+
+  it("does not treat card-looking tokens inside quoted attributes as real markup", () => {
+    for (const content of [
+      '<card padding={3}>\n<box label="</card>">\n' + card + "\n</box>\n</card>",
+      '<box label="\n' + card + '\n">\nUnrelated text\n</box>',
+      '<card padding={3}>\n<box label="<card>">\n' + card + "\n</box>\n</card>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("does not extract multiline Markdown link labels, image descriptions or emphasis", () => {
+    for (const content of [
+      "[See the deployment\n" + card + "\nlog](https://example.org/log)",
+      "![Screenshot\n" + card + "\nalt text](https://example.org/image.png)",
+      "Read **important details\n" + card + "\nbefore deploying**.",
+      "Read *important details\n" + card + "\nbefore deploying*.",
+      "Read ~~obsolete details\n" + card + "\nbefore deploying~~.",
+      "[Nested [link](https://example.org)\n" + card + "\ntext](https://example.org)",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("keeps cards inside emphasis with longer closing delimiter runs", () => {
+    for (const [opening, closing] of [
+      ["*", "***"],
+      ["**", "***"],
+      ["**", "****"],
+      ["_", "___"],
+      ["__", "___"],
+    ]) {
+      const content =
+        "Read " + opening + "important details\n" + card + "\nbefore deploying" + closing + ".";
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("respects CommonMark's rule of three before promoting a card from emphasis", () => {
+    const content = "x*a**\n" + card + "\nb*";
+    expect(normalize(content)).not.toContain("t3-card");
+    // A complete emphasis span before a new root block does not own the card.
+    expect(normalize("x*a*\n\n" + card)).toContain("t3-card");
+  });
+
+  it("does not match orphaned inner emphasis delimiters across a separate card", () => {
+    // The outer *...* closes before the card; the inner ** is literal text.
+    const content = "*a**a*\n" + card + "\nb**";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
+  it("consumes completed emphasis runs before considering a later card", () => {
+    for (const content of [
+      "***a***b\n" + card + "\nc*",
+      "**a\n" + card + "\na****b****",
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("does not read Markdown delimiters from quoted DIL attributes", () => {
+    const content = '<box label="[not Markdown" />\n' + card + "\n[Other](https://e.org)";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
+  it("does not mistake intraword underscores for emphasis around a card", () => {
+    const content = "Variable snake_case\n" + card + "\nnew_item";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
+  it("does not close multiline links with escaped or literal Markdown", () => {
+    for (const ending of ["ending \\](url)", "ending `literal ](url)`", "ending <!-- ](url) -->"]) {
+      expect(normalize("[Plain note\n" + card + "\n" + ending)).toContain("t3-card");
+    }
+  });
+
+  it("recognizes setext headings as boundaries for preceding emphasis", () => {
+    const content = "Unmatched **heading\n===\n" + card + "\nafter**";
+    expect(normalize(content)).toContain("t3-card");
+  });
+
+  it("keeps cards inside partially consumed and long emphasis openers", () => {
+    for (const content of [
+      "***bold**\n" + card + "\ntail*",
+      "****bold\n" + card + "\ntail****",
+      "****bold***\n" + card + "\ntail*",
+      "**bold*\n" + card + "\ntail*",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+    expect(normalize("****Done****\n" + card)).toContain("t3-card");
+  });
+
+  it("still extracts a separate card after completed inline formatting", () => {
+    for (const content of [
+      "**Completed**\n" + card,
+      "[Completed](https://example.org)\n" + card,
+      "## Completed *heading\n" + card,
+      "<!-- [Unclosed comment -->\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("does not promote cards in lazy Markdown blockquote/list continuations", () => {
+    for (const text of [
+      "> A code-review quotation\n" + card,
+      "- A list item\n" + card,
+      "1. First numbered item\n" + card,
+      "> First quoted line\nsecond lazy line\n" + card,
+      "- First item\nplain lazy continuation\n" + card,
+    ]) {
+      expect(normalize(text)).not.toContain("t3-card");
+    }
+  });
+
+  it("allows top-level cards after blank or interrupting heading boundaries", () => {
+    for (const content of [
+      "> Quoted paragraph\n\n" + card,
+      "- List item\n\n" + card,
+      "> Quoted paragraph\n# New heading\n" + card,
+      "Intro paragraph\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("ignores escaped closing card delimiters when tracking parent ownership", () => {
+    for (const content of [
+      "<card padding={3}>\n\\</card>\n" + card + "\n</card>",
+      "<card padding={3}>\n\\\\\\</card>\n" + card + "\n</card>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("does not treat quoted or escaped raw-block markers as real comments", () => {
+    for (const content of [
+      '<box label="<!--">Ignored</box>\n' + card,
+      '<box label="<CodeBlock>">Ignored</box>\n' + card,
+      '<box label="<WritingBlock>">Ignored</box>\n' + card,
+      "\\<!-- Escaped comment\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("does not terminate raw blocks on closing tags embedded in attributes", () => {
+    for (const content of [
+      '<CodeBlock language="text">\n<box label="</CodeBlock>">\n' + card + "\n</box>\n</CodeBlock>",
+      '<WritingBlock>\n<box label="</WritingBlock>">\n' + card + "\n</box>\n</WritingBlock>",
+      "<AppBlock>\n\\</AppBlock>\n" + card + "\n</AppBlock>",
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("ends lazy list or blockquote ownership across fenced code blocks", () => {
+    for (const content of [
+      "- A list item\n```js\nconsole.log(1)\n```\n" + card,
+      "> A quote\n~~~js\nconsole.log(1)\n~~~\n" + card,
+      "1. A numbered item\n````js\nconsole.log(1)\n````\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("promotes root cards after completed quoted headings and quoted fences", () => {
+    for (const content of [
+      "> # Done\n" + card,
+      "> ## Heading\n" + card,
+      "> ```js\n> console.log(1)\n> ```\n" + card,
+      "> ~~~\n> source\n> ~~~\n" + card,
+    ]) {
+      expect(normalize(content)).toContain("t3-card");
+    }
+  });
+
+  it("keeps card markup inside unsupported HTML and DIL parents inert", () => {
+    for (const content of [
+      "<div>\n" + card + "\n</div>",
+      "<section>\n" + card + "\n</section>",
+      "<box>\n" + card + "\n</box>",
+      "<row>\n" + card + "\n</row>",
+      "<div>\n<article>\n" + card + "\n</article>\n</div>",
+      "<div>\n" + card,
+    ]) {
+      expect(normalize(content)).not.toContain("t3-card");
+    }
+  });
+
+  it("retains independent cards after self-closing raw components and HTML", () => {
+    for (const before of [
+      "<CodeBlock />",
+      '<CodeBlock language="typescript" />',
+      "<WritingBlock />",
+      "<AppBlock />",
+      '<escape char="\\\\">\u003c/escape>\u0020',
+      "<escape />",
+      "<div />",
+      "<br>",
+    ]) {
+      expect(normalize(before + "\n" + card)).toContain("t3-card");
+    }
+  });
+
+  it("keeps cards inside XML CDATA literal and preserves following root cards", () => {
+    for (const text of [
+      "<![CDATA[\n" + card + "\n]]>",
+      "<![CDATA[" + card + "]]>",
+      "<![CDATA[\n" + card,
+    ]) {
+      expect(normalize(text)).not.toContain("t3-card");
+    }
+    const independent = "<![CDATA[\n" + card + "\n]]>\n" + card;
+    expect(normalize(independent).match(/t3-card/g)).toHaveLength(1);
+  });
+
+  it("does not treat escaped or quoted CDATA markers as a real section", () => {
+    for (const before of ['<box label="<![CDATA[">ignored</box>', "\\<![CDATA[ literal string"]) {
+      expect(normalize(before + "\n" + card)).toContain("t3-card");
+    }
+  });
+
+  it("still renders independent cards after a completed invalid card", () => {
+    const output = normalize("<card padding={2}><title>Unsupported</title></card>\n" + card);
+    expect(output.match(/t3-card/g)).toHaveLength(1);
+    expect(output).toContain('"value":"Build status"');
+  });
+
+  it("rejects excessive static card content", () => {
+    const longCard = "<card><text>" + "x".repeat(700) + "</text></card>";
+    expect(normalize(longCard)).not.toContain("t3-card");
   });
 });
