@@ -21,7 +21,13 @@ import {
   OrchestrationV2AppThread,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import { ChatGPTSubmissionNotStartedError, type ChatGPTUpdate, type TerminalEvent } from "./connection.ts";
+import {
+  ChatGPTSubmissionNotStartedError,
+  type ChatGPTUpdate,
+  type TerminalEvent,
+} from "./connection.ts";
+
+const decodeThreadProjection = Schema.decodeUnknownEffect(OrchestrationV2ThreadProjection);
 
 const fakes = vi.hoisted(() => ({
   failNextSend: false,
@@ -30,6 +36,7 @@ const fakes = vi.hoisted(() => ({
   failNextPause: false,
   failNextReset: false,
   nextConversationId: null as string | null,
+  nextSubmittedIds: null as string[] | null,
   connections: [] as Array<{
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
@@ -49,6 +56,7 @@ const fakes = vi.hoisted(() => ({
     state: string;
     conversationId: string | null;
     conversationReads: number;
+    resumeRequests: Array<string | undefined>;
     conversationFailures: number;
     onConversationRead?: () => void;
     conversationReadGate?: Promise<void>;
@@ -82,6 +90,8 @@ vi.mock("./connection.ts", () => ({
       this.options = options;
       this.conversationId = fakes.nextConversationId;
       fakes.nextConversationId = null;
+      if (fakes.nextSubmittedIds) this.sent = [...fakes.nextSubmittedIds];
+      fakes.nextSubmittedIds = null;
       fakes.connections.push(this);
     }
     async load() {}
@@ -156,7 +166,9 @@ vi.mock("./connection.ts", () => ({
     get submittedRequestIds() {
       return [...this.sent];
     }
-    async readConversation() {
+    readonly resumeRequests: Array<string | undefined> = [];
+    async readConversation(resumeRequestId?: string) {
+      this.resumeRequests.push(resumeRequestId);
       this.conversationReads++;
       this.onConversationRead?.();
       await this.conversationReadGate;
@@ -244,6 +256,7 @@ const fixture = Effect.gen(function* () {
       refresh: Effect.sync(refreshMcp),
     }),
   );
+  const refreshThread = vi.fn((): Effect.Effect<void> => Effect.void);
   const adapter = makeChatGPTAdapter(
     {
       instanceId: selection.instanceId,
@@ -259,7 +272,7 @@ const fixture = Effect.gen(function* () {
       attachMcp,
       // Production recovery persists through the Refresh service first. Keep the
       // unit harness on that path so local reconciliation cannot silently drift.
-      refreshThread: () => Effect.void,
+      refreshThread,
     },
   );
   const session = yield* adapter.openSession({
@@ -325,6 +338,7 @@ const fixture = Effect.gen(function* () {
     adapter,
     attachMcp,
     refreshMcp,
+    refreshThread,
     turnInput,
     session,
     events,
@@ -332,6 +346,66 @@ const fixture = Effect.gen(function* () {
     requestId: turnInput.message.messageId,
   };
 });
+
+// Persisted runs retain the first user message while Terminal MCP's continuation
+// IDs are only present in the native submission history.
+const runningProjection = (
+  fixtureValue: Effect.Effect.Success<typeof fixture>,
+  turnItems: ReadonlyArray<unknown> = [],
+) => {
+  const { turnInput } = fixtureValue;
+  const now = turnInput.appThread.updatedAt;
+  return decodeThreadProjection({
+    thread: turnInput.appThread,
+    runs: [
+      {
+        id: turnInput.runId,
+        threadId: turnInput.threadId,
+        ordinal: turnInput.runOrdinal,
+        providerInstanceId: turnInput.modelSelection.instanceId,
+        modelSelection: turnInput.modelSelection,
+        providerThreadId: turnInput.providerThread.id,
+        userMessageId: turnInput.message.messageId,
+        rootNodeId: turnInput.rootNodeId,
+        activeAttemptId: turnInput.attemptId,
+        status: "running",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      },
+    ],
+    attempts: [],
+    nodes: [],
+    subagents: [],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [
+      {
+        id: ProviderTurnId.make(`chatgpt:${turnInput.attemptId}`),
+        providerThreadId: turnInput.providerThread.id,
+        nodeId: turnInput.rootNodeId,
+        runAttemptId: turnInput.attemptId,
+        nativeTurnRef: null,
+        ordinal: turnInput.providerTurnOrdinal,
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      },
+    ],
+    runtimeRequests: [],
+    messages: [],
+    plans: [],
+    turnItems,
+    checkpointScopes: [],
+    checkpoints: [],
+    contextHandoffs: [],
+    contextTransfers: [],
+    visibleTurnItems: [],
+    updatedAt: now,
+  });
+};
 
 const terminal = (kind: string, state?: string, epoch = 1): TerminalEvent => ({
   seq: 1,
@@ -425,73 +499,316 @@ describe("ChatGPT task authority", () => {
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runCollect,
         );
-        expect(recorded.findLast((event) => event.type === "message.updated")?.message.text).toBe("Recovered final answer");
+        expect(recorded.findLast((event) => event.type === "message.updated")?.message.text).toBe(
+          "Recovered final answer",
+        );
         expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
         expect(fake.sent).toEqual([requestId]);
         expect(fake.stops).toBe(0);
         expect(fake.conversationReads).toBe(1);
+        expect(fake.resumeRequests).toEqual([requestId]);
+        for (const [status, message] of [
+          ["running", "ChatGPT stream interrupted. Recovering this turn."],
+          ["completed", "ChatGPT output recovered."],
+        ])
+          expect(recorded).toContainEqual(
+            expect.objectContaining({
+              type: "turn_item.updated",
+              turnItem: expect.objectContaining({ type: "system_notice", status, message }),
+            }),
+          );
         expect(session.providerSessionId).toBe(ProviderSessionId.make("test-session"));
       }),
     ),
   );
 
+  it.live("resumes the latest Terminal continuation after a provider-session restart", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixtureValue = yield* fixture;
+        const { adapter, fake, turnInput, requestId } = fixtureValue;
+        fake.publish(terminal("continue"));
+        yield* Effect.sleep("20 millis");
+        expect(fake.sent).toEqual([requestId, "continue-1"]);
+        const projection = yield* runningProjection(fixtureValue);
+
+        // A native connection reloads its persisted submissions, while the T3
+        // run row still points to its original user message.
+        fakes.nextSubmittedIds = [...fake.sent];
+        const resumed = yield* adapter.openSession({
+          threadId: turnInput.threadId,
+          providerSessionId: ProviderSessionId.make("restarted-after-continue"),
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        const restoredFake = fakes.connections.at(-1)!;
+        yield* resumed.readThreadSnapshot({
+          providerThread: turnInput.providerThread,
+          existingProjection: projection,
+        });
+        expect(restoredFake.resumeRequests).toEqual(["continue-1"]);
+      }),
+    ),
+  );
+
+  it.live("completes the original recovery notice when a continuation finishes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        fake.callback?.({ kind: "error", requestId, conversationId: null });
+        const pending = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "system_notice" &&
+              event.turnItem.status === "running",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const original = pending[0];
+        if (original?.type !== "turn_item.updated") throw new Error("Missing recovery notice");
+        fake.publish(terminal("continue"));
+        yield* Effect.sleep("20 millis");
+        expect(fake.sent).toContain("continue-1");
+        fake.callback?.({
+          kind: "update",
+          requestId: "continue-1",
+          conversationId: null,
+          role: "assistant",
+          channel: "final",
+          messageId: "continued-response",
+          text: "Done after recovery",
+          status: "finished_successfully",
+        });
+        fake.publish(terminal("state", "done"));
+        fake.callback?.({ kind: "complete", requestId: "continue-1", conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded).toContainEqual(
+          expect.objectContaining({
+            type: "turn_item.updated",
+            turnItem: expect.objectContaining({
+              id: original.turnItem.id,
+              ordinal: original.turnItem.ordinal,
+              status: "completed",
+              message: "ChatGPT output recovered.",
+            }),
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.live("settles a persisted recovery notice after replacing the provider session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixtureValue = yield* fixture;
+        const { adapter, events, fake, requestId, turnInput } = fixtureValue;
+        fake.callback?.({ kind: "error", requestId, conversationId: null });
+        const pending = yield* Stream.fromQueue(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "system_notice" &&
+              event.turnItem.status === "running",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        const original = pending[0];
+        if (original?.type !== "turn_item.updated") throw new Error("Missing recovery notice");
+        const projection = yield* runningProjection(fixtureValue, [original.turnItem]);
+
+        fakes.nextSubmittedIds = [requestId];
+        const resumed = yield* adapter.openSession({
+          threadId: turnInput.threadId,
+          providerSessionId: ProviderSessionId.make("restarted-with-recovery-notice"),
+          modelSelection: turnInput.modelSelection,
+          runtimePolicy: turnInput.runtimePolicy,
+        });
+        const restoredFake = fakes.connections.at(-1)!;
+        restoredFake.idle = true;
+        restoredFake.state = "done";
+        const restoredEvents =
+          yield* Queue.unbounded<
+            import("@t3tools/provider-core/server/ProviderAdapter").ProviderAdapterV2Event
+          >();
+        yield* resumed.events.pipe(
+          Stream.runForEach((event) => Queue.offer(restoredEvents, event)),
+          Effect.forkScoped,
+        );
+        yield* resumed.readThreadSnapshot({
+          providerThread: turnInput.providerThread,
+          existingProjection: projection,
+        });
+        const recorded = yield* Stream.fromQueue(restoredEvents).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded).toContainEqual(
+          expect.objectContaining({
+            type: "turn_item.updated",
+            turnItem: expect.objectContaining({
+              id: original.turnItem.id,
+              ordinal: original.turnItem.ordinal,
+              status: "completed",
+              message: "ChatGPT output recovered.",
+            }),
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.live("reuses the snapshot when Refresh reconciles through the live actor", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, events, fake, requestId, refreshThread, turnInput } = yield* fixture;
+        const projection = yield* decodeThreadProjection({
+          thread: turnInput.appThread,
+          runs: [],
+          attempts: [],
+          nodes: [],
+          subagents: [],
+          providerSessions: [],
+          providerThreads: [],
+          providerTurns: [],
+          runtimeRequests: [],
+          messages: [],
+          plans: [],
+          turnItems: [],
+          checkpointScopes: [],
+          checkpoints: [],
+          contextHandoffs: [],
+          contextTransfers: [],
+          visibleTurnItems: [],
+          updatedAt: turnInput.appThread.updatedAt,
+        });
+        refreshThread.mockImplementation(() =>
+          session
+            .readThreadSnapshot({
+              providerThread: turnInput.providerThread,
+              existingProjection: projection,
+            })
+            .pipe(Effect.asVoid, Effect.orDie),
+        );
+        fake.callback?.({ kind: "error", requestId, conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "system_notice" &&
+              event.turnItem.message ===
+                "Conversation state recovered; waiting for ChatGPT to finish.",
+          ),
+          Stream.runDrain,
+        );
+        expect(fake.conversationReads).toBe(1);
+        expect(fake.resumeRequests).toEqual([requestId]);
+      }),
+    ),
+  );
+
+  it.effect("does not start recovery for an idle thread after a connection change", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId, refreshThread } = yield* fixture;
+        fake.callback?.({ kind: "complete", requestId, conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* TestClock.adjust("1 minute");
+        expect(refreshThread).not.toHaveBeenCalled();
+        expect(fake.conversationReads).toBe(0);
+      }),
+    ),
+  );
+
   it.effect("waits through a runtime outage beyond the forced-completion deadline", () =>
-    Effect.scoped(Effect.gen(function* () {
-      const { events, fake, requestId } = yield* fixture;
-      yield* Queue.take(events);
-      const acknowledged = Promise.withResolvers<void>();
-      const read = Promise.withResolvers<void>();
-      fake.onDoneAcknowledged = () => acknowledged.resolve();
-      fake.onConversationRead = () => read.resolve();
-      fake.conversationFailures = 100;
-      fake.publish(terminal("state", "done"));
-      yield* Effect.promise(() => acknowledged.promise);
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* Effect.promise(() => read.promise);
-      yield* TestClock.adjust("4 minutes");
-      expect(fake.stops).toBe(0);
-      expect(fake.sent).toEqual([requestId]);
-      expect(yield* Queue.size(events)).toBe(0);
-      fake.conversationFailures = 0;
-      fake.idle = true;
-      fake.state = "done";
-      yield* TestClock.adjust("30 seconds");
-      const recovered = yield* Stream.fromQueue(events).pipe(
-        Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect,
-      );
-      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
-      expect(fake.stops).toBe(0);
-    })).pipe(Effect.provide(TestClock.layer())),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        yield* Queue.take(events);
+        const acknowledged = Promise.withResolvers<void>();
+        const read = Promise.withResolvers<void>();
+        fake.onDoneAcknowledged = () => acknowledged.resolve();
+        fake.onConversationRead = () => read.resolve();
+        fake.conversationFailures = 100;
+        fake.publish(terminal("state", "done"));
+        yield* Effect.promise(() => acknowledged.promise);
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Effect.promise(() => read.promise);
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "turn_item.updated",
+          turnItem: { type: "system_notice", status: "running" },
+        });
+        yield* TestClock.adjust("4 minutes");
+        expect(fake.stops).toBe(0);
+        expect(fake.sent).toEqual([requestId]);
+        expect(yield* Queue.size(events)).toBe(0);
+        fake.conversationFailures = 0;
+        fake.idle = true;
+        fake.state = "done";
+        yield* TestClock.adjust("30 seconds");
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(fake.stops).toBe(0);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("refreshes a still-running native generation again instead of sending continue", () =>
-    Effect.scoped(Effect.gen(function* () {
-      const { events, fake, requestId } = yield* fixture;
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "message.updated"), Stream.runDrain);
-      expect(fake.stops).toBe(0);
-      expect(fake.sent).toEqual([requestId]);
-      fake.idle = true;
-      yield* TestClock.adjust("1 second");
-      const recovered = yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect);
-      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
-      expect(fake.conversationReads).toBe(2);
-      expect(fake.sent).toEqual([requestId]);
-    })).pipe(Effect.provide(TestClock.layer())),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake, requestId } = yield* fixture;
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "message.updated"),
+          Stream.runDrain,
+        );
+        expect(fake.stops).toBe(0);
+        expect(fake.sent).toEqual([requestId]);
+        fake.idle = true;
+        yield* TestClock.adjust("1 second");
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(fake.conversationReads).toBe(2);
+        expect(fake.sent).toEqual([requestId]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.live("keeps Terminal MCP task authority when recovered history reveals offline tool use", () =>
-    Effect.scoped(Effect.gen(function* () {
-      const { events, fake } = yield* fixture;
-      fake.idle = true;
-      fake.recoveredTerminalTools = true;
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "message.updated"), Stream.runDrain);
-      fake.publish(terminal("state", "done"));
-      const recovered = yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect);
-      expect(fake.controls).not.toContain("pause");
-      expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
-    })),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { events, fake } = yield* fixture;
+        fake.idle = true;
+        fake.recoveredTerminalTools = true;
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "message.updated"),
+          Stream.runDrain,
+        );
+        fake.publish(terminal("state", "done"));
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(fake.controls).not.toContain("pause");
+        expect(recovered.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+      }),
+    ),
   );
 
   it.effect("forces a recovered final whose native status and Terminal task stay stuck", () =>
@@ -529,8 +846,7 @@ describe("ChatGPT task authority", () => {
         fake.onConversationRead = () => read.resolve();
         fake.idle = false;
         fake.recoveredTerminalTools = true;
-        fake.onControl = (action) =>
-          action === "pause" ? new Promise<void>(() => {}) : undefined;
+        fake.onControl = (action) => (action === "pause" ? new Promise<void>(() => {}) : undefined);
         fake.callback?.({ kind: "disconnected", conversationId: null });
         yield* Effect.promise(() => read.promise);
         yield* TestClock.adjust("3 minutes");
@@ -546,42 +862,64 @@ describe("ChatGPT task authority", () => {
   );
 
   it.effect("cancels outage retries even when native Stop fails", () =>
-    Effect.scoped(Effect.gen(function* () {
-      const { session, turnInput, fake, requestId } = yield* fixture;
-      const read = Promise.withResolvers<void>();
-      fake.onConversationRead = () => read.resolve();
-      fake.conversationFailures = 100;
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* Effect.promise(() => read.promise);
-      fakes.failNextStop = true;
-      const stopped = yield* Effect.exit(session.interruptTurn({ providerThread: turnInput.providerThread, providerTurnId: ProviderTurnId.make("chatgpt:attempt") }));
-      expect(stopped._tag).toBe("Failure");
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* TestClock.adjust("4 minutes");
-      expect(fake.conversationReads).toBe(1);
-      expect(fake.sent).toEqual([requestId]);
-    })).pipe(Effect.provide(TestClock.layer())),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, turnInput, fake, requestId } = yield* fixture;
+        const read = Promise.withResolvers<void>();
+        fake.onConversationRead = () => read.resolve();
+        fake.conversationFailures = 100;
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Effect.promise(() => read.promise);
+        fakes.failNextStop = true;
+        const stopped = yield* Effect.exit(
+          session.interruptTurn({
+            providerThread: turnInput.providerThread,
+            providerTurnId: ProviderTurnId.make("chatgpt:attempt"),
+          }),
+        );
+        expect(stopped._tag).toBe("Failure");
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* TestClock.adjust("4 minutes");
+        expect(fake.conversationReads).toBe(1);
+        expect(fake.sent).toEqual([requestId]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.live("drops a restart snapshot that returns after Stop and a replacement turn", () =>
-    Effect.scoped(Effect.gen(function* () {
-      const { session, turnInput, events, fake, requestId } = yield* fixture;
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      fake.onConversationRead = () => entered.resolve();
-      fake.conversationReadGate = release.promise;
-      fake.callback?.({ kind: "disconnected", conversationId: null });
-      yield* Effect.promise(() => entered.promise);
-      yield* session.interruptTurn({ providerThread: turnInput.providerThread, providerTurnId: ProviderTurnId.make("chatgpt:attempt") });
-      yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runDrain);
-      const nextId = MessageId.make("post-outage-replacement");
-      yield* session.startTurn({ ...turnInput, attemptId: RunAttemptId.make("post-outage-attempt"), message: { ...turnInput.message, messageId: nextId } });
-      release.resolve();
-      fake.callback?.({ kind: "complete", requestId: nextId, conversationId: null });
-      const recovered = yield* Stream.fromQueue(events).pipe(Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect);
-      expect(recovered.filter((event) => event.type === "message.updated")).toEqual([]);
-      expect(fake.sent).toEqual([requestId, nextId]);
-    })),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, turnInput, events, fake, requestId } = yield* fixture;
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        fake.onConversationRead = () => entered.resolve();
+        fake.conversationReadGate = release.promise;
+        fake.callback?.({ kind: "disconnected", conversationId: null });
+        yield* Effect.promise(() => entered.promise);
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: ProviderTurnId.make("chatgpt:attempt"),
+        });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        const nextId = MessageId.make("post-outage-replacement");
+        yield* session.startTurn({
+          ...turnInput,
+          attemptId: RunAttemptId.make("post-outage-attempt"),
+          message: { ...turnInput.message, messageId: nextId },
+        });
+        release.resolve();
+        fake.callback?.({ kind: "complete", requestId: nextId, conversationId: null });
+        const recovered = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recovered.filter((event) => event.type === "message.updated")).toEqual([]);
+        expect(fake.sent).toEqual([requestId, nextId]);
+      }),
+    ),
   );
 
   it.live("ignores late output and completion from a steering-interrupted request", () =>
@@ -696,66 +1034,84 @@ describe("ChatGPT task authority", () => {
     ),
   );
 
-  it.live("fences a failed reset and starts the following turn only on the rotated native identity", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const { session, fake, turnInput, requestId, events } = yield* fixture;
-        fake.conversationId = "uncertain-native-conversation";
-        const oldThread = {
-          ...turnInput.providerThread,
-          nativeThreadRef: {
-            driver: turnInput.providerThread.driver,
-            nativeId: "uncertain-native-conversation",
-            strength: "strong" as const,
-          },
-        };
-        const freshRequest = {
-          threadId: turnInput.threadId,
-          modelSelection: turnInput.modelSelection,
-          runtimePolicy: turnInput.runtimePolicy,
-          existingProviderThread: { ...oldThread, nativeThreadRef: null },
-        };
-        // A still-active old submission cannot be reused or rotated.
-        const activeRejection = yield* Effect.flip(session.ensureThread(freshRequest));
-        expect(activeRejection._tag).toBe("ProviderAdapterTurnStartError");
-        expect(fake.controls).not.toContain("reset");
-        fake.callback?.({ kind: "complete", requestId, conversationId: "uncertain-native-conversation" });
-        for (;;) {
-          const event = yield* Queue.take(events);
-          if (event.type === "turn.terminal") break;
-        }
-        fakes.failNextReset = true;
-        const resetRejection = yield* Effect.exit(session.ensureThread(freshRequest));
-        expect(resetRejection._tag).toBe("Failure");
-        expect(fake.conversationId).toBe("uncertain-native-conversation");
-        expect(fake.controls).not.toContain("reset");
-        const replacement = yield* session.ensureThread(freshRequest);
-        expect(replacement.id).toBe(oldThread.id);
-        expect(replacement.nativeThreadRef).toBeNull();
-        expect(fake.controls.filter((control) => control === "reset")).toHaveLength(1);
-        const nextTurn = {
-          ...turnInput,
-          runId: RunId.make("next-run"),
-          runOrdinal: 2,
-          providerTurnOrdinal: 2,
-          attemptId: RunAttemptId.make("next-attempt"),
-          providerThread: replacement,
-          message: { ...turnInput.message, messageId: MessageId.make("next-request"), text: "Continue with restored history" },
-        };
-        yield* session.startTurn(nextTurn);
-        expect(fake.sent).toEqual([requestId, "next-request"]);
-        fake.callback?.({ kind: "complete", requestId, conversationId: "uncertain-native-conversation" });
-        fake.callback?.({ kind: "complete", requestId: "next-request", conversationId: null });
-        const terminalEvents = yield* Stream.fromQueue(events).pipe(
-          Stream.takeUntil((event) => event.type === "turn.terminal" && event.runOrdinal === 2),
-          Stream.runCollect,
-        );
-        expect(terminalEvents.filter((event) => event.type === "turn.terminal").map((event) => event.runOrdinal)).toEqual([2]);
-        const reused = yield* session.ensureThread(freshRequest);
-        expect(reused.id).toBe(replacement.id);
-        expect(fake.controls.filter((control) => control === "reset")).toHaveLength(1);
-      }),
-    ),
+  it.live(
+    "fences a failed reset and starts the following turn only on the rotated native identity",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { session, fake, turnInput, requestId, events } = yield* fixture;
+          fake.conversationId = "uncertain-native-conversation";
+          const oldThread = {
+            ...turnInput.providerThread,
+            nativeThreadRef: {
+              driver: turnInput.providerThread.driver,
+              nativeId: "uncertain-native-conversation",
+              strength: "strong" as const,
+            },
+          };
+          const freshRequest = {
+            threadId: turnInput.threadId,
+            modelSelection: turnInput.modelSelection,
+            runtimePolicy: turnInput.runtimePolicy,
+            existingProviderThread: { ...oldThread, nativeThreadRef: null },
+          };
+          // A still-active old submission cannot be reused or rotated.
+          const activeRejection = yield* Effect.flip(session.ensureThread(freshRequest));
+          expect(activeRejection._tag).toBe("ProviderAdapterTurnStartError");
+          expect(fake.controls).not.toContain("reset");
+          fake.callback?.({
+            kind: "complete",
+            requestId,
+            conversationId: "uncertain-native-conversation",
+          });
+          for (;;) {
+            const event = yield* Queue.take(events);
+            if (event.type === "turn.terminal") break;
+          }
+          fakes.failNextReset = true;
+          const resetRejection = yield* Effect.exit(session.ensureThread(freshRequest));
+          expect(resetRejection._tag).toBe("Failure");
+          expect(fake.conversationId).toBe("uncertain-native-conversation");
+          expect(fake.controls).not.toContain("reset");
+          const replacement = yield* session.ensureThread(freshRequest);
+          expect(replacement.id).toBe(oldThread.id);
+          expect(replacement.nativeThreadRef).toBeNull();
+          expect(fake.controls.filter((control) => control === "reset")).toHaveLength(1);
+          const nextTurn = {
+            ...turnInput,
+            runId: RunId.make("next-run"),
+            runOrdinal: 2,
+            providerTurnOrdinal: 2,
+            attemptId: RunAttemptId.make("next-attempt"),
+            providerThread: replacement,
+            message: {
+              ...turnInput.message,
+              messageId: MessageId.make("next-request"),
+              text: "Continue with restored history",
+            },
+          };
+          yield* session.startTurn(nextTurn);
+          expect(fake.sent).toEqual([requestId, "next-request"]);
+          fake.callback?.({
+            kind: "complete",
+            requestId,
+            conversationId: "uncertain-native-conversation",
+          });
+          fake.callback?.({ kind: "complete", requestId: "next-request", conversationId: null });
+          const terminalEvents = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal" && event.runOrdinal === 2),
+            Stream.runCollect,
+          );
+          expect(
+            terminalEvents
+              .filter((event) => event.type === "turn.terminal")
+              .map((event) => event.runOrdinal),
+          ).toEqual([2]);
+          const reused = yield* session.ensureThread(freshRequest);
+          expect(reused.id).toBe(replacement.id);
+          expect(fake.controls.filter((control) => control === "reset")).toHaveLength(1);
+        }),
+      ),
   );
 
   it.live("attaches the orchestration command and refreshes credentials before a turn", () =>

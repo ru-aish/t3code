@@ -96,7 +96,7 @@ type Cache = {
   messages: Record<string, CachedMessage>;
   dispatches: Record<
     string,
-    { messageId: string; state: "prepared" | "dispatching" | "submitted" }
+    { messageId: string; state: "prepared" | "dispatching" | "submitted"; stopped?: boolean }
   >;
   handledEvents: string[];
 };
@@ -455,7 +455,8 @@ export class ChatGPTConnection {
     if (conversationChanged) this.deliveryBarrier = this.persist().then(() => undefined);
     void this.deliveryBarrier
       .then(() => {
-        if (isCurrent()) this.callback?.(update);
+        if (isCurrent() && (!update.requestId || !this.retiredRequestIds.has(update.requestId)))
+          this.callback?.(update);
       })
       .catch(() => {
         this.callback?.({ kind: "error", conversationId: this.cache.conversationId });
@@ -597,13 +598,19 @@ export class ChatGPTConnection {
   get latestSubmittedRequestId() {
     return this.submittedRequestIds.at(-1);
   }
-  readConversation(): Promise<ConversationSnapshot> {
+  readConversation(resumeRequestId?: string): Promise<ConversationSnapshot> {
+    if (
+      resumeRequestId &&
+      !this.cache.dispatches[resumeRequestId]?.stopped &&
+      !this.retiredRequestIds.has(resumeRequestId)
+    )
+      return this.fetchConversation(resumeRequestId);
     this.snapshotRead ??= this.fetchConversation().finally(() => {
       this.snapshotRead = undefined;
     });
     return this.snapshotRead;
   }
-  private async fetchConversation(): Promise<ConversationSnapshot> {
+  private async fetchConversation(resumeRequestId?: string): Promise<ConversationSnapshot> {
     const conversationId = this.cache.conversationId;
     if (!conversationId) throw new Error("This thread has no ChatGPT conversation yet");
     const requests = Object.fromEntries(
@@ -617,7 +624,7 @@ export class ChatGPTConnection {
       `(async()=>{${rendererDiscovery}
       const r=await resolveClient();const raw=await r.client.get(${JSON.stringify(conversationId)});const c=raw.conversation||raw.data||raw;
       if(!c.mapping||!c.current_node)throw new Error('ChatGPT conversation history is unavailable');
-      const normalize=${normalizeStreamMessage.toString()};const requests=${JSON.stringify(requests)};
+      const normalize=(raw)=>(${normalizeStreamMessage.toString()})(raw,${JSON.stringify(this.options.threadId)});const requests=${JSON.stringify(requests)};
       const nodes=[];const seen=new Set();let key=c.current_node;
       while(key){
         if(seen.has(key)||!c.mapping[key])throw new Error('ChatGPT conversation ancestry is invalid');
@@ -632,6 +639,7 @@ export class ChatGPTConnection {
       }
       const visibleFinal=updates.findLast(message=>message.requestId===requestId&&(!message.channel||message.channel==='final'));
       const complete=head.role==='assistant'&&head.status==='finished_successfully'&&head.endTurn===true&&(!head.channel||head.channel==='final')&&(!head.recipient||head.recipient==='all')&&(!head.hidden||visibleFinal?.status==='finished_successfully');
+      if(requestId&&requestId===${JSON.stringify(resumeRequestId)}&&c.conversation_id===${JSON.stringify(conversationId)})await ${this.streamExpression(resumeRequestId ?? "", "{model:c.default_model_slug}", conversationId, true)};
       return {updates,idle:c.async_status===null,complete,latestRequestId:requestId,usesTerminalTools};
     })()`,
       10_000,
@@ -639,7 +647,7 @@ export class ChatGPTConnection {
   }
   async readCompletion(requestId: string): Promise<ChatGPTUpdate[] | null> {
     if (this.cache.dispatches[requestId]?.state !== "submitted") return null;
-    const snapshot = await this.readConversation();
+    const snapshot = await this.readConversation(requestId);
     if (!snapshot.idle || !snapshot.complete || snapshot.latestRequestId !== requestId) return null;
     return [
       ...snapshot.updates.filter((update) => update.requestId === requestId),
@@ -783,17 +791,61 @@ export class ChatGPTConnection {
       cdp.evaluate<{
         submitted: boolean;
         cancelled?: boolean;
-      }>(`(async()=>{${rendererDiscovery}
+      }>(this.streamExpression(requestId, JSON.stringify(request), existing)),
+    );
+    this.nativeStopBarrier = nativeSubmission.then(
+      () => {},
+      () => {},
+    );
+    const submission = await nativeSubmission;
+    if (submission.cancelled) {
+      delete this.cache.dispatches[requestId];
+      await this.persist();
+      return;
+    }
+    dispatch.state = "submitted";
+    await this.persist();
+  }
+  private streamExpression(
+    requestId: string,
+    initialRequest: string,
+    existing: string | null,
+    recover = false,
+  ) {
+    return `(async()=>{${rendererDiscovery}
       const cancelKey=Symbol.for('t3.chatgpt.cancelled.v1');window[cancelKey] ||= new Set();
-      if(window[cancelKey].has(${JSON.stringify(requestId)})){window[cancelKey].delete(${JSON.stringify(requestId)});return {submitted:false,cancelled:true};}
+      if(window[cancelKey].has(${JSON.stringify(requestId)})){if(!${recover})window[cancelKey].delete(${JSON.stringify(requestId)});return {submitted:false,cancelled:true};}
       const key=Symbol.for('t3.chatgpt.streams.v1');window[key] ||= new Map();
-      const initialRequest=${JSON.stringify(request)};
-      const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true,pendingApprovals:new Map(),attemptedApprovals:new Set(),segment:0,transitioning:false,observedFinal:false};
+      const initialRequest=${initialRequest};
+      const approvalKey=${JSON.stringify("t3.chatgpt.approvals.v1:" + this.options.threadId)};
+      let saved=null;
+      try{saved=JSON.parse(window.localStorage?.getItem(approvalKey)||'null');}
+      catch{if(${recover})throw new Error('Cannot verify prior ChatGPT approval submissions');}
+      const attempted=new Set(saved?.requestId===${JSON.stringify(requestId)}&&saved.conversationId===${JSON.stringify(existing)}&&Array.isArray(saved.messageIds)?saved.messageIds:[]);
+      const previous=window[key].get(${JSON.stringify(this.options.threadId)});
+      if(${recover}){
+        if(previous){
+          if(previous.requestId!==${JSON.stringify(requestId)}||previous.conversationId!==${JSON.stringify(existing)})return {submitted:false};
+          previous.binding=${JSON.stringify(this.binding)};
+          if(typeof previous.resumeCompletion==='function'){
+            await previous.resumeCompletion(c);
+            return {submitted:false};
+          }
+          const approval=(${normalizeStreamMessage.toString()})(c.mapping?.[c.current_node]?.message,${JSON.stringify(this.options.threadId)}).fedoraApproval;
+          if(previous.active||!approval||previous.attemptedApprovals?.has(approval.messageId))return {submitted:false};
+          // An older runtime has no recovery callback. Replace only its ended,
+          // unsubmitted approval segment after verifying the canonical head.
+          window[key].delete(${JSON.stringify(this.options.threadId)});
+        }
+        const approval=(${normalizeStreamMessage.toString()})(c.mapping?.[c.current_node]?.message,${JSON.stringify(this.options.threadId)}).fedoraApproval;
+        if(!approval||attempted.has(approval.messageId))return {submitted:false};
+      }
+      const state={binding:${JSON.stringify(this.binding)},conversationId:${JSON.stringify(existing)},requestId:${JSON.stringify(requestId)},active:true,pendingApprovals:new Map(),attemptedApprovals:attempted,segment:0,transitioning:false,observedFinal:false};
       window[key].set(${JSON.stringify(this.options.threadId)},state);
       const resolved=await resolveClient();
-      if(window[cancelKey].has(state.requestId)){window[cancelKey].delete(state.requestId);if(window[key].get(${JSON.stringify(this.options.threadId)})===state)window[key].delete(${JSON.stringify(this.options.threadId)});return {submitted:false,cancelled:true};}
+      if(window[cancelKey].has(state.requestId)){if(!${recover})window[cancelKey].delete(state.requestId);if(window[key].get(${JSON.stringify(this.options.threadId)})===state)window[key].delete(${JSON.stringify(this.options.threadId)});return {submitted:false,cancelled:true};}
       const isCurrent=()=>window[key].get(${JSON.stringify(this.options.threadId)})===state&&state.active&&!window[cancelKey].has(state.requestId);
-      const normalize=(value)=>(${normalizeStreamMessage.toString()})(value);
+      const normalize=(value)=>(${normalizeStreamMessage.toString()})(value,${JSON.stringify(this.options.threadId)});
       const recordApproval=(message)=>{
         const approval=normalize(message).fedoraApproval;
         if(approval&&!state.attemptedApprovals.has(approval.messageId))state.pendingApprovals.set(approval.messageId,approval);
@@ -811,20 +863,22 @@ export class ChatGPTConnection {
         if(typeof window[state.binding]==='function')window[state.binding](JSON.stringify(update));
       };
       // One logical T3 turn may span many native stream segments.
-      const finishStream=async(value,segment)=>{
+      const finishStream=async(value,segment,verifiedConversation=null)=>{
         if(!isCurrent()||segment!==state.segment||state.transitioning)return;
         state.transitioning=true;
         recordApproval(value);
+        let conversation=verifiedConversation;
         try{
           // Native callbacks can omit confirmation metadata. If no visible
           // final was streamed, inspect the canonical head once at the segment
           // boundary, never on a timer.
-          let conversation=null;
           let head=null;
           if(state.conversationId&&(state.pendingApprovals.size>0||!state.observedFinal)){
-            const raw=await resolved.client.get(state.conversationId);
+            if(!conversation){
+              const raw=await resolved.client.get(state.conversationId);
+              conversation=raw.conversation||raw.data||raw;
+            }
             if(!isCurrent()||segment!==state.segment)return;
-            conversation=raw.conversation||raw.data||raw;
             if(conversation.conversation_id!==state.conversationId)throw new Error('Conversation identity changed during stream completion');
             head=conversation.mapping?.[conversation.current_node]?.message;
             recordApproval(head);
@@ -844,6 +898,9 @@ export class ChatGPTConnection {
             throw new Error('Pending Fedora approval changed; cannot submit an unverified decision');
           state.pendingApprovals.clear();
           state.attemptedApprovals.add(approval.messageId);
+          // Preserve uncertain decisions across renderer reloads. Reading a
+          // pending head does not prove an earlier submission was rejected.
+          window.localStorage?.setItem(approvalKey,JSON.stringify({requestId:state.requestId,conversationId:state.conversationId,messageIds:[...state.attemptedApprovals]}));
           const responseRequest={
             action:'next',conversation_id:state.conversationId,parent_message_id:approval.messageId,
             model:conversation.default_model_slug||initialRequest.model,
@@ -889,26 +946,27 @@ export class ChatGPTConnection {
           e=>{if(isCurrent()&&state.segment===segment){state.handleError=e;emit('error',e);}},
         );
       };
+      // Reattach only an explicitly active T3 request. A history refresh alone
+      // must never restart a stopped or forced generation.
+      state.resumeCompletion=async(c)=>{
+        if(window[key].get(${JSON.stringify(this.options.threadId)})!==state||window[cancelKey].has(state.requestId)||state.transitioning||(state.active&&c.async_status!==null))return;
+        const approval=normalize(c.mapping?.[c.current_node]?.message).fedoraApproval;
+        if(!approval||state.attemptedApprovals.has(approval.messageId))return;
+        state.active=true;
+        await finishStream(null,state.segment,c);
+      };
       try {
-        startSegment(initialRequest);
+        if(${recover})await finishStream(null,state.segment,c);
+        else startSegment(initialRequest);
         return {submitted:true};
       }catch(e){emit('error',e);throw e;}
-    })()`),
-    );
-    this.nativeStopBarrier = nativeSubmission.then(
-      () => {},
-      () => {},
-    );
-    const submission = await nativeSubmission;
-    if (submission.cancelled) {
-      delete this.cache.dispatches[requestId];
-      await this.persist();
-      return;
-    }
-    dispatch.state = "submitted";
-    await this.persist();
+    })()`;
   }
   async stop(requestId: string) {
+    this.retiredRequestIds.add(requestId);
+    const dispatch = this.cache.dispatches[requestId];
+    if (dispatch) dispatch.stopped = true;
+    const retired = this.persist();
     // Publish the stop barrier before awaiting CDP, without cancelling a newer request.
     const previous = this.nativeStopBarrier;
     const stopping = previous.then(async () => {
@@ -926,9 +984,10 @@ export class ChatGPTConnection {
       await cdp.evaluate(
         `(async()=>{${rendererDiscovery}
   const cancelKey=Symbol.for('t3.chatgpt.cancelled.v1');window[cancelKey] ||= new Set();window[cancelKey].add(${JSON.stringify(requestId)});
-  const fail=(error)=>{window[cancelKey].delete(${JSON.stringify(requestId)});throw error;};
+  const fail=(error)=>{throw error;};
   const state=window[Symbol.for('t3.chatgpt.streams.v1')]?.get(${JSON.stringify(this.options.threadId)});
   const stateMatches=state?.requestId===${JSON.stringify(requestId)};
+  if(stateMatches)state.resumeCompletion=null;
   const dispatchState=${JSON.stringify(dispatchState)};
   const cachedConversationId=${JSON.stringify(cachedConversationId)};
   if(state&&!stateMatches){
@@ -976,7 +1035,6 @@ export class ChatGPTConnection {
     if(nativeError)fail(nativeError);
     fail(new Error('Cannot stop a generation before its conversation or stream identity is known'));
   }
-  window[cancelKey].delete(${JSON.stringify(requestId)});
   if(stateMatches)state.active=false;
   return true;})()`,
       );
@@ -985,7 +1043,7 @@ export class ChatGPTConnection {
       () => {},
       () => {},
     );
-    await stopping;
+    await Promise.all([stopping, retired]);
   }
   async *terminalEvents(signal: AbortSignal): AsyncGenerator<TerminalEvent> {
     let after = 0;
