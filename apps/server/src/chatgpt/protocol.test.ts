@@ -806,3 +806,215 @@ describe("ChatGPT rich chart preservation", () => {
     expect(normalize(source, "Fallback")).toContain("t3-chart");
   });
 });
+
+describe("ChatGPT static DIL table preservation", () => {
+  const source =
+    "<table><table-row header><table-cell>Month</table-cell><table-cell>Sales</table-cell></table-row>" +
+    "<table-row><table-cell>January</table-cell><table-cell>120</table-cell></table-row>" +
+    "<table-row><table-cell>February</table-cell><table-cell>250</table-cell></table-row></table>";
+  const normalize = (content: string, fallback?: string) =>
+    normalizeStreamMessage({
+      message: {
+        author: { role: "assistant" },
+        channel: "final",
+        content: { parts: [content] },
+        ...(fallback === undefined
+          ? {}
+          : { metadata: { model_dil_v2: { fallbackMarkdown: fallback } } }),
+      },
+    }).text ?? "";
+
+  it("preserves static table columns and rows as GFM Markdown", () => {
+    const result = normalize(`<box>Before.\n${source}\nAfter.</box>`);
+    expect(result).toContain(
+      "| Month | Sales |\n| --- | --- |\n| January | 120 |\n| February | 250 |",
+    );
+    expect(result).not.toContain("<table");
+    expect(result.indexOf("Before.")).toBeLessThan(result.indexOf("| Month"));
+    expect(result.indexOf("After.")).toBeGreaterThan(result.indexOf("| February"));
+  });
+
+  it("uses the official Markdown fallback without duplicating tables", () => {
+    const fallback = "| Month | Sales |\n| --- | --- |\n| January | 120 |";
+    expect(normalize(source, fallback)).toBe(fallback);
+  });
+
+  it("escapes Markdown-special text and HTML-looking entities in cells", () => {
+    const table =
+      "<table><table-row header><table-cell>Name</table-cell><table-cell>Value</table-cell></table-row>" +
+      "<table-row><table-cell>x | y</table-cell><table-cell>[link](javascript:bad) &amp; *bold*</table-cell></table-row></table>";
+    const result = normalize(table);
+    expect(result).toContain("x \\| y");
+    expect(result).toContain("\\[link\\]\\(javascript:bad\\)");
+    expect(result).toContain("&amp;");
+    expect(result).not.toContain("&amp;amp;");
+    expect(result).toContain("\\*bold\\*");
+  });
+
+  it("does not promote data rows into headers or relocate later headers", () => {
+    const noHeader = source.replace("<table-row header>", "<table-row>");
+    const laterHeader = source
+      .replace("<table-row header>", "<table-row>")
+      .replace("<table-row><table-cell>January", "<table-row header><table-cell>January");
+    const doubleHeader = source.replace(
+      "<table-row><table-cell>January",
+      "<table-row header><table-cell>January",
+    );
+    for (const invalid of [noHeader, laterHeader, doubleHeader]) {
+      const result = normalize(invalid);
+      expect(result).not.toContain("| Month | Sales |");
+      expect(result).toContain("<table");
+    }
+    expect(normalize(source)).toContain("| Month | Sales |");
+  });
+
+  it("rejects rowSpan, colSpan, and unsupported structural cell properties", () => {
+    for (const attribute of ["rowSpan=2", "colSpan=2", 'rowSpan="2"', "header", "align=right"]) {
+      const invalid = source.replace("<table-cell>January", `<table-cell ${attribute}>January`);
+      const result = normalize(invalid);
+      expect(result).not.toContain("| Month | Sales |");
+      expect(result).toContain("<table-cell");
+    }
+  });
+
+  it("preserves decoded literal HTML entities without double-encoding or executing markup", () => {
+    const text =
+      "Research &amp; Development, &lt;script&gt; &quot;Hi&quot; &#124; &#x3C; &apos; &#39;";
+    const table = `<table><table-row header><table-cell>Company</table-cell></table-row><table-row><table-cell>${text}</table-cell></table-row></table>`;
+    const result = normalize(table);
+    expect(result).toContain("Research &amp; Development");
+    expect(result).toContain("&lt;script&gt;");
+    expect(result).toContain("&quot;Hi&quot;");
+    expect(result).toContain("&#124;");
+    expect(result).not.toContain("&amp;amp;");
+    expect(result).not.toContain("<script>");
+    expect(result).not.toContain("&amp;lt;");
+  });
+
+  it("does not move tables out of quoted, listed, or indented Markdown containers", () => {
+    for (const container of [
+      `> Quote before\n> ${source}\n> Quote after`,
+      `- List item\n  ${source}\n  More list content`,
+      `1. List item\n   ${source}`,
+      `    ${source}`,
+      `Text ${source} more text`,
+    ]) {
+      const output = normalize(container);
+      expect(output).not.toContain("| Month | Sales |");
+      expect(output).toContain("<table>");
+    }
+    expect(normalize(`Intro\n${source}\nOutro`)).toContain("| Month | Sales |");
+  });
+
+  it("keeps nested tables intact when outer DIL attributes contain angle brackets", () => {
+    const inner = source.replaceAll("Month", "Inner");
+    for (const attribute of [
+      'emptyLabel="<no data>"',
+      'emptyLabel="a > b < c"',
+      "emptyLabel='<missing>'",
+    ]) {
+      const outer =
+        `<table ${attribute}><table-row header><table-cell>Outer</table-cell></table-row>` +
+        `<table-row><table-cell>${inner}</table-cell></table-row></table>`;
+      const output = normalize(outer + "\n" + source);
+      expect(output).not.toContain("| Inner | Sales |");
+      expect(output).toContain("| Month | Sales |");
+    }
+  });
+
+  it("bounds malformed raw component scans and does not expose nested tables", () => {
+    const malformed = "<CodeBlock foo ".repeat(4_000);
+    const output = normalize(malformed + source);
+    expect(output).not.toContain("| Month | Sales |");
+    expect(output).toContain("<CodeBlock");
+    expect(normalize("<CodeBlock data-test='x > y'>" + source + "</CodeBlock>")).not.toContain(
+      "| Month | Sales |",
+    );
+    expect(normalize("<CodeBlock>literal</CodeBlock>\n" + source)).toContain(
+      "| Month | Sales |",
+    );
+  });
+
+  it("never promotes a nested table inside unsupported outer table markup", () => {
+    const inner = source.replaceAll("Month", "Inner");
+    const outer = `<table><table-row header><table-cell>Outer</table-cell></table-row><table-row><table-cell>${inner}</table-cell></table-row></table>`;
+    const output = normalize(outer);
+    expect(output).not.toContain("| Inner | Sales |");
+    expect(output).not.toContain("| Outer |");
+    expect(output).toContain("<table");
+    // A complete later sibling must still be independently converted.
+    const sibling = normalize(`${outer}\n${source}`);
+    expect(sibling).not.toContain("| Inner | Sales |");
+    expect(sibling).toContain("| Month | Sales |");
+    // Even an unclosed outer wrapper cannot independently promote descendants.
+    const unclosed = normalize(`<table><table-row><table-cell>${inner}</table-cell>`);
+    expect(unclosed).not.toContain("| Inner | Sales |");
+  });
+
+  it("preserves the complete named entity range without decoding entity text twice", () => {
+    const entityText =
+      "Copyright &copy; Registered &reg; Dash &mdash; Euro &euro; NotEqual &ne;" +
+      " Double-escaped &amp;copy; Unknown &unknown; Numeric &#124; Hex &#xA9; Raw A & B";
+    const content = `<table><table-row header><table-cell>Entities</table-cell></table-row><table-row><table-cell>${entityText}</table-cell></table-row></table>`;
+    const result = normalize(content);
+    expect(result).toContain("&copy;");
+    expect(result).toContain("&reg;");
+    expect(result).toContain("&mdash;");
+    expect(result).toContain("&euro;");
+    expect(result).toContain("&ne;");
+    expect(result).toContain("&amp;copy;");
+    expect(result).toContain("&unknown;");
+    expect(result).toContain("&#124;");
+    expect(result).toContain("&#xA9;");
+    expect(result).toContain("A &amp; B");
+    expect(result).not.toContain("&amp;copy; Registered");
+    expect(result).not.toContain("&amp;amp;copy;");
+  });
+
+  it("skips tables embedded in fenced, inline, or raw code and HTML comments", () => {
+    for (const literal of [
+      `\`\`\`xml\n${source}\n\`\`\``,
+      `\`${source}\``,
+      `<CodeBlock>${source}</CodeBlock>`,
+      `<escape>${source}</escape>`,
+      `<AppBlock>${source}</AppBlock>`,
+      `<!-- ${source} -->`,
+      `\\${source}`,
+    ]) {
+      expect(normalize(literal)).not.toContain("| Month | Sales |");
+    }
+    expect(normalize(`<CodeBlock>example</CodeBlock>\n${source}`)).toContain("| Month | Sales |");
+    expect(normalize(`\`\`\`xml\n<!--\n\`\`\`\n${source}`)).toContain("| Month | Sales |");
+  });
+
+  it("does not convert incomplete, dynamic, or unsupported tables", () => {
+    for (const table of [
+      source.slice(0, -8),
+      source.replace("120", "{value}"),
+      source.replace("<table-row>", "<table-row onClick={alert(1)}>"),
+      source.replace(
+        "<table-row>",
+        "<table-row><table-cell>Unexpected</table-cell></table-row><table-row>",
+      ),
+      source.replace(
+        "<table-cell>120</table-cell>",
+        "<table-cell><button>Execute</button></table-cell>",
+      ),
+      source.replace("<table-row header>", "<table-section><table-row header>"),
+      source.repeat(5_000),
+    ]) {
+      expect(normalize(table)).not.toContain("| Month | Sales |");
+    }
+  });
+
+  it("keeps multiple complete tables and existing charts in their original order", () => {
+    const chart = { chartType: "bar", series: [{ dataKey: "y" }], data: [{ x: "A", y: 1 }] };
+    const result = normalize(
+      `Before\n${source}\nMiddle\n<Chart content={${JSON.stringify(chart)}} />\n${source}\nAfter`,
+    );
+    expect(result.split("| Month | Sales |")).toHaveLength(3);
+    expect(result.indexOf("```t3-chart")).toBeGreaterThan(result.indexOf("Middle"));
+    expect(result.lastIndexOf("| Month | Sales |")).toBeGreaterThan(result.indexOf("```t3-chart"));
+    expect(result.indexOf("After")).toBeGreaterThan(result.lastIndexOf("| Month | Sales |"));
+  });
+});

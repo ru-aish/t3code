@@ -365,6 +365,199 @@ export function normalizeStreamMessage(
     }
     return charts;
   }
+  // A deliberately small, non-executable subset of static DIL tables. A
+  // malformed, dynamic, or ambiguous table stays source text, never HTML.
+  function staticTableSnapshots(
+    source: string,
+  ): Array<{ markdown: string; start: number; end: number }> {
+    if (!source.includes("<table") || source.length > 500_000) return [];
+    const literalRanges = markdownLiteralRanges(source);
+    const rawRanges: Span[] = [];
+    // Match only opening names to avoid quadratic scans on malformed tags.
+    const rawOpening = /<!--|<(CodeBlock|WritingBlock|AppBlock|escape)\b/g;
+    let raw: RegExpExecArray | null;
+    while ((raw = rawOpening.exec(source))) {
+      if (inRanges(literalRanges, raw.index)) continue;
+      if (raw[0] !== "<!--") {
+        let quote: string | null = null;
+        let openingEnd = -1;
+        for (let index = rawOpening.lastIndex; index < source.length; index++) {
+          const ch = source[index];
+          if (quote) {
+            if (ch === quote) quote = null;
+          } else if (ch === '"' || ch === "'") quote = ch;
+          else if (ch === ">") {
+            openingEnd = index + 1;
+            break;
+          } else if (ch === "<") break;
+        }
+        if (openingEnd < 0) {
+          rawRanges.push({ start: raw.index, end: source.length });
+          break;
+        }
+        rawOpening.lastIndex = openingEnd;
+      }
+      const closing = raw[0] === "<!--" ? "-->" : `</${raw[1]}>`;
+      const closeAt = source.indexOf(closing, rawOpening.lastIndex);
+      const end = closeAt < 0 ? source.length : closeAt + closing.length;
+      rawRanges.push({ start: raw.index, end });
+      rawOpening.lastIndex = end;
+    }
+    const protectedRanges = mergeRanges([...literalRanges, ...rawRanges]);
+    // Tables nested in unsupported outer markup must not be promoted on their
+    // own. Track root ownership before parsing any rows, including malformed
+    // or unclosed roots. Scanning tags once also bounds this on long answers.
+    const nested = new Set<number>();
+    const rootsWithNested = new Set<number>();
+    const unclosed = new Set<number>();
+    const stack: number[] = [];
+    const tableTags = /<\/?table(?=[\s>])/g;
+    let tag: RegExpExecArray | null;
+    let tagCount = 0;
+    while ((tag = tableTags.exec(source))) {
+      if (++tagCount > 1_000) return [];
+      if (inRanges(protectedRanges, tag.index)) continue;
+      let backslashes = 0;
+      for (let i = tag.index - 1; i >= 0 && source[i] === "\\"; i--) backslashes++;
+      if (backslashes % 2) continue;
+      // Recognize outer tags even with quoted '<' or '>' in their properties.
+      let quote: string | null = null;
+      let tagEnd = -1;
+      for (let i = tableTags.lastIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (quote) {
+          if (ch === quote) quote = null;
+        } else if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === ">") {
+          tagEnd = i + 1;
+          break;
+        } else if (ch === "<") break;
+      }
+      if (tagEnd < 0) return [];
+      tableTags.lastIndex = tagEnd;
+      if (tag[0].startsWith("</")) {
+        stack.pop();
+      } else {
+        if (stack.length > 0) {
+          nested.add(tag.index);
+          rootsWithNested.add(stack[0]!);
+        }
+        stack.push(tag.index);
+      }
+    }
+    for (const start of stack) unclosed.add(start);
+    const snapshots: Array<{ markdown: string; start: number; end: number }> = [];
+    const marker = /<table(?=[\s>])/g;
+    let match: RegExpExecArray | null;
+    let attempts = 0;
+    while ((match = marker.exec(source)) && snapshots.length < 4 && ++attempts <= 32) {
+      const start = match.index;
+      if (
+        inRanges(protectedRanges, start) ||
+        nested.has(start) ||
+        rootsWithNested.has(start) ||
+        unclosed.has(start)
+      )
+        continue;
+      // A table inside Markdown list or quote markup cannot be converted to
+      // unprefixed GFM lines without losing the containing block's semantics.
+      const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+      if (lineStart !== start) continue;
+      let slashes = 0;
+      for (let i = start - 1; i >= 0 && source[i] === "\\"; i--) slashes++;
+      if (slashes % 2) continue;
+      // Only a plain table can be represented faithfully in GFM.
+      if (!source.startsWith("<table>", start)) continue;
+      const contentStart = start + "<table>".length;
+      const closeAt = source.indexOf("</table>", contentStart);
+      if (closeAt < 0 || closeAt - contentStart > 24_000) continue;
+      const content = source.slice(contentStart, closeAt);
+      const rows: string[][] = [];
+      let cursor = 0;
+      let valid = true;
+      while (cursor < content.length) {
+        while (/\s/.test(content[cursor] ?? "")) cursor++;
+        if (cursor >= content.length) break;
+        const rowIsHeader = content.startsWith("<table-row header>", cursor);
+        const rowOpen = rowIsHeader
+          ? "<table-row header>"
+          : content.startsWith("<table-row>", cursor)
+            ? "<table-row>"
+            : null;
+        // GFM has exactly one header at the top. Never promote a data row or
+        // relocate a header row, because both change the table's semantics.
+        if (!rowOpen || rowIsHeader !== (rows.length === 0) || rows.length >= 60) {
+          valid = false;
+          break;
+        }
+        cursor += rowOpen.length;
+        const cells: string[] = [];
+        let rowClosed = false;
+        while (cursor < content.length) {
+          while (/\s/.test(content[cursor] ?? "")) cursor++;
+          if (content.startsWith("</table-row>", cursor)) {
+            cursor += "</table-row>".length;
+            rowClosed = true;
+            break;
+          }
+          // A cell with rowSpan, colSpan, or other DIL properties cannot be
+          // faithfully converted to a plain Markdown column.
+          if (!content.startsWith("<table-cell>", cursor) || cells.length >= 16) {
+            valid = false;
+            break;
+          }
+          cursor += "<table-cell>".length;
+          const cellEnd = content.indexOf("</table-cell>", cursor);
+          if (cellEnd < 0) {
+            valid = false;
+            break;
+          }
+          const text = content.slice(cursor, cellEnd);
+          if (text.length > 240 || /[<>{}]/.test(text)) {
+            valid = false;
+            break;
+          }
+          // Keep complete character references verbatim for the Markdown
+          // parser to decode exactly once. This covers the full HTML5 named
+          // entity set, including &copy;, and avoids turning &amp;copy; into ©.
+          // Escape only bare ampersands that are not character references.
+          const cell = text
+            .replace(/\s+/g, " ")
+            .trim()
+            .replace(/&(?!(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);)/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/([\\`*_{}()#+.!|~-])/g, "\\$1")
+            // Numeric references are text, not Markdown headings. Keep them
+            // unescaped so the Markdown renderer decodes them exactly once.
+            .replace(/&\\#((?:[0-9]+|[xX][0-9a-fA-F]+));/g, "&#$1;")
+            .replace(/\[/g, "\\[")
+            .replace(/\]/g, "\\]");
+          cells.push(cell);
+          cursor = cellEnd + "</table-cell>".length;
+        }
+        if (
+          !valid ||
+          !rowClosed ||
+          cells.length === 0 ||
+          (rows.length > 0 && cells.length !== rows[0]!.length)
+        ) {
+          valid = false;
+          break;
+        }
+        rows.push(cells);
+      }
+      if (!valid || rows.length === 0 || cursor < content.length) continue;
+      const header = `| ${rows[0]!.join(" | ")} |`;
+      const divider = `| ${rows[0]!.map(() => "---").join(" | ")} |`;
+      const data = rows.slice(1).map((cells) => `| ${cells.join(" | ")} |`);
+      const markdown = [header, divider, ...data].join("\n");
+      const end = closeAt + "</table>".length;
+      snapshots.push({ markdown, start, end });
+      marker.lastIndex = end;
+    }
+    return snapshots;
+  }
   const charts = isFinal ? chartSnapshots(originalText) : [];
   // T3 renders Markdown, not ChatGPT's DIL components. Prefer the supplied
   // Markdown fallback even when content.parts contains rich UI source.
@@ -440,6 +633,17 @@ export function normalizeStreamMessage(
       const fence = chartFence(chart.json);
       displayText = displayText.slice(0, insertAt) + fence + displayText.slice(insertAt);
       searchFrom = insertAt + fence.length;
+    }
+  }
+  if (isFinal && !fallback?.trim()) {
+    // Render only complete, literal tables; preserve their original placement.
+    for (const table of staticTableSnapshots(displayText).toReversed()) {
+      displayText =
+        displayText.slice(0, table.start) +
+        "\n\n" +
+        table.markdown +
+        "\n\n" +
+        displayText.slice(table.end);
     }
   }
   if (
