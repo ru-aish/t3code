@@ -463,27 +463,32 @@ function extractPreCodeMeta(node: unknown): string | undefined {
   return typeof meta === "string" && meta.trim().length > 0 ? meta.trim() : undefined;
 }
 
-function isClosedCodeFence(node: ReactMarkdownExtraProps["node"], text: string): boolean {
+function isClosedCodeFence(
+  node: ReactMarkdownExtraProps["node"],
+  text: string,
+  code: string,
+): boolean {
   const start = node?.position?.start.offset;
   const end = node?.position?.end.offset;
   if (start === undefined || end === undefined) return false;
   const source = text.slice(start, end);
-  // Only a real last-line closer counts. Four-space indentation must not
-  // unlock an incomplete code fence while the surrounding reply streams.
   const opening = /^(?: {0,3}>[ \t]?)* {0,3}(`{3,}|~{3,})/.exec(source)?.[1];
   const lastLine = source.slice(source.lastIndexOf("\n") + 1);
-  // The opening position skips list nesting indentation, but the closing
-  // line retains it. Allow that container indent plus at most three spaces.
-  const openingLineStart = text.lastIndexOf("\n", start - 1) + 1;
-  const containerIndent = / *$/.exec(text.slice(openingLineStart, start))?.[0].length ?? 0;
-  const closingMatch = /^(?: {0,3}>[ \t]?)*([ \t]*)(`{3,}|~{3,})[ \t\r]*$/.exec(lastLine);
-  const closing = closingMatch?.[2];
+  const closing = /^(?: {0,3}>[ \t]?)*[ \t]*(`{3,}|~{3,})[ \t\r]*$/.exec(lastLine)?.[1];
+
+  // The parser includes a genuine closing delimiter in the pre node's span
+  // but excludes it from the code text. A fake closer remains code content,
+  // regardless of list indentation or blockquote-like characters.
+  // remark-rehype appends one newline to nonempty fenced code.
+  const parsedCode = code.endsWith("\n") ? code.slice(0, -1) : code;
+  const codeLineCount = parsedCode.length > 0 ? parsedCode.split("\n").length : 0;
+  const sourceLineCount = node.position.end.line - node.position.start.line + 1;
   return (
     opening !== undefined &&
     closing !== undefined &&
     opening[0] === closing[0] &&
     closing.length >= opening.length &&
-    (closingMatch?.[1].length ?? 0) <= containerIndent + 3
+    sourceLineCount === codeLineCount + 2
   );
 }
 
@@ -3343,7 +3348,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
-    const isFenceClosed = isClosedCodeFence(node, text);
+    const isFenceClosed = isClosedCodeFence(node, text, codeBlock.code);
     const highlightedCode = (
       <RenderErrorBoundary
         resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}

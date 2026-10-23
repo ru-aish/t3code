@@ -324,6 +324,75 @@ describe("Closed-fence streaming visual previews", () => {
     }
   });
 
+  it.each([
+    {
+      description: "a fourth-space fake closer after a three-space opener",
+      lines: [
+        "   " + backticks + "svg",
+        '   <svg xmlns="http://www.w3.org/2000/svg"/>',
+        "    " + backticks,
+      ],
+    },
+    {
+      description: "a blockquote-looking line inside a top-level fence",
+      lines: [
+        backticks + "svg",
+        '<svg xmlns="http://www.w3.org/2000/svg"/>',
+        "> " + backticks,
+      ],
+    },
+    {
+      description: "an over-indented closer nested inside a list",
+      lines: [
+        "- Illustration",
+        "",
+        "     " + backticks + "svg",
+        '     <svg xmlns="http://www.w3.org/2000/svg"/>',
+        "      " + backticks,
+      ],
+    },
+  ])("keeps $description as source with or without streaming", ({ lines }) => {
+    const source = lines.join("\n");
+    for (const isStreaming of [true, false]) {
+      const document = new DOMParser().parseFromString(
+        renderToStaticMarkup(
+          <ChatMarkdown cwd="/tmp/project" text={source} isStreaming={isStreaming} />,
+        ),
+        "text/html",
+      );
+      expect(document.querySelector('[aria-label="SVG illustration"]')).toBeNull();
+      expect(document.querySelector('[aria-label="Show code"]')).toBeNull();
+    }
+  });
+
+  it.each([
+    {
+      description: "an indented top-level fence",
+      lines: [
+        "   " + backticks + "svg",
+        '   <svg xmlns="http://www.w3.org/2000/svg"/>',
+        "   " + backticks,
+      ],
+    },
+    {
+      description: "a blockquote fence",
+      lines: [
+        "> " + backticks + "svg",
+        '> <svg xmlns="http://www.w3.org/2000/svg"/>',
+        "> " + backticks,
+      ],
+    },
+  ])("previews $description with an actual closer", ({ lines }) => {
+    const document = new DOMParser().parseFromString(
+      renderToStaticMarkup(
+        <ChatMarkdown cwd="/tmp/project" text={lines.join("\n")} isStreaming />,
+      ),
+      "text/html",
+    );
+    expect(document.querySelector('[aria-label="SVG illustration"]')).not.toBeNull();
+    expect(document.querySelector('[aria-label="Show code"]')).not.toBeNull();
+  });
+
   it("accepts a closed tilde fence while streaming", () => {
     const source = '~~~svg\n<svg xmlns="http://www.w3.org/2000/svg"/>\n~~~\n\nMore text';
     const document = new DOMParser().parseFromString(
