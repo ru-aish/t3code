@@ -44,7 +44,9 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import * as ServerConfig from "../config.ts";
+import { withDetachedWorkspaceFence } from "../workspace/detachedWorkspaceFence.ts";
 
+const isGitCommandError = Schema.is(GitCommandError);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const gitProcesses = Semaphore.makeUnsafe(8);
 const WORKTREE_ADD_TIMEOUT_MS = 300_000;
@@ -4088,7 +4090,25 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     fetchRemoteTrackingBranch: (input) =>
       withListRefsInvalidation(input.cwd, fetchRemoteTrackingBranch(input)),
     setBranchUpstream: (input) => withListRefsInvalidation(input.cwd, setBranchUpstream(input)),
-    removeWorktree: (input) => withListRefsInvalidation(input.cwd, removeWorktree(input)),
+    removeWorktree: (input) =>
+      withDetachedWorkspaceFence(
+        input.path,
+        withListRefsInvalidation(input.cwd, removeWorktree(input)),
+      ).pipe(
+        Effect.mapError((error) =>
+          isGitCommandError(error)
+            ? error
+            : new GitCommandError({
+                ...gitCommandContext({
+                  operation: "GitVcsDriver.removeWorktree",
+                  cwd: input.cwd,
+                  args: ["worktree", "remove", input.path],
+                }),
+                detail: "durable workspace fence blocked removal",
+                cause: error,
+              }),
+        ),
+      ),
     pruneWorktrees: (input) => withListRefsInvalidation(input.cwd, pruneWorktrees(input)),
     deleteLocalBranch: (input) => withListRefsInvalidation(input.cwd, deleteLocalBranch(input)),
     renameBranch: (input) => withListRefsInvalidation(input.cwd, renameBranch(input)),

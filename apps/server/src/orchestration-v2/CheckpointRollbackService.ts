@@ -16,6 +16,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import { withDetachedWorkspaceFence } from "../workspace/detachedWorkspaceFence.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   isCheckpointRestoreIsolated,
@@ -377,7 +378,9 @@ export const layer: Layer.Layer<
           const { thread } = yield* projections.getThreadRecords(input.threadId, []);
           yield* thread.worktreePath === null
             ? execute(input)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));
+            : input.restoreFiles === false
+              ? withWorkspaceLease(path.resolve(thread.worktreePath), execute(input))
+              : withDetachedWorkspaceFence(path.resolve(thread.worktreePath), execute(input));
         }).pipe(
           Effect.mapError((cause) =>
             isCheckpointRollbackExecutionError(cause)
