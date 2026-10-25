@@ -11,6 +11,7 @@ import {
   PositiveInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ScheduledTaskId,
   SecretRef,
   ThreadId,
@@ -30,6 +31,7 @@ import {
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2UserInputQuestion,
 } from "./orchestrationV2.ts";
 import {
   ProviderOptionDescriptor,
@@ -583,6 +585,20 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
 });
 export type OrchestratorMcpUpdateScheduledTaskInput =
   typeof OrchestratorMcpUpdateScheduledTaskInput.Type;
+
+export const OrchestratorMcpRequestUserInputInput = Schema.Struct({
+  questions: Schema.Array(OrchestrationV2UserInputQuestion).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(3),
+  ),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpRequestUserInputInput = typeof OrchestratorMcpRequestUserInputInput.Type;
+export const OrchestratorMcpRequestUserInputResult = Schema.Struct({
+  requestId: RuntimeRequestId,
+});
+export type OrchestratorMcpRequestUserInputResult =
+  typeof OrchestratorMcpRequestUserInputResult.Type;
 
 export const OrchestratorMcpRequestSecretInput = Schema.Struct({
   label: TrimmedNonEmptyString.annotate({

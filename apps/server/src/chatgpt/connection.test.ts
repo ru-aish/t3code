@@ -397,7 +397,10 @@ describe("ChatGPT orchestration instructions", () => {
     });
     expect(prompt).not.toContain("--help");
     expect(prompt).toContain("Spawn is async by default");
-    expect(prompt).toContain("Do not poll, wait, or start watcher processes");
+    expect(prompt).toContain("Do not poll, sleep, or start watcher processes");
+    expect(prompt).toContain("request_user_input");
+    expect(prompt).toContain("watch_pull_request");
+    expect(prompt).toContain("unwatch_pull_request");
     expect(prompt).toContain("taskId is the delegated task handle");
     expect(prompt).toContain("--list-tools");
     expect(prompt).toContain("--describe-tool");

@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
   EnvironmentId,
   NodeId,
   type OrchestrationV2ThreadShell,
@@ -49,6 +50,89 @@ const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
 );
 
 describe("OrchestratorMcpService", () => {
+  it.effect(
+    "asks within the calling provider's active run and keeps retries on one question ID",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("mcp-question-parent");
+        const instanceId = ProviderInstanceId.make("chatgpt");
+        const parent = idleThreadProjection(liveThreadShell(threadId));
+        let currentInstance = instanceId;
+        const recorded: Array<import("@t3tools/contracts").OrchestrationV2ServerCommand> = [];
+        const now = parent.updatedAt;
+        const projection = (): OrchestrationV2ThreadProjection => ({
+          ...parent,
+          runs: [
+            {
+              id: RunId.make("mcp-question-run"),
+              threadId,
+              ordinal: 1,
+              providerInstanceId: currentInstance,
+              modelSelection: { instanceId: currentInstance, model: "test" },
+              providerThreadId: null,
+              userMessageId: MessageId.make("mcp-question-message"),
+              rootNodeId: NodeId.make("mcp-question-root"),
+              activeAttemptId: null,
+              status: "running" as const,
+              requestedAt: now,
+              startedAt: now,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          ],
+        });
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.sync(projection),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                recorded.push(command);
+                return {} as never;
+              }),
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        const scope: McpInvocationScope = {
+          environmentId: EnvironmentId.make("question-test"),
+          requestNamespace: "question-provider-session",
+          thread: {
+            threadId,
+            providerSessionId: "question-provider-session",
+            providerInstanceId: instanceId,
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 1,
+        };
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const input = {
+            clientRequestId: "phone-details",
+            questions: [
+              { id: "phone", header: "Phone", question: "Which phone model and RAM?", options: [] },
+            ],
+          };
+          const first = yield* service.requestUserInput(scope, input);
+          const again = yield* service.requestUserInput(scope, input);
+          assert.equal(first.requestId, again.requestId);
+          assert.equal(recorded[0]?.type, "user_input_request.record");
+          assert.deepEqual(recorded[0], recorded[1]);
+          currentInstance = ProviderInstanceId.make("another-provider");
+          const refused = yield* service.requestUserInput(scope, input).pipe(Effect.flip);
+          assert.equal(refused.code, "parent_not_active");
+          assert.lengthOf(recorded, 2);
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+      }),
+  );
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-ack-parent");
