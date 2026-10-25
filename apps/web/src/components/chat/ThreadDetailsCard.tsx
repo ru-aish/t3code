@@ -82,9 +82,11 @@ export function ThreadDetailsCard({
   useLayoutEffect(() => () => reportDetailsCard?.(null), [reportDetailsCard]);
   useLayoutEffect(() => {
     onPresentationChange(mode);
+  }, [mode, onPresentationChange]);
+  useLayoutEffect(() => {
     if (mode === "inline" && popoverOpen)
       useRightPanelStore.getState().setThreadPanelOpen(threadRef, "popover", false);
-  }, [mode, onPresentationChange, threadRef, popoverOpen]);
+  }, [mode, threadRef, popoverOpen]);
   useLayoutEffect(() => {
     const element = contentElement;
     if (!element || density === "essential") return;

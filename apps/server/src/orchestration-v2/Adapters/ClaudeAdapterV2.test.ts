@@ -214,6 +214,105 @@ function makeClaudeTestTurnInput(input: {
   };
 }
 
+it.effect("retries a failed Claude query-open without retaining native turn admission", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-claude-query-open-retry-",
+      });
+      let opens = 0;
+      let offers = 0;
+      const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+        instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CLAUDE_SETTINGS,
+        environment: {},
+        attachmentsDir,
+        fileSystem,
+        path: yield* Path.Path,
+        crypto: yield* Crypto.Crypto,
+        idAllocator,
+        queryRunner: {
+          allocateSessionId: Effect.succeed("native-thread-claude-query-open-retry"),
+          open: () =>
+            Effect.sync(() => ++opens).pipe(
+              Effect.flatMap((count) =>
+                count === 1
+                  ? Effect.fail(
+                      new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                        method: "open",
+                        cause: new Error("SDK process failed before accepting a prompt"),
+                      }),
+                    )
+                  : Effect.succeed({
+                      messages: Stream.never,
+                      offer: () => Effect.sync(() => { offers++; }),
+                      setModel: () => Effect.void,
+                      applyFlagSettings: () => Effect.void,
+                      setPermissionMode: () => Effect.void,
+                      backgroundTasks: () => Effect.succeed(false),
+                      stopTask: () => Effect.void,
+                      interrupt: Effect.void,
+                      close: Effect.void,
+                    }),
+              ),
+            ),
+          forkSession: () => Effect.die("unused"),
+          subagentLaunchToolUseId: () => Effect.succeed(null),
+          assertComplete: Effect.void,
+        },
+      });
+      const threadId = ThreadId.make("thread-claude-query-open-retry");
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-claude-query-open-retry"),
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+      });
+      const turn = (attempt: string) =>
+        DateTime.now.pipe(
+          Effect.map((now) =>
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make(attempt),
+              text: "Continue after query startup failure",
+              attachments: [],
+            }),
+          ),
+        );
+      const failed = yield* runtime.startTurn(yield* turn("claude-query-open-failed")).pipe(
+        Effect.result,
+      );
+      assert.equal(failed._tag, "Failure");
+      if (failed._tag === "Failure") {
+        assert.equal(failed.failure._tag, "ProviderAdapterTurnStartError");
+        assert.propertyVal(
+          failed.failure.cause,
+          "_tag",
+          "ProviderAdapterTurnNotSubmittedError",
+        );
+      }
+      assert.equal(opens, 1);
+      assert.equal(offers, 0);
+      yield* runtime.startTurn(yield* turn("claude-query-open-recovered"));
+      assert.equal(opens, 2);
+      assert.equal(offers, 1);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  ),
+);
+
 describe("ClaudeAdapterV2 runtime query policy", () => {
   it.each([false, true])("requests thinking summaries with resume=%s", (resume) => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({

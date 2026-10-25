@@ -28,6 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
@@ -53,6 +54,9 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import { startProcessCompletionWorker } from "../chatgpt/processCompletionWorker.ts";
+import type { TerminalEvent } from "../chatgpt/connection.ts";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -333,7 +337,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
     readonly hangSessionScopeClose?: boolean;
-    readonly startTurn?: Effect.Effect<void>;
+    readonly startTurn?: Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>;
     readonly beforeUnload?: Effect.Effect<void>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -482,7 +486,7 @@ function layerTest(input: {
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
   readonly hangSessionScopeClose?: boolean;
-  readonly startTurn?: Effect.Effect<void>;
+  readonly startTurn?: Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -1316,7 +1320,7 @@ it.effect("ProviderSessionManagerV2 cleans up an interrupted open whose scope cl
   }),
 );
 
-it.effect("ProviderSessionManagerV2 releases an idle session whose turn start was stopped", () =>
+it.effect("ProviderSessionManagerV2 retains an uncertain interrupted native submission", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     const startTurnReached = yield* Deferred.make<void>();
@@ -1367,8 +1371,8 @@ it.effect("ProviderSessionManagerV2 releases an idle session whose turn start wa
       yield* Fiber.interrupt(starting);
       yield* TestClock.adjust("2 seconds");
       yield* Effect.yieldNow;
-      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
-      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
     }).pipe(
       Effect.provide(
         layerTest({
@@ -2687,6 +2691,74 @@ it.effect("ProviderSessionManagerV2 releases idle sessions without sweeping all 
       assert.equal(projection.providerSessions.at(-1)?.status, "stopped");
     });
 
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+  }),
+);
+
+it.effect("retains detached process notifications after a real idle session release", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* ids.allocate.project({ fixtureName: "idle-process-completion" });
+      const threadId = yield* ids.allocate.thread({
+        fixtureName: "idle-process-completion",
+        projectId,
+      });
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      let publishCompletion!: (event: TerminalEvent) => void;
+      const completion = new Promise<TerminalEvent>((resolve) => {
+        publishCompletion = resolve;
+      });
+      const notifications =
+        yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const instanceScope = yield* Scope.make();
+      const acked: string[] = [];
+      yield* startProcessCompletionWorker(
+        {
+          async *events(signal) {
+            if (!signal.aborted) yield await completion;
+          },
+          claim: async () => true,
+          acknowledge: async (event) => {
+            acked.push(event.event_id);
+          },
+        },
+        { offer: (request) => Queue.offer(notifications, request).pipe(Effect.asVoid) },
+      ).pipe(Effect.provideService(Scope.Scope, instanceScope));
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      // The provider session has exited; the owning instance still receives
+      // Terminal MCP's durable completion without reopening a generation.
+      publishCompletion({
+        seq: 1,
+        event_id: "completed-after-idle-release",
+        thread_id: threadId,
+        kind: "process.completed",
+        epoch: 1,
+        payload: { processId: "detached-job", result: "exit_code=0" },
+      });
+      const delivery = yield* Queue.take(notifications);
+      assert.equal(delivery.threadId, threadId);
+      assert.equal(delivery.delivery, "message_text");
+      assert.deepEqual(acked, []);
+      assert.isDefined(delivery.dispatchIfCurrent);
+      yield* delivery.dispatchIfCurrent!(Effect.void);
+      assert.deepEqual(acked, ["completed-after-idle-release"]);
+      yield* Scope.close(instanceScope, Exit.void);
+    });
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
   }),
 );
@@ -4907,4 +4979,541 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect("ProviderSessionManagerV2 releases a proved pre-submit rejection without a native terminal", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-pre-submit");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const first = yield* Effect.exit(start(1));
+      assert.isTrue(Exit.isFailure(first));
+      yield* start(2);
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: CODEX_DRIVER,
+                    threadId: ThreadId.make("thread-provider-generation-pre-submit"),
+                    providerThreadId: "rejected-provider-thread" as never,
+                    runId: "rejected-run" as never,
+                    cause: new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+                      driver: CODEX_DRIVER,
+                      cause: new Error("Codex preflight rejected the turn before turn/start"),
+                    }),
+                  }))
+                : Effect.void,
+            ),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect.each(["early", "late"] as const)(
+  "ProviderSessionManagerV2 releases a failed send only after its verified native terminal (%s)",
+  (terminalOrder) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const nativeStarts = yield* Ref.make(0);
+      const rejectFirst = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`thread-provider-failed-send-${terminalOrder}`);
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId, providerSessionId, modelSelection, runtimePolicy,
+        });
+        const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+        const providerThread = makeProviderThread({
+          idAllocator: ids, threadId, providerSessionId, now,
+        });
+        const start = (ordinal: number) =>
+          Effect.gen(function* () {
+            const runId = ids.derive.run({ threadId, ordinal });
+            return yield* runtime.startTurn({
+              appThread,
+              threadId,
+              runId,
+              runOrdinal: ordinal,
+              providerTurnOrdinal: ordinal,
+              attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+              rootNodeId: ids.derive.rootNode({ runId }),
+              providerThread,
+              message: {
+                createdBy: "user",
+                creationSource: "web",
+                messageId: yield* ids.allocate.message({ threadId, ordinal }),
+                text: "turn",
+                attachments: [],
+              },
+              modelSelection,
+              runtimePolicy,
+            });
+          });
+        const first = yield* start(1).pipe(Effect.exit, Effect.forkChild);
+        yield* Effect.yieldNow;
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        const terminal = (ordinal: number) => ({
+          type: "turn.terminal" as const,
+          driver: CODEX_DRIVER,
+          providerThreadId: providerThread.id,
+          providerTurnId: ids.derive.providerTurn({
+            driver: CODEX_DRIVER,
+            nativeTurnId: "first",
+          }),
+          runOrdinal: ordinal,
+          status: "completed" as const,
+          failure: null,
+          threadDisposition: "reusable" as const,
+        });
+        if (terminalOrder === "early") {
+          yield* Queue.offer(queue!, terminal(1));
+          yield* Effect.yieldNow;
+        }
+        yield* Deferred.succeed(rejectFirst, undefined);
+        assert.isTrue(Exit.isFailure(yield* Fiber.join(first)));
+        const second = yield* start(2).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        if (terminalOrder === "late") {
+          // A stale terminal from a different generation must not unlock it.
+          yield* Queue.offer(queue!, terminal(0));
+          yield* Effect.yieldNow;
+          assert.equal(yield* Ref.get(nativeStarts), 1);
+          yield* Queue.offer(queue!, terminal(1));
+        }
+        yield* Fiber.join(second);
+        assert.equal(yield* Ref.get(nativeStarts), 2);
+      }).pipe(
+        Effect.provide(layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Deferred.await(rejectFirst).pipe(
+                    Effect.andThen(
+                      Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                        driver: CODEX_DRIVER,
+                        threadId: ThreadId.make("failed-send"),
+                        providerThreadId: "failed-send" as never,
+                        runId: "failed-send" as never,
+                        cause: new Error("native dispatch may have started"),
+                      })),
+                    ),
+                  )
+                : Effect.void,
+            ),
+          ),
+        })),
+      );
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 serializes native generations until the prior terminal", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+    const firstNativeRelease = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-serial");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const first = yield* start(1).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      const second = yield* start(2).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(queue);
+      yield* Queue.offer(queue!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "first" }),
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      // A terminal callback may arrive before the native send promise settles.
+      // Neither the terminal nor a newer logical run may overlap that send.
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      yield* Deferred.succeed(firstNativeRelease, undefined);
+      yield* Fiber.join(first);
+      yield* Fiber.join(second);
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+      const third = yield* start(3).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Queue.offer(queue!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "first" }),
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+      yield* Queue.offer(queue!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "second" }),
+        runOrdinal: 2,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      yield* Fiber.join(third);
+      assert.equal(yield* Ref.get(nativeStarts), 3);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1 ? Deferred.await(firstNativeRelease) : Effect.void,
+            ),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect.each(["pending", "rejected", "interrupted"] as const)(
+  "ProviderSessionManagerV2 fails closed on an unverified native generation (%s)",
+  (failureMode) => Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+    const nativeEntered = yield* Deferred.make<void>();
+    const nativePromise = Promise.withResolvers<void>();
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-no-terminal");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const first = yield* start(1).pipe(Effect.exit, Effect.forkChild);
+      yield* Effect.yieldNow;
+      if (failureMode === "rejected") {
+        assert.isTrue(Exit.isFailure(yield* Fiber.join(first)));
+      }
+      if (failureMode === "interrupted") {
+        yield* Deferred.await(nativeEntered);
+        // Effect.tryPromise can be interrupted while its underlying promise
+        // and native submission remain in flight.
+        yield* Fiber.interrupt(first);
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.offer(queue!, {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId: providerThread.id,
+          providerTurnId: ids.derive.providerTurn({ driver: CODEX_DRIVER, nativeTurnId: "first" }),
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+        yield* Effect.yieldNow;
+      }
+      const second = yield* start(2).pipe(Effect.exit, Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("31 seconds");
+      const outcome = yield* Fiber.join(second);
+      assert.isTrue(Exit.isFailure(outcome));
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      // A matching terminal cannot unlock admission until the real promise
+      // settles, even after the caller's Effect fiber was interrupted.
+      yield* Fiber.interrupt(first);
+      nativePromise.resolve();
+      if (failureMode === "interrupted") {
+        // The independent native-send fiber must process its pending terminal
+        // once the underlying JavaScript promise actually completes.
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        const third = yield* start(3).pipe(Effect.forkChild);
+        yield* Fiber.join(third);
+        assert.equal(yield* Ref.get(nativeStarts), 2);
+      }
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count !== 1
+                ? Effect.void
+                : failureMode === "pending"
+                  ? Effect.never
+                  : failureMode === "interrupted"
+                    ? Deferred.succeed(nativeEntered, undefined).pipe(
+                        Effect.andThen(Effect.tryPromise({
+                          try: () => nativePromise.promise,
+                          catch: (cause) => new ProviderAdapter.ProviderAdapterTurnStartError({
+                            driver: CODEX_DRIVER,
+                            threadId: ThreadId.make("thread-provider-generation-no-terminal"),
+                            providerThreadId: "uncertain" as never,
+                            runId: "uncertain" as never,
+                            cause,
+                          }),
+                        })),
+                      )
+                    : Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver: CODEX_DRIVER,
+                      threadId: ThreadId.make("thread-provider-generation-no-terminal"),
+                      providerThreadId: "uncertain" as never,
+                      runId: "uncertain" as never,
+                      cause: new Error("native submission outcome unknown"),
+                    })),
+            ),
+          ),
+        }),
+      ),
+    );
+  }),
+);
+it.effect("ProviderSessionManagerV2 releases definitely rejected native submissions", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const nativeStarts = yield* Ref.make(0);
+
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-generation-serial");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const appThread = (yield* projections.getThreadProjection(threadId)).thread;
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const start = (ordinal: number) =>
+        Effect.gen(function* () {
+          const runId = ids.derive.run({ threadId, ordinal });
+          yield* runtime.startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: ordinal,
+            attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: ids.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* ids.allocate.message({ threadId, ordinal }),
+              text: "turn",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+      const rejected = yield* Effect.exit(start(1));
+      assert.isTrue(Exit.isFailure(rejected));
+      assert.equal(yield* Ref.get(nativeStarts), 1);
+      yield* start(2);
+      assert.equal(yield* Ref.get(nativeStarts), 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          startTurn: Ref.updateAndGet(nativeStarts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.fail(new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: CODEX_DRIVER,
+                    threadId: ThreadId.make("thread-provider-generation-serial"),
+                    providerThreadId: "rejected" as any,
+                    runId: "rejected" as any,
+                    cause: { _tag: "ChatGPTTurnNotSubmittedError" },
+                  }))
+                : Effect.void,
+            ),
+          ),
+        }),
+      ),
+    );
+  }),
 );

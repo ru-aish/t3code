@@ -1,9 +1,36 @@
 import type { ChatGPTUpdate } from "./connection.ts";
 
+// This also runs in the authenticated renderer during transcript recovery.
+export function isTerminalToolCall(
+  message: Pick<ChatGPTUpdate, "role" | "recipient" | "text">,
+  terminalId: string,
+): boolean {
+  if (message.role !== "assistant") return false;
+  if (message.recipient?.includes("fedora_t3code")) return true;
+  if (message.recipient !== "api_tool.call_tool" || !message.text) return false;
+  if (message.text.includes("fedora_t3code")) return true;
+  try {
+    const call = JSON.parse(message.text) as {
+      path?: unknown;
+      args?: { thread_id?: unknown; session_id?: unknown };
+    };
+    // ChatGPT can replace the connector's friendly name with an opaque app ID.
+    // Match the scoped Terminal invocation rather than hard-coding that alias.
+    return (
+      typeof call.path === "string" &&
+      call.path.startsWith("/asdk_app_") &&
+      (call.args?.thread_id === terminalId || call.args?.session_id === terminalId)
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Runs inside the authenticated renderer as well as in focused protocol tests.
 // Keep self-contained so its serialized function needs no module globals.
 export function normalizeStreamMessage(
   raw: unknown,
+  terminalId?: string,
 ): Omit<ChatGPTUpdate, "kind" | "conversationId"> {
   type MarkdownFence = {
     marker: "`" | "~";
@@ -247,6 +274,8 @@ export function normalizeStreamMessage(
     metadata?: {
       is_visually_hidden_from_conversation?: boolean;
       model_dil_v2?: { fallbackMarkdown?: string };
+      jit_plugin_data?: { from_server?: unknown };
+      elicitation_metadata?: { plugin_data?: { from_server?: unknown } };
     };
   };
   const value = raw as Message;
@@ -627,6 +656,58 @@ export function normalizeStreamMessage(
       .join("")
       .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, "\n\n");
   }
+  const approvalServer = (metadata.jit_plugin_data?.from_server ??
+    metadata.elicitation_metadata?.plugin_data?.from_server) as
+    | {
+        type?: string;
+        body?: {
+          codex_mcp_elicitation?: { kind?: string; status?: string };
+          connector_id?: unknown;
+          connector_name?: unknown;
+          link_id?: unknown;
+          params?: { path?: unknown; args?: { thread_id?: unknown; session_id?: unknown } };
+          actions?: Array<{ always_allow?: { target_message_id?: unknown } }>;
+        };
+      }
+    | undefined;
+  const approvalBody = approvalServer?.body;
+  const connectorId =
+    typeof approvalBody?.connector_id === "string" ? approvalBody.connector_id : "";
+  const linkId = typeof approvalBody?.link_id === "string" ? approvalBody.link_id : "";
+  const call = approvalBody?.params;
+  const callIds = [call?.args?.thread_id, call?.args?.session_id].filter((id) => id !== undefined);
+  const route = typeof call?.path === "string" ? call.path.split("/") : [];
+  // Recreated Fedora connections have different opaque IDs. Check the
+  // server's connector name together with the canonical route and thread IDs.
+  const isScopedTerminalCall =
+    typeof terminalId === "string" &&
+    terminalId.length > 0 &&
+    callIds.length > 0 &&
+    callIds.every((id) => id === terminalId) &&
+    (approvalBody?.connector_name === "fedora" ||
+      approvalBody?.connector_name === "fedora_t3code") &&
+    connectorId.startsWith("asdk_app_") &&
+    linkId.startsWith("link_") &&
+    route.length === 4 &&
+    route[1] === connectorId &&
+    route[2] === linkId &&
+    /^[a-zA-Z0-9_]+$/.test(route[3] ?? "");
+  const offersAlwaysAllow =
+    approvalBody?.actions?.some(
+      (action) => action.always_allow?.target_message_id === message.id,
+    ) === true;
+  const fedoraApproval =
+    message.author?.role === "tool" &&
+    approvalServer?.type === "confirm_action" &&
+    approvalBody?.codex_mcp_elicitation?.kind === "mcpToolCall" &&
+    approvalBody.codex_mcp_elicitation.status === "pending" &&
+    isScopedTerminalCall &&
+    offersAlwaysAllow &&
+    typeof message.id === "string" &&
+    connectorId.length > 0 &&
+    linkId.length > 0
+      ? { messageId: message.id, connectorId, linkId }
+      : undefined;
   return {
     messageId: message.id,
     role: message.author?.role,
@@ -636,6 +717,7 @@ export function normalizeStreamMessage(
     text: displayText,
     status: message.status,
     endTurn: message.end_turn,
+    ...(fedoraApproval ? { fedoraApproval } : {}),
   };
 }
 

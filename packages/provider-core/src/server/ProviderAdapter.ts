@@ -291,6 +291,19 @@ export class ProviderAdapterTurnStartError extends Schema.TaggedError<ProviderAd
   }
 }
 
+/** Proof from an adapter that no native turn submission was attempted. */
+export class ProviderAdapterTurnNotSubmittedError extends Schema.TaggedError<ProviderAdapterTurnNotSubmittedError>()(
+  "ProviderAdapterTurnNotSubmittedError",
+  {
+    driver: ProviderDriverKind,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `${this.driver} turn was rejected before native submission.`;
+  }
+}
+
 export class ProviderAdapterSteerRunUnsupportedError extends Schema.TaggedError<ProviderAdapterSteerRunUnsupportedError>()(
   "ProviderAdapterSteerRunUnsupportedError",
   {
@@ -381,6 +394,7 @@ export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterRollbackThreadError,
   ProviderAdapterForkThreadError,
   ProviderAdapterTurnStartError,
+  ProviderAdapterTurnNotSubmittedError,
   ProviderAdapterSteerRunUnsupportedError,
   ProviderAdapterSteerRunError,
   ProviderAdapterInterruptError,
@@ -570,6 +584,8 @@ export interface ProviderAdapterV2SessionRuntime {
     cwd?: string | null,
   ) => number | undefined;
   readonly canReuseContextUsage?: (previous: ModelSelection, next: ModelSelection) => boolean;
+  /** Provider-managed conversations recover imported history through app tools instead of replay. */
+  readonly contextHandoffDelivery?: "reference";
   readonly ensureThread: (
     input: ProviderAdapterV2EnsureThreadInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;

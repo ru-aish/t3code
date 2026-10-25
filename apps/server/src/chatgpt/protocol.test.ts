@@ -1,12 +1,43 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   imageUploadDestination,
+  isTerminalToolCall,
   mergeFinalAnswer,
   normalizeProjects,
   normalizeStreamMessage,
 } from "./protocol.ts";
 
 describe("ChatGPT protocol", () => {
+  it("recognizes scoped opaque connector aliases in live and serialized history parsing", () => {
+    const serialized = new Function(
+      `return (${isTerminalToolCall.toString()})`,
+    )() as typeof isTerminalToolCall;
+    for (const recognize of [isTerminalToolCall, serialized]) {
+      const message = {
+        role: "assistant",
+        recipient: "api_tool.call_tool",
+        text: JSON.stringify({
+          path: "/asdk_app_opaque/link_opaque/bootstrap_thread",
+          args: { thread_id: "thread-one" },
+        }),
+      };
+      expect(recognize(message, "thread-one")).toBe(true);
+      expect(recognize(message, "other-thread")).toBe(false);
+      expect(recognize({ ...message, role: "tool" }, "thread-one")).toBe(false);
+      expect(recognize({ ...message, text: "invalid JSON" }, "thread-one")).toBe(false);
+      expect(
+        recognize(
+          {
+            ...message,
+            text: JSON.stringify({ path: "/other_app/search", args: { thread_id: "thread-one" } }),
+          },
+          "thread-one",
+        ),
+      ).toBe(false);
+      expect(recognize({ ...message, text: "fedora_t3code.thread_task" }, "thread-one")).toBe(true);
+    }
+  });
+
   it("keeps the complete final answer when hidden stream copies overlap", () => {
     const draft = "Introduction\n\n## Findings\nPart one.";
     const expanded = draft + "\n\n## Root cause\nFixed.";
@@ -56,6 +87,73 @@ describe("ChatGPT protocol", () => {
       }).text,
     ).toBe(full);
   });
+  it("recognizes Terminal approvals by canonical invocation and exact thread scope", () => {
+    const approval = (connectorId: string, threadId = "thread", pathConnector = connectorId) => ({
+      message: {
+        id: "approval-message",
+        author: { role: "tool" },
+        content: { parts: [""] },
+        metadata: {
+          jit_plugin_data: {
+            from_server: {
+              type: "confirm_action",
+              body: {
+                codex_mcp_elicitation: { kind: "mcpToolCall", status: "pending" },
+                connector_id: connectorId,
+                connector_name: "fedora_t3code",
+                link_id: "link_current",
+                params: {
+                  path: `/${pathConnector}/link_current/bootstrap_thread`,
+                  args: { thread_id: threadId },
+                },
+                actions: [{ always_allow: { target_message_id: "approval-message" } }],
+              },
+            },
+          },
+        },
+      },
+    });
+    for (const connectorId of [
+      "asdk_app_6ad23e985b608191984705f0c25f1ba3",
+      "asdk_app_6a9b31f86efc81918287f37a02413746",
+      "asdk_app_recreated_connection",
+    ]) {
+      const raw = approval(connectorId);
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toEqual({
+        messageId: "approval-message",
+        connectorId,
+        linkId: "link_current",
+      });
+      raw.message.metadata.jit_plugin_data.from_server.body.connector_name = "fedora";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeDefined();
+      raw.message.metadata.jit_plugin_data.from_server.body.connector_name = "unrelated-app";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      raw.message.metadata.jit_plugin_data.from_server.body.connector_name = "fedora_t3code";
+      expect(normalizeStreamMessage(raw).fedoraApproval).toBeUndefined();
+      expect(
+        normalizeStreamMessage(approval(connectorId, "other-thread"), "thread").fedoraApproval,
+      ).toBeUndefined();
+      expect(
+        normalizeStreamMessage(approval(connectorId, "thread", "asdk_app_other"), "thread")
+          .fedoraApproval,
+      ).toBeUndefined();
+      const body = raw.message.metadata.jit_plugin_data.from_server.body;
+      Object.assign(body.params.args, { session_id: "another-thread" });
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      Object.assign(body.params.args, { session_id: "thread" });
+      Reflect.deleteProperty(body.params.args, "thread_id");
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeDefined();
+      body.params.path = `/${connectorId}/link_other/bootstrap_thread`;
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      body.params.path = `/${connectorId}/link_current/bootstrap_thread`;
+      body.actions[0]!.always_allow.target_message_id = "another-message";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+      body.actions[0]!.always_allow.target_message_id = "approval-message";
+      body.codex_mcp_elicitation.status = "accepted";
+      expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+    }
+  });
+
   it("uses a Markdown fallback instead of raw ChatGPT DIL when available", () => {
     const raw = `<box gap={2}><button onClick={()=>GenUI.openUrl("https://example.com/app")}>Download</button></box>`;
     expect(

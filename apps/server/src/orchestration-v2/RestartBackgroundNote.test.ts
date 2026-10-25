@@ -108,6 +108,10 @@ it("bounds roster task labels including a long task id", () => {
     description: "d".repeat(400),
   });
   assert.equal(work.kind, "shell");
+  assert.equal(
+    cancelledRosterTaskWork({ kind: "process", taskId: "process-1" }).kind,
+    "shell",
+  );
   assert.lengthOf(work.label, 160);
   const idOnly = cancelledRosterTaskWork({ kind: "background_task", taskId: "t".repeat(400) });
   assert.lengthOf(idOnly.label, 160);

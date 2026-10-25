@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -44,6 +45,30 @@ import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
+
+it("marks context handoffs unsent only for proven pre-prompt rejection", () => {
+  const rejection = new ProviderAdapter.ProviderAdapterTurnNotSubmittedError({
+    driver: ProviderDriverKind.make("codex"),
+    cause: new Error("no native turn/start attempted"),
+  });
+  const wrapped = new ProviderAdapter.ProviderAdapterTurnStartError({
+    driver: ProviderDriverKind.make("codex"),
+    threadId: ThreadId.make("handoff-proof-thread"),
+    providerThreadId: ProviderThreadId.make("handoff-proof-provider-thread"),
+    runId: RunId.make("handoff-proof-run"),
+    cause: rejection,
+  });
+  expect(ProviderTurnStart.refusedBeforePrompt(wrapped)).toBe(true);
+  expect(ProviderTurnStart.refusedBeforePrompt(
+    new ProviderAdapter.ProviderAdapterTurnStartError({
+      driver: ProviderDriverKind.make("codex"),
+      threadId: ThreadId.make("handoff-ambiguous-thread"),
+      providerThreadId: ProviderThreadId.make("handoff-ambiguous-provider-thread"),
+      runId: RunId.make("handoff-ambiguous-run"),
+      cause: new Error("turn/start response lost"),
+    }),
+  )).toBe(false);
+});
 
 it("does not commit running state when inherited background routing cannot be read", async () => {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
@@ -587,6 +612,83 @@ function makeLocalCommandHarness(input: {
   };
 }
 
+effectIt.effect(
+  "sends only the current ChatGPT message despite stale local handoffs and usage",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({ text: "continue" });
+      const projection = harness.projection();
+      const run = projection.runs.at(-1)!;
+      const providerThread = {
+        ...projection.providerThreads.at(-1)!,
+        driver: ProviderDriverKind.make("chatgpt"),
+        contextUsage: { usedTokens: 1_000_000, maxTokens: 128_000 },
+      };
+      harness.setProjection({
+        ...projection,
+        providerThreads: [providerThread],
+        contextHandoffs: [
+          {
+            id: ContextHandoffId.make("stale-chatgpt-handoff"),
+            threadId: projection.thread.id,
+            targetRunId: run.id,
+            fromProviderThreadIds: [providerThread.id],
+            toProviderThreadId: providerThread.id,
+            coveredRunOrdinals: { from: 1, to: 1 },
+            strategy: "full_thread_summary",
+            status: "ready",
+            summaryMessageId: null,
+            summaryText: "Old command output".repeat(20_000),
+            createdByProviderInstanceId: providerThread.providerInstanceId,
+            createdAt: run.requestedAt,
+            updatedAt: run.requestedAt,
+          },
+        ],
+      });
+      const sent: string[] = [];
+      harness.open.mockImplementation(() =>
+        Effect.succeed({
+          driver: providerThread.driver,
+          providerSession: {
+            id: providerThread.providerSessionId!,
+            driver: providerThread.driver,
+            providerInstanceId: providerThread.providerInstanceId,
+            status: "ready",
+            cwd: "/tmp/native-account-command",
+            model: null,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: run.requestedAt,
+            updatedAt: run.requestedAt,
+            lastError: null,
+          },
+          contextHandoffDelivery: "reference",
+          ensureThread: () => Effect.succeed(providerThread),
+          resumeThread: () => Effect.succeed(providerThread),
+          startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            Effect.sync(() => {
+              sent.push(input.message.text);
+            }),
+        } as never),
+      );
+      harness.startRootRun.mockImplementation((input) =>
+        input.session
+          .startTurn({
+            ...input,
+            threadId: input.appThread.id,
+            runId: input.run.id,
+            runOrdinal: input.run.ordinal,
+            rootNodeId: input.rootNode.id,
+          })
+          .pipe(Effect.orDie),
+      );
+
+      yield* harness.start;
+
+      expect(sent).toEqual(["continue"]);
+      expect(harness.projection().runs.at(-1)?.status).toBe("running");
+    }),
+);
+
 effectIt.effect.each(["cleanup-first", "startup-first"])(
   "coordinates provider startup with %s",
   (order) =>
@@ -1042,3 +1144,81 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+it("excludes only legacy child-result handoffs, preserving genuine history migration", () => {
+  const transfers = [
+    ...Array.from({ length: 18 }, (_, i) => ({
+      type: "subagent_result" as const,
+      resolution: { strategy: "portable_context" as const, contextHandoffId: "child-handoff-" + i },
+    })),
+    { type: "provider_handoff" as const, resolution: { strategy: "portable_context" as const, contextHandoffId: "migration" } },
+    { type: "subagent_result" as const, resolution: null },
+  ] as unknown as OrchestrationV2ThreadProjection["contextTransfers"];
+  const ignored = ProviderTurnStart.legacyAppOwnedResultHandoffIds(transfers);
+  expect(ignored.size).toBe(18);
+  expect(ignored.has("child-handoff-0" as never)).toBe(true);
+  expect(ignored.has("child-handoff-17" as never)).toBe(true);
+  expect(ignored.has("migration" as never)).toBe(false);
+});
+effectIt.effect(
+  "does not block other providers on cancelled historical local runs",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        failReadsAfterRunning: true,
+      });
+      const before = harness.projection();
+      const run = before.runs.at(-1)!;
+      harness.setProjection({
+        ...before,
+        runs: [
+          {
+            ...run,
+            id: RunId.make("prior-native-generation-without-turn-event"),
+            ordinal: 1,
+            status: "cancelled",
+            startedAt: DateTime.makeUnsafe("2026-09-04T11:00:00Z"),
+            completedAt: DateTime.makeUnsafe("2026-09-04T11:01:00Z"),
+          },
+          run,
+        ],
+      });
+
+      yield* harness.start;
+
+      expect(harness.open).toHaveBeenCalledOnce();
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
+    }),
+);
+effectIt.effect(
+  "does not block other providers on locally completed historical runs",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        failReadsAfterRunning: true,
+      });
+      const before = harness.projection();
+      const run = before.runs.at(-1)!;
+      harness.setProjection({
+        ...before,
+        runs: [
+          {
+            ...run,
+            id: RunId.make("locally-completed-native-generation"),
+            ordinal: 1,
+            status: "completed",
+            startedAt: DateTime.makeUnsafe("2026-09-04T11:00:00Z"),
+            completedAt: DateTime.makeUnsafe("2026-09-04T11:01:00Z"),
+          },
+          run,
+        ],
+      });
+
+      yield* harness.start;
+
+      expect(harness.open).toHaveBeenCalledOnce();
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
+    }),
+);

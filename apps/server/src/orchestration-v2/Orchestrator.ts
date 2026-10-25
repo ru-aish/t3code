@@ -78,6 +78,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import { delegatedCompletionWakeDetail } from "./delegatedCompletionWake.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import {
   isCheckpointRestoreIsolated,
@@ -560,12 +561,6 @@ function legacyPullRequestLink(
   );
 }
 
-function delegatedCompletionWakeDetail(taskIds: ReadonlyArray<string>): string {
-  const taskList = taskIds.join(", ");
-  return taskIds.length === 1
-    ? `Delegated task ${taskList} reached a terminal state. Use task_status with taskId ${taskList} to read the result.`
-    : `Delegated tasks ${taskList} reached terminal states. Use task_status with each taskId to read the results.`;
-}
 
 function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]): boolean {
   return (
@@ -10118,46 +10113,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         targetThreadId: parentThreadId,
         type: "subagent_result",
       });
-      const childProviderThread =
-        childRun.providerThreadId === null
-          ? undefined
-          : childProjection.providerThreads.find(
-              (candidate) => candidate.id === childRun.providerThreadId,
-            );
-      const parentProviderThread =
-        parentRun?.providerThreadId === null || parentRun?.providerThreadId === undefined
-          ? undefined
-          : parentProjection.providerThreads.find(
-              (candidate) => candidate.id === parentRun.providerThreadId,
-            );
-      const resultHandoff: OrchestrationV2ContextHandoff | null =
-        parentRun === undefined ||
-        childProviderThread === undefined ||
-        parentProviderThread === undefined
-          ? null
-          : {
-              id: yield* idAllocator.allocate.contextHandoff({
-                threadId: parentThreadId,
-                fromProviderInstanceId: childRun.providerInstanceId,
-                toProviderInstanceId: parentRun.providerInstanceId,
-              }),
-              transferId: resultTransferId,
-              threadId: parentThreadId,
-              targetRunId: parentRun.id,
-              fromProviderThreadIds: [childProviderThread.id],
-              toProviderThreadId: parentProviderThread.id,
-              coveredRunOrdinals: {
-                from: childRun.ordinal,
-                to: childRun.ordinal,
-              },
-              strategy: "manual_context",
-              status: "ready",
-              summaryMessageId: result.messageId,
-              summaryText: result.text,
-              createdByProviderInstanceId: childRun.providerInstanceId,
-              createdAt: now,
-              updatedAt: now,
-            };
       const resultTransfer: OrchestrationV2ContextTransfer = {
         id: resultTransferId,
         type: "subagent_result",
@@ -10173,13 +10128,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           parentRun?.providerInstanceId ?? parentProjection.thread.providerInstanceId,
         targetRunId: parentRun?.id ?? null,
         status: "consumed",
-        resolution:
-          resultHandoff === null
-            ? null
-            : {
-                strategy: "portable_context",
-                contextHandoffId: resultHandoff.id,
-              },
+        resolution: null,
         createdBy: "system",
         error: null,
         createdAt: now,
@@ -10187,7 +10136,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         consumedAt: now,
       };
 
-      yield* writeSystemEvents([
+      const completionEffects: ReadonlyArray<PendingOrchestrationEffectV2> =
+        completionPlan.task.completionDelivery?.state === "claimed"
+          ? [
+              {
+                // Persist one effect per terminal child in the same transaction as
+                // its result events. Process loss cannot drop this obligation.
+                id: `effect:delegated-completion:${task.id}:${childRun.id}`,
+                commandId: CommandId.make(`command:delegated-completion:${task.id}:${childRun.id}`),
+                threadId: parentThreadId,
+                request: { type: "delegated-completion.dispatch", taskId: task.id },
+              },
+            ]
+          : [];
+      const writeCompletionEvents = (events: Parameters<typeof writeSystemEvents>[0]) =>
+        writeSystemEvents(events, completionEffects);
+
+      yield* writeCompletionEvents([
         {
           type: "subagent.updated",
           threadId: parentThreadId,
@@ -10266,18 +10231,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   completedAt: now,
                   updatedAt: now,
                 },
-              },
-            ]),
-        ...(resultHandoff === null
-          ? []
-          : [
-              {
-                type: "context-handoff.updated" as const,
-                threadId: parentThreadId,
-                ...(parentRun === undefined ? {} : { runId: parentRun.id }),
-                providerInstanceId: childRun.providerInstanceId,
-                occurredAt: now,
-                payload: resultHandoff,
               },
             ]),
         {
