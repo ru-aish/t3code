@@ -9,6 +9,8 @@ import {
   OrchestratorMcpDeleteScheduledTaskResult,
   OrchestratorMcpRequestSecretInput,
   OrchestratorMcpRequestSecretResult,
+  OrchestratorMcpRequestUserInputInput,
+  OrchestratorMcpRequestUserInputResult,
   OrchestratorMcpFailure,
   OrchestratorMcpListScheduledTasksInput,
   OrchestratorMcpListScheduledTasksResult,
@@ -165,6 +167,18 @@ const DeleteScheduledTaskTool = Tool.make("delete_scheduled_task", {
   .annotate(Tool.Title, "Delete a scheduled task")
   .annotate(Tool.Destructive, true);
 
+const RequestUserInputTool = Tool.make("request_user_input", {
+  description:
+    "Ask the user one to three questions through T3's question cards. This returns immediately with a durable requestId; continue independent work, or end the turn while waiting for an answer. The user's answer resumes this thread as a message, including after reconnecting. Provide distinct question IDs, concise headers, the full question, and options (an empty array allows a free-text answer). Use clientRequestId to retry safely. Use this when missing information or a decision blocks progress. Never use it for secrets or to approve tool permissions; use request_secret for secrets.",
+  parameters: OrchestratorMcpRequestUserInputInput,
+  success: OrchestratorMcpRequestUserInputResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Ask the user a question")
+  .annotate(Tool.Destructive, false);
+
 const RequestSecretTool = Tool.make("request_secret", {
   description:
     "Ask the user for a secret (a token, API key, signing secret, password) through a private card in this thread, and wait for them to answer. The value is kept by the app and NEVER returned to you or shown in the transcript. When saved, the result carries a secretRef: pass it to a tool that accepts one (e.g. schedule_task's signature.secretRef). It works once. Never ask for secrets in chat, and never invent one.",
@@ -281,6 +295,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ListScheduledTasksTool,
   UpdateScheduledTaskTool,
   DeleteScheduledTaskTool,
+  RequestUserInputTool,
   RequestSecretTool,
   CreateThreadsTool,
   ThreadListTool,

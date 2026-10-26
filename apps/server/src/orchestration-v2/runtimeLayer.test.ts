@@ -479,6 +479,130 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
 );
 
 it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+  it.effect(
+    "persists an MCP question once and resumes from its answer after the requesting turn ends",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("runtime-mcp-question");
+        const requestId = RuntimeRequestId.make("runtime-mcp-phone-question");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("mcp-question-create"),
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          projectId: ProjectId.make("mcp-question-project"),
+          title: "Question",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("mcp-question-start"),
+          threadId,
+          createdBy: "user",
+          creationSource: "web",
+          messageId: MessageId.make("mcp-question-start"),
+          text: "Implement on-device memory",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        });
+        const started = yield* orchestrator.getThreadProjection(threadId);
+        const run = started.runs[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          commandId: CommandId.make("mcp-question-running"),
+          events: [
+            {
+              id: EventId.make("mcp-question-running"),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+          ],
+        });
+        const command = {
+          type: "user_input_request.record" as const,
+          commandId: CommandId.make("mcp-question-record"),
+          threadId,
+          runId: run.id,
+          nodeId: run.rootNodeId!,
+          requestId,
+          questions: [
+            { id: "phone", header: "Phone", question: "Which phone model and RAM?", options: [] },
+          ],
+        };
+        yield* orchestrator.dispatch(command);
+        yield* orchestrator.dispatch({
+          ...command,
+          commandId: CommandId.make("mcp-question-replay"),
+        });
+        const asked = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(asked.runtimeRequests, 1);
+        assert.deepEqual(asked.runtimeRequests[0]?.responseCapability, { type: "message" });
+        assert.notEqual(asked.runtimeRequests[0]?.nodeId, run.rootNodeId);
+        const question = asked.turnItems.find((item) => item.type === "user_input_request");
+        assert.equal(question?.type, "user_input_request");
+        if (question?.type === "user_input_request")
+          assert.isTrue(question.questions[0]?.allowCustomAnswer);
+        assert.equal(
+          (yield* orchestrator.getThreadShell(threadId))?.pendingRuntimeRequest?.kind,
+          "user_input",
+        );
+        const invalid = yield* orchestrator
+          .dispatch({
+            ...command,
+            commandId: CommandId.make("mcp-question-duplicate-ids"),
+            requestId: RuntimeRequestId.make("duplicate-question"),
+            questions: [command.questions[0]!, command.questions[0]!],
+          })
+          .pipe(Effect.result);
+        assert.equal(invalid._tag, "Failure");
+        yield* sink.write({
+          commandId: CommandId.make("mcp-question-finished"),
+          events: [
+            {
+              id: EventId.make("mcp-question-finished"),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+            },
+          ],
+        });
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make("mcp-question-answer"),
+          threadId,
+          requestId,
+          answers: { phone: "Galaxy S25, 12 GB RAM" },
+        });
+        const answered = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(answered.runtimeRequests[0]?.status, "resolved");
+        assert.isTrue(
+          answered.messages.some(
+            (message) => message.role === "user" && message.text.includes("Galaxy S25, 12 GB RAM"),
+          ),
+        );
+        assert.lengthOf(answered.runs, 2);
+        const late = yield* orchestrator
+          .dispatch({ ...command, commandId: CommandId.make("mcp-question-late") })
+          .pipe(Effect.result);
+        assert.equal(late._tag, "Failure");
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
+          "resolved",
+        );
+      }),
+  );
   it.effect("emits model updates separately from provider switches", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

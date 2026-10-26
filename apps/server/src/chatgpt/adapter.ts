@@ -1,4 +1,4 @@
-import type { ChatGPTActionError } from "./actions.ts";
+import type { ChatGPTActionError, ChatGPTWaitState } from "./actions.ts";
 import {
   ChatGPTSettings,
   MessageId,
@@ -6,6 +6,9 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   TurnItemId,
+  RuntimeRequestId,
+  type RunId,
+  type OrchestrationV2RuntimeRequest,
   type ThreadId,
   type ProjectId,
   type ChatAttachment,
@@ -24,15 +27,19 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import type { ProviderAdapterDriverCreateInput } from "@t3tools/provider-core/server/adapterDriver";
 import type * as ChatGPTMcpBridge from "./mcpBridge.ts";
 import { isTerminalToolCall, mergeFinalAnswer } from "./protocol.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { messageQuestionArtifacts } from "../orchestration-v2/userInputArtifacts.ts";
 import {
   ChatGPTConnection,
   ChatGPTSubmissionNotStartedError,
+  stableMessageId,
   type ChatGPTUpdate,
   type ChatGPTImage,
   type ConversationSnapshot,
@@ -48,6 +55,10 @@ export class ChatGPTTurnNotSubmittedError extends Error {
 }
 
 export const CHATGPT_DRIVER = ProviderDriverKind.make("chatgpt");
+const pausedTerminalTask = Schema.Struct({ paused: Schema.Literal(true) });
+const decodePausedTerminalTask = Schema.decodeUnknownOption(
+  Schema.Union([pausedTerminalTask, Schema.fromJsonString(pausedTerminalTask)]),
+);
 
 const capabilities = {
   runtimePolicy: { enforcement: "client-boundary" },
@@ -56,7 +67,7 @@ const capabilities = {
     supportsModelSwitchInSession: true,
     supportsProviderSwitchingViaHandoff: true,
     supportsRuntimeModeSwitchInSession: false,
-    pendingRequestsSurviveRestart: false,
+    pendingRequestsSurviveRestart: true,
   },
   threads: {
     canCreateEmptyThread: true,
@@ -105,7 +116,7 @@ const capabilities = {
     emitsPlanUpdated: false,
     emitsTodoList: false,
     emitsProposedPlan: false,
-    supportsStructuredQuestions: false,
+    supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },
   subagents: {
@@ -277,6 +288,10 @@ export const makeChatGPTAdapter = (
       unavailableUntil: number;
     };
     readonly refreshThread?: (threadId: ThreadId) => Effect.Effect<void, ChatGPTActionError>;
+    readonly readWaitState?: (
+      threadId: ThreadId,
+      runId: RunId,
+    ) => Effect.Effect<ChatGPTWaitState | null, ChatGPTActionError>;
     readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
     readonly resolveLinkedProject?: (projectId: ProjectId) => Effect.Effect<string | null, ServerSettingsError>;
     readonly linkPullRequest?: (
@@ -336,9 +351,12 @@ export const makeChatGPTAdapter = (
               }),
           });
         const snapshotItems = new Map<TurnItemId, OrchestrationV2TurnItem>();
+        const questionRequests = new Map<RuntimeRequestId, OrchestrationV2RuntimeRequest>();
         const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => {
           if (event.type === "turn_item.updated")
             snapshotItems.set(event.turnItem.id, event.turnItem);
+          if (event.type === "runtime_request.updated")
+            questionRequests.set(event.runtimeRequest.id, event.runtimeRequest);
           return Queue.offer(events, event);
         };
         const session = {
@@ -498,7 +516,6 @@ export const makeChatGPTAdapter = (
           const operationId = control.payload.operationId;
           const fullToolName = control.payload.toolName;
           if (!operationId || !fullToolName) return;
-          usedTerminalTools = true;
           const toolName = terminalToolName(fullToolName);
           const existing = terminalToolItems.get(operationId);
           if (!existing && (!active || !thread)) return;
@@ -520,6 +537,7 @@ export const makeChatGPTAdapter = (
                 providerThreadId: thread!.id,
                 providerTurnId: active!.turn.id,
               };
+          if (owner.providerTurnId === active?.turn.id) usedTerminalTools = true;
           const status =
             control.kind === "tool_started"
               ? ("running" as const)
@@ -666,7 +684,16 @@ export const makeChatGPTAdapter = (
             driver: CHATGPT_DRIVER,
             turnItem: item,
           });
-          if (control.kind === "tool_completed") yield* completeWithToolRecovery();
+          if (control.kind === "tool_completed") {
+            if (
+              status === "completed" &&
+              toolName === "thread_task" &&
+              owner.providerTurnId === active?.turn.id
+            )
+              yield* publishLegacyQuestion(operationId, rawInput, control.payload.output);
+            yield* completeWithToolRecovery();
+            yield* settleAppWait();
+          }
         });
         const finish = Effect.fnUntraced(function* (
           ...outcome:
@@ -763,6 +790,120 @@ export const makeChatGPTAdapter = (
               : { status, failure: null }),
             threadDisposition: "reusable",
           });
+        });
+        const readAppWaitState = () =>
+          active && transport.readWaitState
+            ? transport.readWaitState(input.threadId, active.input.runId).pipe(
+                Effect.timeout("5 seconds"),
+                Effect.catch((cause) =>
+                  Effect.logWarning("Could not read ChatGPT app wait state", { cause }).pipe(
+                    Effect.as(null),
+                  ),
+                ),
+              )
+            : Effect.succeed(null);
+        const publishLegacyQuestion = Effect.fnUntraced(function* (
+          operationId: string,
+          rawInput: unknown,
+          output: unknown,
+        ) {
+          if (!active || !thread) return;
+          const args = terminalToolInputRecord(rawInput);
+          if (args?.action !== "wait" || typeof args.reason !== "string" || !args.reason.trim())
+            return;
+          const decoded = decodePausedTerminalTask(
+            terminalToolInputRecord(output)?.paused === true ? output : terminalToolText(output),
+          );
+          if (Option.isNone(decoded)) return;
+          binding = { ...binding, paused: 1 };
+          const requestId = RuntimeRequestId.make(`chatgpt-wait:${input.threadId}:${operationId}`);
+          if (questionRequests.has(requestId) || (yield* readAppWaitState())?.kind === "user_input")
+            return;
+          const artifacts = messageQuestionArtifacts({
+            threadId: input.threadId,
+            runId: active.input.runId,
+            rootNodeId: active.input.rootNodeId,
+            providerThreadId: thread.id,
+            providerTurnId: active.turn.id,
+            requestId,
+            questions: [
+              {
+                id: "answer",
+                header: "Input needed",
+                question: args.reason.trim(),
+                options: [],
+                allowCustomAnswer: true,
+              },
+            ],
+            ordinal: ++nextOrdinal,
+            now: yield* DateTime.now,
+          });
+          yield* emit({ type: "node.updated", driver: CHATGPT_DRIVER, node: artifacts.node });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_DRIVER,
+            turnItem: artifacts.turnItem,
+          });
+          yield* emit({
+            type: "runtime_request.updated",
+            driver: CHATGPT_DRIVER,
+            threadId: input.threadId,
+            runtimeRequest: artifacts.request,
+          });
+        });
+        const settleAppWait = Effect.fnUntraced(function* () {
+          if (
+            !active ||
+            !thread ||
+            !streamComplete ||
+            interrupting ||
+            hasRunningTerminalTools(active)
+          )
+            return;
+          const waiting = active;
+          const hasQuestion = [...questionRequests.values()].some(
+            (request) => request.providerTurnId === waiting.turn.id,
+          );
+          const state = hasQuestion
+            ? ({ kind: "user_input", message: "Waiting for your answer." } as const)
+            : yield* readAppWaitState();
+          if (!state || active !== waiting) return;
+          if (!binding.paused) {
+            const paused = yield* attempt(() =>
+              connection.control<TerminalBinding>("pause", {
+                requestId: stableMessageId(`app-wait:${input.threadId}:${waiting.turn.id}`),
+              }),
+            );
+            if (active !== waiting || interrupting) return;
+            binding = paused;
+          }
+          if (active !== waiting || interrupting) return;
+          if (state.kind !== "user_input") {
+            const timestamp = yield* DateTime.now;
+            yield* emit({
+              type: "turn_item.updated",
+              driver: CHATGPT_DRIVER,
+              turnItem: {
+                id: TurnItemId.make(`chatgpt:${input.threadId}:app-wait:${waiting.turn.id}`),
+                threadId: input.threadId,
+                runId: waiting.input.runId,
+                nodeId: waiting.input.rootNodeId,
+                providerThreadId: thread.id,
+                providerTurnId: waiting.turn.id,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: ++nextOrdinal,
+                status: "completed",
+                title: null,
+                startedAt: timestamp,
+                completedAt: timestamp,
+                updatedAt: timestamp,
+                type: "system_notice",
+                message: state.message,
+              },
+            });
+          }
+          yield* finish("completed");
         });
         let staleToolRecoveryRequestId: string | null = null;
         const recoverStaleTerminalTools = Effect.fnUntraced(function* (
@@ -1005,6 +1146,7 @@ export const makeChatGPTAdapter = (
               if (binding.state === "done") yield* completeWithToolRecovery();
               else if (!usedTerminalTools && !hasRunningTerminalTools(active))
                 yield* finish("completed");
+              else yield* settleAppWait();
             }
             // Tool-using turns require Terminal MCP confirmation; reply-only turns
             // finish on the normal ChatGPT stream completion.
@@ -1153,6 +1295,15 @@ export const makeChatGPTAdapter = (
               update.status === "finished_successfully",
           );
           if (
+            snapshot.idle &&
+            recoveredFinal &&
+            binding.paused &&
+            active?.requestId === snapshot.latestRequestId
+          ) {
+            streamComplete = true;
+            yield* settleAppWait();
+          }
+          if (
             recoveredFinal &&
             active !== null &&
             active.requestId === snapshot.latestRequestId &&
@@ -1281,6 +1432,10 @@ export const makeChatGPTAdapter = (
               model: input.modelSelection.model,
             }),
           );
+          for (const request of projection.runtimeRequests) {
+            if (String(request.id).startsWith(`chatgpt-wait:${input.threadId}:`))
+              questionRequests.set(request.id, request);
+          }
           for (const item of projection.turnItems) {
             nextOrdinal = Math.max(nextOrdinal, item.ordinal);
             if (
@@ -1324,6 +1479,18 @@ export const makeChatGPTAdapter = (
               usedTerminalTools = true;
             }
           }
+          if (active && binding.paused) {
+            for (const [operationId, item] of terminalToolItems) {
+              if (
+                item.providerTurnId === active.turn.id &&
+                item.type === "dynamic_tool" &&
+                item.toolName !== null &&
+                terminalToolName(item.toolName) === "thread_task" &&
+                item.status === "completed"
+              )
+                yield* publishLegacyQuestion(operationId, item.input, item.output);
+            }
+          }
           yield* applySnapshot(snapshot);
           return {
             providerThread: thread,
@@ -1332,7 +1499,9 @@ export const makeChatGPTAdapter = (
               .filter(([key]) => !reasoningKeys.has(key))
               .map(([, message]) => message),
             turnItems: [...snapshotItems.values()],
-            runtimeRequests: [],
+            runtimeRequests: [...questionRequests.values()].filter(
+              (request) => !projection.runtimeRequests.some((saved) => saved.id === request.id),
+            ),
           } satisfies ProviderAdapter.ProviderAdapterV2ThreadSnapshot;
         });
         const controlEvents = Effect.tryPromise({
@@ -1424,11 +1593,18 @@ export const makeChatGPTAdapter = (
                   control.payload.url,
                   control.event_id,
                 );
-              } else if (control.kind === "state" && control.payload.state === "done") {
-                binding = { ...binding, state: "done" };
-                if (streamComplete) yield* completeWithToolRecovery();
-                else if (active)
+              } else if (control.kind === "state") {
+                binding = {
+                  ...binding,
+                  ...(control.payload.state === "done" ? { state: "done" as const } : {}),
+                  ...(control.payload.paused === undefined
+                    ? {}
+                    : { paused: control.payload.paused ? 1 : 0 }),
+                };
+                if (binding.state === "done" && streamComplete) yield* completeWithToolRecovery();
+                else if (binding.state === "done" && active)
                   yield* recoverMissingCompletion(active.requestId).pipe(Effect.forkScoped);
+                else yield* settleAppWait();
               } else if (control.kind === "continue" && active && !interrupting) {
                 const activeRequestId = active.requestId;
                 const claim = yield* attempt(() =>
@@ -1509,6 +1685,7 @@ export const makeChatGPTAdapter = (
             retiredRequestIds.clear();
             recoveryNotices.clear();
             messages.clear();
+            questionRequests.clear();
             finalFragments.clear();
             reasoningKeys.clear();
             itemOrdinals.clear();
