@@ -106,7 +106,8 @@ export const layerWorker = Layer.effectDiscard(
             (item) =>
               item.kind === "user_input" &&
               item.status === "pending" &&
-              item.responseCapability.type === "message",
+              item.responseCapability.type === "message" &&
+              nodes.has(item.nodeId),
           )
         ) {
           return { kind: "user_input", message: "Waiting for your answer." } as const;

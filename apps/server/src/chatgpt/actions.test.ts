@@ -102,8 +102,10 @@ it.effect(
             now: initial.updatedAt,
           });
           projection = { ...initial, nodes: [question.node], runtimeRequests: [question.request] };
-          expect(yield* actions.readWaitState(threadId, RunId.make("later-run"))).toMatchObject({
+          expect(yield* actions.readWaitState(threadId, RunId.make("later-run"))).toBeNull();
+          expect(yield* actions.readWaitState(threadId, runId)).toMatchObject({
             kind: "user_input",
+            message: "Waiting for your answer.",
           });
           projection = {
             ...projection,
