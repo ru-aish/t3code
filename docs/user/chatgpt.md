@@ -6,6 +6,8 @@ In Settings → Providers, enable ChatGPT and configure the local renderer endpo
 
 The separate ChatGPT project control selects the cloud project for a new conversation. Choose General ChatGPT for ordinary chats, select an existing project, or create one there. That destination stays fixed for the thread; it does not change your local project or workspace folder.
 
+To link a T3 project to a ChatGPT project, open **Settings → Projects**, select the T3 project, and use **ChatGPT project links** to pick an existing ChatGPT project. New ChatGPT conversations started in that T3 project use the linked destination automatically (including from other clients). Before the first message, the ChatGPT project control in the web or desktop composer can override it, including choosing **General ChatGPT**. Removing a link restores General ChatGPT as the default. Existing conversations keep their original destination.
+
 T3 assigns the permanent tool identity before the first message and includes it on every send. Terminal MCP accepts only registered identities. A shared connector's allowlist rejects unknown identities; it does not authenticate which ChatGPT conversation supplied a known ID.
 
 Terminal MCP keeps the task working until it receives completion evidence and verifies that no tools or processes remain active. It requests continuation after five minutes without tool activity, starting after the final managed process exits. Stop pauses recovery; the next user request starts a new task. Settling a thread stays local to T3.

@@ -42,6 +42,7 @@ const fakes = vi.hoisted(() => ({
     callback?: (update: ChatGPTUpdate) => void;
     publish: (event: TerminalEvent) => void;
     sent: string[];
+    sentProjectIds: Array<string | null | undefined>;
     stops: number;
     controls: string[];
     acknowledged: string[];
@@ -74,6 +75,7 @@ vi.mock("./connection.ts", () => ({
     messages = [];
     callback?: (update: ChatGPTUpdate) => void;
     sent: string[] = [];
+    sentProjectIds: Array<string | null | undefined> = [];
     stops = 0;
     controls: string[] = [];
     acknowledged: string[] = [];
@@ -144,12 +146,21 @@ vi.mock("./connection.ts", () => ({
         model: "test-model",
       };
     }
-    async send(id: string) {
+    async send(
+      id: string,
+      _text: string,
+      _model: string,
+      _cwd: string,
+      _reasoningEffort?: string,
+      _images?: unknown[],
+      projectId?: string | null,
+    ) {
       if (fakes.rejectNextSendBeforeSubmission) {
         fakes.rejectNextSendBeforeSubmission = false;
         throw new ChatGPTSubmissionNotStartedError("Native turn was never submitted");
       }
       this.sent.push(id);
+      this.sentProjectIds.push(projectId);
       this.onSend?.(id);
       if (fakes.failNextSend) {
         fakes.failNextSend = false;
@@ -246,10 +257,19 @@ vi.mock("./connection.ts", () => ({
 }));
 import { makeChatGPTAdapter } from "./adapter.ts";
 
-const fixture = Effect.gen(function* () {
+const fixtureWithProject = (
+  linkedProject: string | null = null,
+  selectedProject?: string,
+) => Effect.gen(function* () {
   const threadId = ThreadId.make("test-thread");
   const now = yield* DateTime.now;
-  const selection = { instanceId: ProviderInstanceId.make("chatgpt"), model: "test-model" };
+  const selection = {
+    instanceId: ProviderInstanceId.make("chatgpt"),
+    model: "test-model",
+    ...(selectedProject === undefined
+      ? {}
+      : { options: [{ id: "chatgptProjectId", value: selectedProject }] }),
+  };
   const policy = {
     runtimeMode: "full-access" as const,
     interactionMode: "default" as const,
@@ -277,6 +297,7 @@ const fixture = Effect.gen(function* () {
       environmentId: "test-environment",
       cacheDir: "/tmp/test-chatgpt",
       attachMcp,
+      resolveLinkedProject: () => Effect.succeed(linkedProject),
       // Production recovery persists through the Refresh service first. Keep the
       // unit harness on that path so local reconciliation cannot silently drift.
       refreshThread,
@@ -355,6 +376,8 @@ const fixture = Effect.gen(function* () {
     requestId: turnInput.message.messageId,
   };
 });
+
+const fixture = fixtureWithProject();
 
 // Persisted runs retain the first user message while Terminal MCP's continuation
 // IDs are only present in the native submission history.
@@ -440,6 +463,24 @@ const terminalTool = (
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("applies the linked ChatGPT project when no project was selected", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake } = yield* fixtureWithProject("g-p-linked");
+        expect(fake.sentProjectIds).toEqual(["g-p-linked"]);
+      }),
+    ),
+  );
+
+  it.live("lets an explicit General ChatGPT selection override the link", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fake } = yield* fixtureWithProject("g-p-linked", "general");
+        expect(fake.sentProjectIds).toEqual([null]);
+      }),
+    ),
+  );
+
   it.live("does not move a replacement turn into an old tool's user wait", () =>
     Effect.scoped(
       Effect.gen(function* () {
