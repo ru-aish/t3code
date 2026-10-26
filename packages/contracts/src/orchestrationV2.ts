@@ -2981,6 +2981,15 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  */
 const OrchestrationV2InternalCommand = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("user_input_request.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    nodeId: NodeId,
+    requestId: RuntimeRequestId,
+    questions: Schema.Array(OrchestrationV2UserInputQuestion),
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),
     commandId: CommandId,
     threadId: ThreadId,

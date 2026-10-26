@@ -13,6 +13,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import { messageQuestionArtifacts } from "../orchestration-v2/userInputArtifacts.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 
 const isRefreshError = Schema.is(ChatGPTThreadRefreshError);
@@ -78,11 +79,45 @@ export const layer = Layer.effect(
           });
           // Idle threads have no run subscriber to persist adapter events.
           // Commit the reconciled transcript before acknowledging a refresh.
-          const knownMessages = new Map(
-            projection.messages.map((message) => [message.id, message]),
-          );
-          const knownItems = new Map(projection.turnItems.map((item) => [item.id, item]));
+          const current = yield* projections.getThreadProjection(threadId);
+          const knownMessages = new Map(current.messages.map((message) => [message.id, message]));
+          const knownItems = new Map(current.turnItems.map((item) => [item.id, item]));
+          const knownRequests = new Set(current.runtimeRequests.map((request) => request.id));
           const changes: ProviderAdapter.ProviderAdapterV2Event[] = [];
+          for (const request of snapshot.runtimeRequests) {
+            if (
+              knownRequests.has(request.id) ||
+              request.kind !== "user_input" ||
+              request.status !== "pending" ||
+              request.responseCapability.type !== "message"
+            )
+              continue;
+            const item = snapshot.turnItems?.find(
+              (item) => item.type === "user_input_request" && item.requestId === request.id,
+            );
+            if (item?.type !== "user_input_request") continue;
+            const run = current.runs.find((run) => run.id === item.runId);
+            if (!run?.rootNodeId) continue;
+            const { node } = messageQuestionArtifacts({
+              threadId,
+              runId: run.id,
+              rootNodeId: run.rootNodeId,
+              providerThreadId: item.providerThreadId,
+              providerTurnId: item.providerTurnId,
+              requestId: request.id,
+              questions: item.questions,
+              ordinal: item.ordinal,
+              now: request.createdAt,
+            });
+            if (node.id !== request.nodeId || node.id !== item.nodeId) continue;
+            if (!current.nodes.some((saved) => saved.id === node.id))
+              changes.push({ type: "node.updated", driver: runtime.driver, node });
+            changes.push({
+              type: "runtime_request.updated",
+              driver: runtime.driver,
+              runtimeRequest: request,
+            });
+          }
           for (const message of snapshot.messages) {
             const previous = knownMessages.get(message.id);
             if (previous?.text === message.text && previous.streaming === message.streaming)
@@ -91,6 +126,12 @@ export const layer = Layer.effect(
           }
           for (const item of snapshot.turnItems ?? []) {
             const previous = knownItems.get(item.id);
+            // Answers are app-owned; a native snapshot cannot reopen a saved question.
+            if (
+              item.type === "user_input_request" &&
+              (previous || knownRequests.has(item.requestId))
+            )
+              continue;
             if (
               previous &&
               (previous.type === "reasoning" || previous.type === "assistant_message") &&

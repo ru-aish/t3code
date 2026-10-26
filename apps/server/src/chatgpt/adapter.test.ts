@@ -7,6 +7,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import type { ChatGPTWaitState } from "./actions.ts";
 import {
   ChatGPTSettings,
   ThreadId,
@@ -54,6 +55,7 @@ const fakes = vi.hoisted(() => ({
     onClaim?: () => void;
     claimGate?: Promise<void>;
     state: string;
+    paused: number;
     conversationId: string | null;
     conversationReads: number;
     resumeRequests: Array<string | undefined>;
@@ -65,6 +67,7 @@ const fakes = vi.hoisted(() => ({
   }>,
 }));
 vi.mock("./connection.ts", () => ({
+  stableMessageId: (value: string) => value,
   ChatGPTSubmissionNotStartedError: class ChatGPTSubmissionNotStartedError extends Error {},
   ChatGPTConnection: class {
     conversationId: string | null = null;
@@ -77,6 +80,7 @@ vi.mock("./connection.ts", () => ({
     idle = false;
     idleChecks = 0;
     epoch = 0;
+    paused = 0;
     state = "working";
     conversationReads = 0;
     conversationFailures = 0;
@@ -121,7 +125,9 @@ vi.mock("./connection.ts", () => ({
       if (action === "activate") {
         this.epoch++;
         this.state = "working";
+        this.paused = 0;
       }
+      if (action === "pause") this.paused = 1;
       if (action === "claim") {
         this.onClaim?.();
         if (this.claimGate) await this.claimGate;
@@ -133,7 +139,7 @@ vi.mock("./connection.ts", () => ({
         conversation_id: this.conversationId,
         epoch: this.epoch,
         state: this.state,
-        paused: 0,
+        paused: this.paused,
         cwd: "/tmp",
         model: "test-model",
       };
@@ -257,6 +263,7 @@ const fixture = Effect.gen(function* () {
     }),
   );
   const refreshThread = vi.fn((): Effect.Effect<void> => Effect.void);
+  const readWaitState = vi.fn((): Effect.Effect<ChatGPTWaitState | null> => Effect.succeed(null));
   const adapter = makeChatGPTAdapter(
     {
       instanceId: selection.instanceId,
@@ -273,6 +280,7 @@ const fixture = Effect.gen(function* () {
       // Production recovery persists through the Refresh service first. Keep the
       // unit harness on that path so local reconciliation cannot silently drift.
       refreshThread,
+      readWaitState,
     },
   );
   const session = yield* adapter.openSession({
@@ -339,6 +347,7 @@ const fixture = Effect.gen(function* () {
     attachMcp,
     refreshMcp,
     refreshThread,
+    readWaitState,
     turnInput,
     session,
     events,
@@ -431,6 +440,228 @@ const terminalTool = (
 });
 
 describe("ChatGPT task authority", () => {
+  it.live("does not move a replacement turn into an old tool's user wait", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { session, turnInput, fake, events } = yield* fixture;
+        yield* Queue.take(events);
+        fake.publish(
+          terminalTool("tool_started", {
+            operationId: "old-wait",
+            toolName: "fedora_t3code.thread_task",
+            input: { action: "wait", reason: "Old question" },
+          }),
+        );
+        yield* Stream.fromQueue(events).pipe(
+          Stream.filter((event) => event.type === "turn_item.updated"),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        yield* session.interruptTurn({
+          providerThread: turnInput.providerThread,
+          providerTurnId: ProviderTurnId.make(`chatgpt:${turnInput.attemptId}`),
+        });
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+        );
+        const nextId = MessageId.make("replacement-answer");
+        yield* session.startTurn({
+          ...turnInput,
+          attemptId: RunAttemptId.make("replacement-attempt"),
+          message: { ...turnInput.message, messageId: nextId },
+        });
+        fake.publish(
+          terminalTool(
+            "tool_completed",
+            {
+              operationId: "old-wait",
+              toolName: "fedora_t3code.thread_task",
+              status: "completed",
+              output: { paused: true },
+            },
+            2,
+          ),
+        );
+        yield* Stream.fromQueue(events).pipe(
+          Stream.filter((event) => event.type === "turn_item.updated"),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        fake.callback?.({ kind: "complete", requestId: nextId, conversationId: null });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.some((event) => event.type === "runtime_request.updated")).toBe(false);
+        expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+      }),
+    ),
+  );
+  it.live("restores a paused legacy question without forcing or resending its conversation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const value = yield* fixture;
+        const { session, turnInput, fake, events, requestId } = value;
+        yield* Queue.take(events);
+        fake.paused = 1;
+        fake.idle = true;
+        const now = turnInput.appThread.updatedAt;
+        const projection = yield* runningProjection(value, [
+          {
+            id: "chatgpt:test-thread:terminal-tool:restored-wait",
+            threadId: turnInput.threadId,
+            runId: turnInput.runId,
+            nodeId: turnInput.rootNodeId,
+            providerThreadId: turnInput.providerThread.id,
+            providerTurnId: `chatgpt:${turnInput.attemptId}`,
+            nativeItemRef: { driver: "chatgpt", nativeId: "restored-wait", strength: "strong" },
+            parentItemId: null,
+            ordinal: 2,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "dynamic_tool",
+            toolName: "thread_task",
+            input: { action: "wait", reason: "Which phone model and RAM?" },
+            output: { paused: true, state: "working" },
+          },
+        ]);
+        const snapshot = yield* session.readThreadSnapshot({
+          providerThread: turnInput.providerThread,
+          existingProjection: projection,
+        });
+        expect(snapshot.runtimeRequests).toHaveLength(1);
+        expect(snapshot.runtimeRequests[0]).toMatchObject({
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "message" },
+        });
+        const recorded = yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        expect(recorded.at(-1)).toMatchObject({ status: "completed" });
+        expect(fake.sent).toEqual([requestId]);
+        expect(fake.stops).toBe(0);
+      }),
+    ),
+  );
+  it.live.each([false, true])(
+    "projects a legacy user wait and releases the native turn (stream first: %s)",
+    (streamFirst) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId, session, turnInput } = yield* fixture;
+          yield* Queue.take(events);
+          const reason = "Which Samsung phone model and how much RAM will you use?";
+          fake.publish(
+            terminalTool("tool_started", {
+              operationId: "wait-for-phone",
+              toolName: "fedora_t3code.thread_task",
+              input: { action: "wait", reason },
+            }),
+          );
+          yield* Stream.fromQueue(events).pipe(
+            Stream.filter((event) => event.type === "turn_item.updated"),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+          if (streamFirst) fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          fake.publish({
+            ...terminal("state", "working"),
+            payload: { state: "working", paused: true },
+          });
+          fake.publish(
+            terminalTool("tool_completed", {
+              operationId: "wait-for-phone",
+              toolName: "fedora_t3code.thread_task",
+              status: "completed",
+              output: { result: JSON.stringify({ state: "working", paused: true }) },
+            }),
+          );
+          if (!streamFirst) fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          const recorded = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          const question = recorded.find(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
+          );
+          expect(question).toMatchObject({
+            turnItem: {
+              type: "user_input_request",
+              status: "waiting",
+              responseMode: "message",
+              questions: [{ question: reason, options: [] }],
+            },
+          });
+          const request = recorded.find((event) => event.type === "runtime_request.updated");
+          expect(request).toMatchObject({
+            runtimeRequest: {
+              kind: "user_input",
+              status: "pending",
+              responseCapability: { type: "message" },
+            },
+          });
+          expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+          expect(fake.stops).toBe(0);
+          yield* session.startTurn({
+            ...turnInput,
+            runId: RunId.make("phone-answer"),
+            attemptId: RunAttemptId.make("phone-answer"),
+            message: {
+              ...turnInput.message,
+              messageId: MessageId.make("phone-answer"),
+              text: "Galaxy S25, 12 GB RAM",
+            },
+          });
+          expect(fake.sent).toEqual([requestId, "phone-answer"]);
+        }),
+      ),
+  );
+
+  it.live.each(["user_input", "subagents", "pull_request"] as const)(
+    "hands a finished tool stream to app-owned %s work",
+    (kind) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { events, fake, requestId, readWaitState } = yield* fixture;
+          yield* Queue.take(events);
+          readWaitState.mockReturnValue(Effect.succeed({ kind, message: `Waiting for ${kind}` }));
+          fake.callback?.({
+            kind: "update",
+            requestId,
+            conversationId: null,
+            role: "assistant",
+            recipient: "api_tool.call_tool",
+            text: "fedora_t3code.run_command",
+          });
+          fake.callback?.({ kind: "complete", requestId, conversationId: null });
+          const recorded = yield* Stream.fromQueue(events).pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          );
+          expect(recorded.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+          expect(fake.controls).toContain("pause");
+          expect(fake.stops).toBe(0);
+          expect(fake.sent).toEqual([requestId]);
+          if (kind !== "user_input")
+            expect(recorded).toContainEqual(
+              expect.objectContaining({
+                type: "turn_item.updated",
+                turnItem: expect.objectContaining({
+                  type: "system_notice",
+                  message: `Waiting for ${kind}`,
+                }),
+              }),
+            );
+        }),
+      ),
+  );
   it.live("keeps inline handoff support when the orchestration bridge is unavailable", () =>
     Effect.scoped(
       Effect.gen(function* () {

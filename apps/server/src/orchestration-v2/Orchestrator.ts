@@ -79,6 +79,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { delegatedCompletionWakeDetail } from "./delegatedCompletionWake.ts";
+import { messageQuestionArtifacts } from "./userInputArtifacts.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import {
   isCheckpointRestoreIsolated,
@@ -483,6 +484,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.created.record":
       return command.parentThreadId;
     case "secret_request.record":
+    case "user_input_request.record":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -560,7 +562,6 @@ function legacyPullRequestLink(
     threadPullRequestsOf(thread).find((link) => threadPullRequestKeysEqual(link, key))?.watch,
   );
 }
-
 
 function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]): boolean {
   return (
@@ -7187,6 +7188,97 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchUserInputRequestRecord = Effect.fn(
+    "orchestrationV2.dispatch.userInputRequestRecord",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "user_input_request.record" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* projectionStore
+      .getThreadRecords(
+        command.threadId,
+        ["runs", "runtimeRequests", "turnItems", "attempts", "providerTurns"],
+        { turnItemTypes: ["user_input_request"], messageRoles: [] },
+      )
+      .pipe(mapDispatchError(command));
+    const run = projection.runs.find((candidate) => candidate.id === command.runId);
+    if (
+      !run ||
+      run.rootNodeId !== command.nodeId ||
+      (run.status !== "running" && run.status !== "waiting")
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "A question requires the root of an active run.",
+      });
+    }
+    const existing = projection.runtimeRequests.find((request) => request.id === command.requestId);
+    if (existing) {
+      const item = projection.turnItems.find(
+        (candidate) =>
+          candidate.type === "user_input_request" && candidate.requestId === command.requestId,
+      );
+      if (item?.runId !== run.id) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The question belongs to another run.",
+        });
+      }
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "runtime-request.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        nodeId: existing.nodeId,
+        providerInstanceId: run.providerInstanceId,
+        occurredAt: yield* DateTime.now,
+        payload: existing,
+      });
+      return;
+    }
+    if (
+      command.questions.length === 0 ||
+      command.questions.length > 3 ||
+      new Set(command.questions.map((question) => question.id)).size !== command.questions.length
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Provide one to three questions with distinct IDs.",
+      });
+    }
+    const now = yield* DateTime.now;
+    const artifacts = messageQuestionArtifacts({
+      threadId: command.threadId,
+      runId: run.id,
+      rootNodeId: command.nodeId,
+      providerThreadId: run.providerThreadId,
+      providerTurnId: providerTurnForRun(projection, run)?.id ?? null,
+      requestId: command.requestId,
+      questions: command.questions,
+      ordinal: yield* nextTurnItemOrdinal(projection),
+      now,
+    });
+    const emitEvent = emit(events, command);
+    const common = {
+      threadId: command.threadId,
+      runId: run.id,
+      nodeId: artifacts.node.id,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: now,
+    };
+    yield* emitEvent({ ...common, type: "node.updated", payload: artifacts.node });
+    yield* emitEvent({ ...common, type: "runtime-request.updated", payload: artifacts.request });
+    yield* emitEvent({ ...common, type: "turn-item.updated", payload: artifacts.turnItem });
+  });
+
   const dispatchSecretRequestRecord = Effect.fn("orchestrationV2.dispatch.secretRequestRecord")(
     function* (
       command: Extract<OrchestrationV2InternalCommand, { readonly type: "secret_request.record" }>,
@@ -10881,6 +10973,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
+        break;
+      case "user_input_request.record":
+        yield* dispatchUserInputRequestRecord(command, events);
         break;
       default:
         return yield* dispatchUnsupported(command);

@@ -12,4 +12,6 @@ Terminal MCP keeps the task working until it receives completion evidence and ve
 
 ChatGPT can delegate tasks through T3’s orchestration tools using its Terminal MCP command access. Children inherit the selected provider and model unless overridden; available choices include other configured providers. Delegation returns immediately, and completed results automatically continue the parent thread. Child tasks appear in the existing subagent activity and can be stopped there.
 
+ChatGPT can ask for missing information through a question card. Answer the card to continue the conversation; unanswered cards remain available after reconnecting. When ChatGPT finishes a turn while waiting for delegated tasks or a watched pull request, T3 shows the background activity and resumes the conversation when results or review updates arrive.
+
 This initial version supports text and image prompts, streamed responses, model switching, interrupt-and-restart steering, and PR linking through Terminal MCP. Images may be PNG, JPEG, WebP, or GIF up to 20 MiB each. Other file attachments, conversation rollback, and conversation forks are unavailable. Use another provider for titles, commit messages, and other text-generation helpers. Uncertain submissions are not automatically repeated.

@@ -265,6 +265,7 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
           attachMcp: yield* ChatGPTMcpBridge.make,
           recovery: { permit: yield* Semaphore.make(1), unavailableUntil: 0 },
           refreshThread: actions.refreshThread,
+          readWaitState: actions.readWaitState,
           resolveAttachmentPath: host.resolveAttachmentPath,
           linkPullRequest: actions.linkPullRequest,
         }),

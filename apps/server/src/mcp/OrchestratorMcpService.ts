@@ -23,6 +23,9 @@ import {
   type OrchestratorMcpDeleteScheduledTaskInput,
   type OrchestratorMcpRequestSecretInput,
   type OrchestratorMcpRequestSecretResult,
+  type OrchestratorMcpRequestUserInputInput,
+  type OrchestratorMcpRequestUserInputResult,
+  RuntimeRequestId,
   type OrchestratorMcpDeleteScheduledTaskResult,
   type OrchestratorMcpListScheduledTasksResult,
   type OrchestratorMcpRuntimeMode,
@@ -125,6 +128,10 @@ type TerminalTaskStatus = Extract<
 >;
 
 export interface OrchestratorMcpServiceShape {
+  readonly requestUserInput: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpRequestUserInputInput,
+  ) => Effect.Effect<OrchestratorMcpRequestUserInputResult, OrchestratorMcpFailure>;
   readonly capabilities: (
     scope: McpInvocationScope,
   ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
@@ -1716,6 +1723,33 @@ const make = Effect.gen(function* () {
           );
         return { scheduledTaskId: existing.id, deleted: true };
       }),
+    requestUserInput: (scope, input) =>
+      Effect.gen(function* () {
+        const { scope: threadScope, parent } = yield* loadThreadCaller(scope, "request_user_input");
+        const run = ThreadManagementService.latestActiveRun(parent);
+        if (!run?.rootNodeId || run.providerInstanceId !== threadScope.thread.providerInstanceId) {
+          return yield* failure(
+            "parent_not_active",
+            "A question requires an active run owned by this MCP provider session.",
+          );
+        }
+        const key = `${run.id}:${yield* requestKey(input.clientRequestId)}`;
+        const requestId = RuntimeRequestId.make(
+          `mcp-question:${stablePart(parent.thread.id)}:${stablePart(key)}`,
+        );
+        yield* threadManagement
+          .dispatch({
+            type: "user_input_request.record",
+            commandId: stableCommandId({ scope, requestKey: key, operation: "user-input" }),
+            threadId: parent.thread.id,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            requestId,
+            questions: input.questions,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        return { requestId };
+      }).pipe(Effect.withSpan("OrchestratorMcpService.requestUserInput")),
     requestSecret: (scope, input) =>
       Effect.gen(function* () {
         const { scope: threadScope, parent } = yield* loadThreadCaller(scope, "request_secret");

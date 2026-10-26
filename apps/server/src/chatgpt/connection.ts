@@ -142,7 +142,7 @@ export function executionPrompt(
   orchestrationCommand?: string,
   localMcpInventory?: LocalMcpInventory,
 ): string {
-  return `[T3 execution context]\nYour permanent Terminal MCP thread ID is: ${terminalId}\nWorkspace: ${JSON.stringify(cwd)}\nIf you use fedora_t3code tools, bootstrap and recover only with this exact ID and reuse it as session_id for every tool call. Never invent or substitute an ID. Only after using those tools, report verified completion with thread_task(action="complete", evidence=[...]), or call thread_task(action="wait", reason="...") if user input is required. Without fedora_t3code tool use, simply end your response normally.\n[/T3 execution context]\n${orchestrationCommand ? orchestrationPrompt(orchestrationCommand, terminalId) : ""}${localMcpPrompt(localMcpInventory, terminalId)}\n${text}`;
+  return `[T3 execution context]\nYour permanent Terminal MCP thread ID is: ${terminalId}\nWorkspace: ${JSON.stringify(cwd)}\nIf you use fedora_t3code tools, bootstrap and recover only with this exact ID and reuse it as session_id for every tool call. Never invent or substitute an ID. Only after using those tools, report verified completion with thread_task(action="complete", evidence=[...]). For missing user input, prefer the T3 request_user_input tool when the orchestration bridge is available; otherwise use thread_task(action="wait", reason="..."). For app-owned subagent or PR waits, end this turn so T3 can resume it. Without fedora_t3code tool use, simply end your response normally.\n[/T3 execution context]\n${orchestrationCommand ? orchestrationPrompt(orchestrationCommand, terminalId) : ""}${localMcpPrompt(localMcpInventory, terminalId)}\n${text}`;
 }
 
 class Cdp {
