@@ -32,6 +32,7 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 import {
   EventId,
   ProjectId,
@@ -51,6 +52,10 @@ import {
   storageCleanupPullRequestMerged,
   storageCleanupThreadIdle,
 } from "./storageCleanup.ts";
+
+// Cleanup fixtures must not discover the workstation's live Terminal registry.
+beforeEach(() => vi.stubEnv("T3_WORKSPACE_FENCE_DISABLED", "1"));
+afterEach(() => vi.unstubAllEnvs());
 
 const NOW_MS = Date.parse("2026-06-10T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
