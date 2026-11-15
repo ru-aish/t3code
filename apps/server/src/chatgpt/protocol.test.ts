@@ -117,8 +117,14 @@ describe("ChatGPT protocol", () => {
       "asdk_app_6ad23e985b608191984705f0c25f1ba3",
       "asdk_app_6a9b31f86efc81918287f37a02413746",
       "asdk_app_recreated_connection",
+      "fedora_t3code",
+      "fedora",
     ]) {
       const raw = approval(connectorId);
+      expect(normalizeStreamMessage(raw, "thread").connectorResponse).toEqual({
+        type: "confirm_action",
+        status: "pending",
+      });
       expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toEqual({
         messageId: "approval-message",
         connectorId,

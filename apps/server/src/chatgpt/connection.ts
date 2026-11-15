@@ -24,6 +24,7 @@ export type ChatGPTUpdate = {
   endTurn?: boolean | undefined;
   hidden?: boolean | undefined;
   createdAt?: number | undefined;
+  connectorResponse?: { type: string; status?: string } | undefined;
   fedoraApproval?:
     | {
         messageId: string;

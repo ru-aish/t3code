@@ -1130,7 +1130,7 @@ export const makeChatGPTAdapter = (
                     class: "provider_error",
                     code: "chatgpt_empty_tool_completion",
                     message:
-                      "ChatGPT ended after an empty tool response without a final answer. Retry the turn; if it repeats, check the Terminal MCP connector.",
+                      "ChatGPT stopped at a connector tool response without a final answer. The tool may not have been dispatched. Check the ChatGPT conversation for a pending approval or connector error before retrying; completed tool operations must not be replayed blindly.",
                     retryable: true,
                   }),
                 );

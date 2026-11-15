@@ -924,6 +924,8 @@ describe("ChatGPT interruption", () => {
     "asdk_app_6ad23e985b608191984705f0c25f1ba3",
     "asdk_app_6a9b31f86efc81918287f37a02413746",
     "asdk_app_recreated_connection",
+    "fedora_t3code",
+    "fedora",
   ])(
     "auto-approves successive Terminal prompts without losing output or polling (%s)",
     async (connectorId) => {

@@ -686,7 +686,9 @@ export function normalizeStreamMessage(
     callIds.every((id) => id === terminalId) &&
     (approvalBody?.connector_name === "fedora" ||
       approvalBody?.connector_name === "fedora_t3code") &&
-    connectorId.startsWith("asdk_app_") &&
+    (connectorId.startsWith("asdk_app_") ||
+      connectorId === "fedora_t3code" ||
+      connectorId === "fedora") &&
     linkId.startsWith("link_") &&
     route.length === 4 &&
     route[1] === connectorId &&
@@ -717,6 +719,16 @@ export function normalizeStreamMessage(
     text: displayText,
     status: message.status,
     endTurn: message.end_turn,
+    ...(typeof approvalServer?.type === "string"
+      ? {
+          connectorResponse: {
+            type: approvalServer.type,
+            ...(typeof approvalBody?.codex_mcp_elicitation?.status === "string"
+              ? { status: approvalBody.codex_mcp_elicitation.status }
+              : {}),
+          },
+        }
+      : {}),
     ...(fedoraApproval ? { fedoraApproval } : {}),
   };
 }
