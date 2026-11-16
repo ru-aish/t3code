@@ -924,6 +924,7 @@ describe("ChatGPT interruption", () => {
     "asdk_app_6ad23e985b608191984705f0c25f1ba3",
     "asdk_app_6a9b31f86efc81918287f37a02413746",
     "asdk_app_recreated_connection",
+    "asdk_app_parent_target",
     "fedora_t3code",
     "fedora",
   ])(
@@ -976,6 +977,11 @@ describe("ChatGPT interruption", () => {
                 },
               };
               latestHead = message;
+              if (connectorId === "asdk_app_parent_target") {
+                Reflect.deleteProperty(message.metadata.jit_plugin_data.from_server.body, "codex_mcp_elicitation");
+                Object.assign(message.metadata, { parent_id: `invocation-${index}` });
+                message.metadata.jit_plugin_data.from_server.body.actions[0]!.always_allow.target_message_id = `invocation-${index}`;
+              }
               const event = { conversation_id: "new-conversation", message };
               input.onUpdate?.(event);
               if (index === 2) input.onUpdate?.(event);
@@ -1032,7 +1038,7 @@ describe("ChatGPT interruption", () => {
                 metadata: {
                   jit_plugin_data: {
                     from_client: {
-                      target_message_id: `approval-${i}`,
+                      target_message_id: connectorId === "asdk_app_parent_target" ? `invocation-${i}` : `approval-${i}`,
                       type: "always_allow",
                     },
                   },

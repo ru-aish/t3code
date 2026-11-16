@@ -272,6 +272,7 @@ export function normalizeStreamMessage(
     end_turn?: boolean;
     content?: { parts?: unknown[]; text?: string };
     metadata?: {
+      parent_id?: string;
       is_visually_hidden_from_conversation?: boolean;
       model_dil_v2?: { fallbackMarkdown?: string };
       jit_plugin_data?: { from_server?: unknown };
@@ -694,21 +695,31 @@ export function normalizeStreamMessage(
     route[1] === connectorId &&
     route[2] === linkId &&
     /^[a-zA-Z0-9_]+$/.test(route[3] ?? "");
-  const offersAlwaysAllow =
-    approvalBody?.actions?.some(
-      (action) => action.always_allow?.target_message_id === message.id,
-    ) === true;
+  // New confirmation messages target the preceding assistant invocation rather
+  // than the tool response. Only accept that explicitly linked parent or self.
+  const targetMessageId = approvalBody?.actions
+    ?.map((action) => action.always_allow?.target_message_id)
+    .find((target) =>
+      typeof target === "string" &&
+      (target === message.id || target === metadata.parent_id),
+    );
+  const elicitation = approvalBody?.codex_mcp_elicitation;
   const fedoraApproval =
     message.author?.role === "tool" &&
     approvalServer?.type === "confirm_action" &&
-    approvalBody?.codex_mcp_elicitation?.kind === "mcpToolCall" &&
-    approvalBody.codex_mcp_elicitation.status === "pending" &&
+    (elicitation === undefined ||
+      (elicitation.kind === "mcpToolCall" && elicitation.status === "pending")) &&
     isScopedTerminalCall &&
-    offersAlwaysAllow &&
+    typeof targetMessageId === "string" &&
     typeof message.id === "string" &&
     connectorId.length > 0 &&
     linkId.length > 0
-      ? { messageId: message.id, connectorId, linkId }
+      ? {
+          messageId: message.id,
+          connectorId,
+          linkId,
+          ...(targetMessageId !== message.id ? { targetMessageId } : {}),
+        }
       : undefined;
   return {
     messageId: message.id,

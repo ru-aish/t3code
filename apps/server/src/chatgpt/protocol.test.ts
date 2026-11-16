@@ -160,6 +160,36 @@ describe("ChatGPT protocol", () => {
     }
   });
 
+  it("recognizes parent-targeted confirmations without elicitation metadata", () => {
+    const body = {
+      connector_id: "asdk_app_current",
+      connector_name: "fedora_t3code",
+      link_id: "link_current",
+      params: {
+        path: "/asdk_app_current/link_current/bootstrap_thread",
+        args: { thread_id: "thread" },
+      },
+      actions: [{ always_allow: { target_message_id: "invocation" } }],
+    };
+    const raw = {
+      id: "confirmation",
+      author: { role: "tool" },
+      end_turn: true,
+      content: { parts: [""] },
+      metadata: { parent_id: "invocation", jit_plugin_data: { from_server: { type: "confirm_action", body } } },
+    };
+    expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toEqual({
+      messageId: "confirmation", targetMessageId: "invocation",
+      connectorId: "asdk_app_current", linkId: "link_current",
+    });
+    expect(normalizeStreamMessage(raw, "other-thread").fedoraApproval).toBeUndefined();
+    body.actions[0]!.always_allow.target_message_id = "unrelated";
+    expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+    body.actions[0]!.always_allow.target_message_id = "invocation";
+    Object.assign(body, { codex_mcp_elicitation: { kind: "mcpToolCall", status: "accepted" } });
+    expect(normalizeStreamMessage(raw, "thread").fedoraApproval).toBeUndefined();
+  });
+
   it("uses a Markdown fallback instead of raw ChatGPT DIL when available", () => {
     const raw = `<box gap={2}><button onClick={()=>GenUI.openUrl("https://example.com/app")}>Download</button></box>`;
     expect(

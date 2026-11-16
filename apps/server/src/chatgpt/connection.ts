@@ -28,6 +28,7 @@ export type ChatGPTUpdate = {
   fedoraApproval?:
     | {
         messageId: string;
+        targetMessageId?: string;
         connectorId: string;
         linkId: string;
       }
@@ -888,8 +889,8 @@ export class ChatGPTConnection {
           }
           if(state.pendingApprovals.size===0){
             const server=head?.metadata?.jit_plugin_data?.from_server||head?.metadata?.elicitation_metadata?.plugin_data?.from_server;
-            if(server?.type==='confirm_action'&&server.body?.codex_mcp_elicitation?.status==='pending')
-              throw new Error('Another connector is awaiting approval; Fedora auto-approval is not permitted');
+            if(server?.type==='confirm_action'&&(!server.body?.codex_mcp_elicitation||server.body.codex_mcp_elicitation.status==='pending'))
+              throw new Error('Pending connector approval could not be verified for this Fedora thread; review it in ChatGPT');
             state.transitioning=false;
             emit('complete',value);
             return;
@@ -897,7 +898,7 @@ export class ChatGPTConnection {
           if(!state.conversationId||!conversation)throw new Error('Cannot approve Fedora without verified conversation state');
           const approval=normalize(head).fedoraApproval;
           const queued=approval&&state.pendingApprovals.get(approval.messageId);
-          if(!approval||!queued||approval.connectorId!==queued.connectorId||approval.linkId!==queued.linkId)
+          if(!approval||!queued||approval.connectorId!==queued.connectorId||approval.linkId!==queued.linkId||approval.targetMessageId!==queued.targetMessageId)
             throw new Error('Pending Fedora approval changed; cannot submit an unverified decision');
           state.pendingApprovals.clear();
           state.attemptedApprovals.add(approval.messageId);
@@ -918,7 +919,7 @@ export class ChatGPTConnection {
             messages:[{
               id:window.crypto.randomUUID(),author:{role:'tool',name:'api_tool.call_tool',metadata:{}},
               channel:null,content:{content_type:'text',parts:['']},create_time:Date.now()/1000,end_turn:null,
-              metadata:{jit_plugin_data:{from_client:{target_message_id:approval.messageId,type:'always_allow'}}},
+              metadata:{jit_plugin_data:{from_client:{target_message_id:approval.targetMessageId||approval.messageId,type:'always_allow'}}},
               recipient:'all',status:'finished_successfully',update_time:null,weight:1,
             }],
           };
