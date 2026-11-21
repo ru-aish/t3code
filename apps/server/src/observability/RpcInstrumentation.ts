@@ -36,6 +36,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverRefreshProviders]: "server",
   [WS_METHODS.serverListProviderCloudProjects]: "server",
   [WS_METHODS.serverRefreshChatGPTThread]: "server",
+  [WS_METHODS.serverGetChatGPTBackendStatus]: "server",
+  [WS_METHODS.serverControlChatGPTBackend]: "server",
   [WS_METHODS.serverCreateProviderCloudProject]: "server",
   [WS_METHODS.serverUpdateProvider]: "server",
   [WS_METHODS.providerAuthStart]: "provider",

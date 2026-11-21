@@ -1158,6 +1158,23 @@ export function createServerEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.threadId]),
       },
     }),
+    getChatGPTBackendStatus: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:get-chatgpt-backend-status",
+      tag: WS_METHODS.serverGetChatGPTBackendStatus,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
+    controlChatGPTBackend: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:control-chatgpt-backend",
+      tag: WS_METHODS.serverControlChatGPTBackend,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.action}:${input.serviceId ?? "all"}`,
+      },
+    }),
     listProviderCloudProjects: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:cloud-projects:list",
       tag: WS_METHODS.serverListProviderCloudProjects,

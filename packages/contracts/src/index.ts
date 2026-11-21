@@ -23,6 +23,7 @@ export * from "./usageLimitSourceId.ts";
 export * from "./providerPolicy.ts";
 export * from "./modelSelection.ts";
 export * from "./chatAttachment.ts";
+export * from "./chatgptBackend.ts";
 export * from "./checkpointDiff.ts";
 export * from "./model.ts";
 export * from "./keybindings.ts";
