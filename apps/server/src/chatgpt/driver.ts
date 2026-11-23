@@ -1,4 +1,5 @@
 import * as ChatGPTActions from "./actions.ts";
+import * as ChatGPTBackendManager from "./backendManager.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- A stable local environment namespace is derived from its state path.
 import * as NodeCrypto from "node:crypto";
 import { ChatGPTSettings, TextGenerationError, type ServerProvider } from "@t3tools/contracts";
@@ -44,6 +45,7 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
   create: (input) =>
     Effect.gen(function* () {
       const actions = yield* ChatGPTActions.ChatGPTActions;
+      const backendManager = yield* ChatGPTBackendManager.ChatGPTBackendManager;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* HostProcess.HomeDirectory;
@@ -204,7 +206,24 @@ export const ChatGPTDriver: ProviderDriver<ChatGPTSettings, ChatGPTDriverEnv> = 
       );
       // The registry subscribes to driver changes; it does not initiate discovery.
       // Probe once on activation so a cold cache needs no manual model refresh.
-      if (input.enabled) yield* refresh.pipe(Effect.forkScoped);
+      if (input.enabled) {
+        yield* Effect.gen(function* () {
+          const settings = yield* host.settings.get.pipe(Effect.option);
+          const autoStartEnabled =
+            settings._tag === "Some" ? settings.value.chatgptBackendAutoStart : true;
+          if (autoStartEnabled) {
+            yield* backendManager
+              .ensureStarted({
+                cdpEndpoint: input.config.cdpEndpoint,
+                terminalEndpoint: input.config.terminalEndpoint,
+                controlTokenFile: input.config.controlTokenFile,
+                autoStartEnabled,
+              })
+              .pipe(Effect.ignore);
+          }
+          yield* refresh;
+        }).pipe(Effect.forkScoped);
+      }
       const unsupported = () =>
         Effect.fail(
           new TextGenerationError({

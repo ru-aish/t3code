@@ -100,6 +100,8 @@ import {
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
   WS_METHODS,
+  ChatGPTBackendControlError,
+  ChatGPTSettings,
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -143,6 +145,8 @@ import {
 } from "./orchestration-v2/ShellStream.ts";
 import { ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION } from "./orchestration-v2/ProjectionStore.ts";
 import * as ChatGPTThreadSync from "./chatgpt/threadSync.ts";
+import * as ChatGPTBackendManager from "./chatgpt/backendManager.ts";
+const decodeChatGPTSettings = Schema.decodeSync(ChatGPTSettings);
 import { bufferLiveStream } from "./orchestration-v2/LiveStreamBudget.ts";
 import { coalesceThreadLiveStream } from "./orchestration-v2/ThreadLiveEventCoalescer.ts";
 import {
@@ -1182,6 +1186,33 @@ const layerWsRpc = (
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const chatGPTThreadSync = yield* ChatGPTThreadSync.ChatGPTThreadSync;
+      const chatGPTBackendManager = yield* ChatGPTBackendManager.ChatGPTBackendManager;
+      const resolveChatGPTBackendTarget = Effect.gen(function* () {
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ChatGPTBackendControlError({
+                detail: "Failed to read server settings for ChatGPT backend.",
+                cause,
+              }),
+          ),
+        );
+        const instances = Object.values(settings.providerInstances);
+        const preferred =
+          instances.find((inst) => inst.driver === "chatgpt" && inst.enabled) ??
+          instances.find((inst) => inst.driver === "chatgpt");
+        const parsed = preferred
+          ? yield* Schema.decodeUnknownEffect(ChatGPTSettings)(preferred.config).pipe(
+              Effect.orElseSucceed(() => decodeChatGPTSettings({})),
+            )
+          : decodeChatGPTSettings({});
+        return {
+          cdpEndpoint: parsed.cdpEndpoint,
+          terminalEndpoint: parsed.terminalEndpoint,
+          controlTokenFile: parsed.controlTokenFile,
+          autoStartEnabled: settings.chatgptBackendAutoStart,
+        };
+      });
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const mcpAppRequests = yield* McpAppRequests.McpAppRequests;
@@ -2163,6 +2194,27 @@ const layerWsRpc = (
           ),
         [WS_METHODS.serverRefreshChatGPTThread]: (input) =>
           chatGPTThreadSync.refresh(input.threadId),
+        [WS_METHODS.serverGetChatGPTBackendStatus]: () =>
+          resolveChatGPTBackendTarget.pipe(
+            Effect.flatMap((target) => chatGPTBackendManager.getStatus(target)),
+          ),
+        [WS_METHODS.serverControlChatGPTBackend]: (input) =>
+          Effect.gen(function* () {
+            const target = yield* resolveChatGPTBackendTarget;
+            const status = yield* chatGPTBackendManager.control(target, {
+              action: input.action,
+              ...(input.serviceId !== undefined ? { serviceId: input.serviceId } : {}),
+            });
+            if (input.action !== "stop") {
+              const instances = yield* providerInstances.listInstances;
+              yield* Effect.forEach(
+                instances.filter((inst) => inst.driverKind === "chatgpt" && inst.enabled),
+                (inst) => providerRegistry.refreshInstance(inst.instanceId).pipe(Effect.ignore),
+                { concurrency: "unbounded", discard: true },
+              );
+            }
+            return status;
+          }),
         [WS_METHODS.serverListProviderCloudProjects]: (input) =>
           Effect.gen(function* () {
             const instance = yield* providerInstances.getInstance(input.instanceId);
@@ -2429,6 +2481,13 @@ const layerWsRpc = (
             const settings = yield* providerInstanceMutation === undefined
               ? serverSettings.updateSettings(nextPatch)
               : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
+            if (patch.chatgptBackendAutoStart === true) {
+              yield* resolveChatGPTBackendTarget.pipe(
+                Effect.flatMap((target) => chatGPTBackendManager.ensureStarted(target)),
+                Effect.ignore,
+                Effect.forkDetach,
+              );
+            }
             return ServerSettings.redactServerSettingsForClient(settings);
           }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,

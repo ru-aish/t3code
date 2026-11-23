@@ -39,6 +39,11 @@ import {
   ProviderSetupError,
   ProviderSetupInput,
 } from "./providerSetup.ts";
+import {
+  ChatGPTBackendControlError,
+  ChatGPTBackendControlInput,
+  ChatGPTBackendStatus,
+} from "./chatgptBackend.ts";
 
 import {
   AcpRegistryAcceptUrlAuthInput,
@@ -467,6 +472,8 @@ export const WS_METHODS = {
   serverRefreshProviders: "server.refreshProviders",
   serverListProviderCloudProjects: "server.listProviderCloudProjects",
   serverRefreshChatGPTThread: "server.refreshChatGPTThread",
+  serverGetChatGPTBackendStatus: "server.getChatGPTBackendStatus",
+  serverControlChatGPTBackend: "server.controlChatGPTBackend",
   serverCreateProviderCloudProject: "server.createProviderCloudProject",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
@@ -615,6 +622,16 @@ const WsServerRefreshChatGPTThreadRpc = Rpc.make(WS_METHODS.serverRefreshChatGPT
   payload: Schema.Struct({ threadId: ThreadId }),
   success: Schema.Struct({ messageCount: NonNegativeInt }),
   error: Schema.Union([ChatGPTThreadRefreshError, EnvironmentAuthorizationError]),
+});
+const WsServerGetChatGPTBackendStatusRpc = Rpc.make(WS_METHODS.serverGetChatGPTBackendStatus, {
+  payload: Schema.Struct({}),
+  success: ChatGPTBackendStatus,
+  error: Schema.Union([ChatGPTBackendControlError, EnvironmentAuthorizationError]),
+});
+const WsServerControlChatGPTBackendRpc = Rpc.make(WS_METHODS.serverControlChatGPTBackend, {
+  payload: ChatGPTBackendControlInput,
+  success: ChatGPTBackendStatus,
+  error: Schema.Union([ChatGPTBackendControlError, EnvironmentAuthorizationError]),
 });
 const WsServerListProviderCloudProjectsRpc = Rpc.make(WS_METHODS.serverListProviderCloudProjects, {
   payload: Schema.Struct({ instanceId: ProviderInstanceId }),
@@ -1892,6 +1909,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRefreshProvidersRpc,
   WsServerListProviderCloudProjectsRpc,
   WsServerRefreshChatGPTThreadRpc,
+  WsServerGetChatGPTBackendStatusRpc,
+  WsServerControlChatGPTBackendRpc,
   WsServerCreateProviderCloudProjectRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,
